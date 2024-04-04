@@ -31,10 +31,10 @@
 #ifdef SPARSEMAP_DIAGNOSTIC
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wvariadic-macros"
-#define __skip_diag(format, ...) \
-  __skip_diag_(__FILE__, __LINE__, __func__, format, ##__VA_ARGS__)
+#define __sm_diag(format, ...) \
+  __sm_diag_(__FILE__, __LINE__, __func__, format, ##__VA_ARGS__)
 #pragma GCC diagnostic pop
-void __attribute__((format(printf, 4, 5))) __skip_diag_(const char *file,
+void __attribute__((format(printf, 4, 5))) __sm_diag_(const char *file,
   int line, const char *func, const char *format, ...)
 {
   va_list args;
@@ -44,7 +44,7 @@ void __attribute__((format(printf, 4, 5))) __skip_diag_(const char *file,
   va_end(args);
 }
 #else
-#define __skip_diag(file, line, func, format, ...) ((void)0)
+#define __sm_diag(file, line, func, format, ...) ((void)0)
 #endif
 
 #ifndef SPARSEMAP_ASSERT
@@ -634,6 +634,16 @@ __sm_get_size_impl(sparsemap_t *map)
 }
 
 /**
+ * Returns the aligned offset (aligned to sm_bitvec_t capacity).
+ */
+static sm_idx_t
+__sm_get_aligned_offset(size_t idx)
+{
+  const size_t capacity = SM_BITS_PER_VECTOR;
+  return ((idx / capacity) * capacity);
+}
+
+/**
  * Returns the byte offset of a __sm_chunk_t in m_data
  */
 static ssize_t
@@ -662,16 +672,6 @@ __sm_get_chunk_map_offset(sparsemap_t *map, size_t idx)
   }
 
   return ((ssize_t)(p - start));
-}
-
-/**
- * Returns the aligned offset (aligned to sm_bitvec_t capacity).
- */
-static sm_idx_t
-__sm_get_aligned_offset(size_t idx)
-{
-  const size_t capacity = SM_BITS_PER_VECTOR;
-  return ((idx / capacity) * capacity);
 }
 
 /**
@@ -734,10 +734,10 @@ __sm_remove_data(sparsemap_t *map, size_t offset, size_t gap_size)
 }
 
 /**
- *  Clears the whole buffer
- */
+*  Clears the whole buffer
+*/
 void
-__sm_clear(sparsemap_t *map)
+sparsemap_clear(sparsemap_t *map)
 {
   map->m_data_used = SM_SIZEOF_OVERHEAD;
   __sm_set_chunk_map_count(map, 0);
@@ -765,7 +765,7 @@ sparsemap_init(sparsemap_t *map, uint8_t *data, size_t size, size_t used)
   map->m_data = data;
   map->m_data_used = used;
   map->m_data_size = size == 0 ? UINT64_MAX : size;
-  __sm_clear(map);
+  sparsemap_clear(map);
 }
 
 /**
@@ -807,7 +807,7 @@ sparsemap_get_range_size(sparsemap_t *map)
 bool
 sparsemap_is_set(sparsemap_t *map, size_t idx)
 {
-  __sm_assert(get_size() >= SM_SIZEOF_OVERHEAD);
+  __sm_assert(sparsemap_get_size(map) >= SM_SIZEOF_OVERHEAD);
 
   /* Get the __sm_chunk_t which manages this index */
   ssize_t offset = __sm_get_chunk_map_offset(map, idx);
@@ -839,7 +839,7 @@ sparsemap_is_set(sparsemap_t *map, size_t idx)
 void
 sparsemap_set(sparsemap_t *map, size_t idx, bool value)
 {
-  __sm_assert(get_size() >= SM_SIZEOF_OVERHEAD);
+  __sm_assert(sparsemap_get_size(map) >= SM_SIZEOF_OVERHEAD);
 
   /* Get the __sm_chunk_t which manages this index */
   ssize_t offset = __sm_get_chunk_map_offset(map, idx);
@@ -968,7 +968,7 @@ sparsemap_set(sparsemap_t *map, size_t idx, bool value)
 #endif
     break;
   }
-  __sm_assert(get_size() >= SM_SIZEOF_OVERHEAD);
+  __sm_assert(sparsemap_get_size(map) >= SM_SIZEOF_OVERHEAD);
 }
 
 /**

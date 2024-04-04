@@ -1,180 +1,204 @@
-#include <sparsemap.h>
 #include <assert.h>
+#include <stdarg.h>
 #include <stdio.h>
 
-using namespace sparsemap;
+#include "../include/sparsemap.h"
 
-//
-// this code serves as a sample but also as a unittest.
-//
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wvariadic-macros"
+#define __diag(format, ...) \
+  __diag_(__FILE__, __LINE__, __func__, format, ##__VA_ARGS__)
+#pragma GCC diagnostic pop
+void __attribute__((format(printf, 4, 5))) __diag_(const char *file,
+  int line, const char *func, const char *format, ...)
+{
+  va_list args;
+  va_start(args, format);
+  fprintf(stderr, "%s:%d:%s(): ", file, line, func);
+  vfprintf(stderr, format, args);
+  va_end(args);
+}
+
+// NOTE: currently, this code serves as a sample and unittest.
+
 int main() {
   int size = 4;
-  setbuf(stdout, 0); // disable printf() buffering 
-  printf("Please wait a moment.");
+  __diag("Please wait a moment...");
 #if 1
   uint8_t buffer[1024];
   uint8_t buffer2[1024];
+  sparsemap_t *map = sparsemap(buffer, sizeof(buffer), 0);
+  assert(sparsemap_get_size(map) == size);
+  sparsemap_set(map, 0, true);
+  assert(sparsemap_get_size(map) == size + 4 + 8 + 8);
+  assert(sparsemap_is_set(map, 0) == true);
+  assert(sparsemap_get_size(map) == size + 4 + 8 + 8);
+  assert(sparsemap_is_set(map, 1) == false);
+  sparsemap_set(map, 0, false);
+  assert(sparsemap_get_size(map) == size);
 
-  SparseMap<uint32_t, uint64_t> sm;
-  sm.create(buffer, sizeof(buffer));
-  assert(sm.get_size() == size);
-  sm.set(0, true);
-  assert(sm.get_size() == size + 4 + 8 + 8);
-  assert(sm.is_set(0) == true);
-  assert(sm.get_size() == size + 4 + 8 + 8);
-  assert(sm.is_set(1) == false);
-  sm.set(0, false);
-  assert(sm.get_size() == size);
+  sparsemap_clear(map);
+  sparsemap_set(map, 64, true);
+  assert(sparsemap_is_set(map, 64) == true);
+  assert(sparsemap_get_size(map) == size + 4 + 8 + 8);
 
-  sm.clear();
-  sm.set(64, true);
-  assert(sm.is_set(64) == true);
-  assert(sm.get_size() == size + 4 + 8 + 8);
-
-  sm.clear();
-  printf(".");
+  sparsemap_clear(map);
+  __diag(".");
 
   // set [0..100000]
   for (int i = 0; i < 100000; i++) {
-    assert(sm.is_set(i) == false);
-    sm.set(i, true);
+    assert(sparsemap_is_set(map, i) == false);
+    sparsemap_set(map, i, true);
     if (i > 5) {
-      for (int j = i - 5; j <= i; j++)
-        assert(sm.is_set(j) == true);
+      for (int j = i - 5; j <= i; j++) {
+        assert(sparsemap_is_set(map, j) == true);
+      }
     }
 
-    assert(sm.is_set(i) == true);
+    assert(sparsemap_is_set(map, i) == true);
   }
 
-  printf(".");
+  __diag(".");
 
-  for (int i = 0; i < 100000; i++)
-    assert(sm.is_set(i) == true);
+  for (int i = 0; i < 100000; i++) {
+    assert(sparsemap_is_set(map, i) == true);
+  }
 
   // unset [0..10000]
   for (int i = 0; i < 10000; i++) {
-    assert(sm.is_set(i) == true);
-    sm.set(i, false);
-    assert(sm.is_set(i) == false);
+    assert(sparsemap_is_set(map, i) == true);
+    sparsemap_set(map, i, false);
+    assert(sparsemap_is_set(map, i) == false);
   }
 
-  for (int i = 0; i < 10000; i++)
-    assert(sm.is_set(i) == false);
+  for (int i = 0; i < 10000; i++) {
+    assert(sparsemap_is_set(map, i) == false);
+  }
 
-  sm.clear();
-  printf(".");
+  sparsemap_clear(map);
+  __diag(".");
 
   // set [10000..0]
   for (int i = 10000; i >= 0; i--) {
-    assert(sm.is_set(i) == false);
-    sm.set(i, true);
-    assert(sm.is_set(i) == true);
+    assert(sparsemap_is_set(map, i) == false);
+    sparsemap_set(map, i, true);
+    assert(sparsemap_is_set(map, i) == true);
   }
 
-  for (int i = 10000; i >= 0; i--)
-    assert(sm.is_set(i) == true);
-  printf(".");
+  for (int i = 10000; i >= 0; i--) {
+    assert(sparsemap_is_set(map, i) == true);
+    __diag(".");
+  }
 
   // open and compare
-  SparseMap<uint32_t, uint64_t> sm2;
-  sm2.open(buffer, sizeof(buffer));
-  for (int i = 0; i < 10000; i++)
-    assert(sm2.is_set(i) == sm.is_set(i));
+  sparsemap_t *sm2 = sparsemap_open(buffer, sizeof(buffer));
+  for (int i = 0; i < 10000; i++) {
+    assert(sparsemap_is_set(sm2, i) == sparsemap_is_set(map, i));
+  }
 
   // unset [10000..0]
   for (int i = 10000; i >= 0; i--) {
-    assert(sm.is_set(i) == true);
-    sm.set(i, false);
-    assert(sm.is_set(i) == false);
+    assert(sparsemap_is_set(map, i) == true);
+    sparsemap_set(map, i, false);
+    assert(sparsemap_is_set(map, i) == false);
   }
 
-  for (int i = 10000; i >= 0; i--)
-    assert(sm.is_set(i) == false);
+  for (int i = 10000; i >= 0; i--) {
+    assert(sparsemap_is_set(map, i) == false);
+  }
 
-  printf(".");
-  sm.clear();
+  __diag(".");
+  sparsemap_clear(map);
 
-  sm.set(0, true);
-  sm.set(2048 * 2 + 1, true);
-  assert(sm.is_set(0) == true);
-  assert(sm.is_set(2048 * 2 + 0) == false);
-  assert(sm.is_set(2048 * 2 + 1) == true);
-  assert(sm.is_set(2048 * 2 + 2) == false);
-  sm.set(2048, true);
-  assert(sm.is_set(0) == true);
-  assert(sm.is_set(2047) == false);
-  assert(sm.is_set(2048) == true);
-  assert(sm.is_set(2049) == false);
-  assert(sm.is_set(2048 * 2 + 2) == false);
-  assert(sm.is_set(2048 * 2 + 0) == false);
-  assert(sm.is_set(2048 * 2 + 1) == true);
-  assert(sm.is_set(2048 * 2 + 2) == false);
+  sparsemap_set(map, 0, true);
+  sparsemap_set(map, 2048 * 2 + 1, true);
+  assert(sparsemap_is_set(map, 0) == true);
+  assert(sparsemap_is_set(map, 2048 * 2 + 0) == false);
+  assert(sparsemap_is_set(map, 2048 * 2 + 1) == true);
+  assert(sparsemap_is_set(map, 2048 * 2 + 2) == false);
+  sparsemap_set(map, 2048, true);
+  assert(sparsemap_is_set(map, 0) == true);
+  assert(sparsemap_is_set(map, 2047) == false);
+  assert(sparsemap_is_set(map, 2048) == true);
+  assert(sparsemap_is_set(map, 2049) == false);
+  assert(sparsemap_is_set(map, 2048 * 2 + 2) == false);
+  assert(sparsemap_is_set(map, 2048 * 2 + 0) == false);
+  assert(sparsemap_is_set(map, 2048 * 2 + 1) == true);
+  assert(sparsemap_is_set(map, 2048 * 2 + 2) == false);
 
-  sm.clear();
-  printf(".");
+  sparsemap_clear(map);
+  __diag(".");
 
-  for (int i = 0; i < 100000; i++)
-    sm.set(i, true);
-  for (int i = 0; i < 100000; i++)
-    assert(sm.select(i) == (unsigned)i);
+  for (int i = 0; i < 100000; i++) {
+    sparsemap_set(map, i, true);
+  }
+  for (int i = 0; i < 100000; i++) {
+    assert(sparsemap_select(map, i) == (unsigned)i);
+  }
 
-  sm.clear();
-  printf(".");
+  sparsemap_clear(map);
+  __diag(".");
 
-  for (int i = 1; i < 513; i++)
-    sm.set(i, true);
-  for (int i = 1; i < 513; i++)
-    assert(sm.select(i - 1) == (unsigned)i);
+  for (int i = 1; i < 513; i++) {
+    sparsemap_set(map, i, true);
+  }
+  for (int i = 1; i < 513; i++) {
+    assert(sparsemap_select(map, i - 1) == (unsigned)i);
+  }
 
-  sm.clear();
-  printf(".");
+  sparsemap_clear(map);
+  __diag(".");
 
-  for (int i = 0; i < 8; i++)
-    sm.set(i * 10, true);
-  for (int i = 0; i < 8; i++)
-    assert(sm.select(i) == (unsigned)i * 10);
+  for (size_t i = 0; i < 8; i++) {
+    sparsemap_set(map, i * 10, true);
+  }
+  for (size_t i = 0; i < 8; i++) {
+    assert(sparsemap_select(map, i) == i * 10);
+  }
 
   // split and move, aligned to MiniMap capacity
-  sm2.create(buffer2, sizeof(buffer2));
-  sm.clear();
-  for (int i = 0; i < 2048 * 2; i++)
-    sm.set(i, true);
-  sm.split(2048, &sm2);
+  sm2 = sparsemap(buffer2, sizeof(buffer2), 0);
+  sparsemap_clear(sm2);
+  for (int i = 0; i < 2048 * 2; i++) {
+    sparsemap_set(map, i, true);
+  }
+  sparsemap_split(map, 2048, sm2);
   for (int i = 0; i < 2048; i++) {
-    assert(sm.is_set(i) == true);
-    assert(sm2.is_set(i) == false);
+    assert(sparsemap_is_set(map, i) == true);
+    assert(sparsemap_is_set(sm2, i) == false);
   }
   for (int i = 2048; i < 2048 * 2; i++) {
-    assert(sm.is_set(i) == false);
-    assert(sm2.is_set(i) == true);
+    assert(sparsemap_is_set(map, i) == false);
+    assert(sparsemap_is_set(sm2, i) == true);
   }
-  printf(".");
+  __diag(".");
 
   // split and move, aligned to BitVector capacity
-  sm2.create(buffer2, sizeof(buffer2));
-  sm.clear();
-  for (int i = 0; i < 2048 * 3; i++)
-    sm.set(i, true);
-  sm.split(64, &sm2);
+  sm2 = sparsemap(buffer2, sizeof(buffer2), 0);
+  sparsemap_clear(map);
+  for (int i = 0; i < 2048 * 3; i++) {
+    sparsemap_set(map, i, true);
+  }
+  sparsemap_split(map, 64, sm2);
   for (int i = 0; i < 64; i++) {
-    assert(sm.is_set(i) == true);
-    assert(sm2.is_set(i) == false);
+    assert(sparsemap_is_set(map, i) == true);
+    assert(sparsemap_is_set(sm2, i) == false);
   }
   for (int i = 64; i < 2048 * 3; i++) {
-    assert(sm.is_set(i) == false);
-    assert(sm2.is_set(i) == true);
+    assert(sparsemap_is_set(map, i) == false);
+    assert(sparsemap_is_set(sm2, i) == true);
   }
 
-  printf("ok\n");
+  __diag("ok\n");
 #else
   //
   // This code was used to create the lookup table for
   // sparsemap::MiniMap<>::calc_vector_size()
   //
-  printf("   ");
+  __diag("   ");
   for (unsigned int ch = 0; ch <= 0xff; ch++) {
     if (ch > 0 && ch % 16 == 0)
-      printf("\n   ");
+      __diag("\n   ");
 
     /*
     // check if value is invalid (contains 2#01)
@@ -182,8 +206,8 @@ int main() {
         || (ch & (0x3 << 2)) >> 2 == 1
         || (ch & (0x3 << 4)) >> 4 == 1
         || (ch & (0x3 << 6)) >> 6 == 1) {
-      //printf("%d: -1\n", (int)ch);
-      printf(" -1,");
+      //__diag("%d: -1\n", (int)ch);
+      __diag(" -1,");
       continue;
     }
     */
@@ -198,8 +222,8 @@ int main() {
       size++;
     if ((ch & (0x3 << 6)) >> 6 == 2)
       size++;
-    //printf("%u: %d\n", (unsigned int)ch, size);
-    printf("  %d,", size);
+    //__diag("%u: %d\n", (unsigned int)ch, size);
+    __diag("  %d,", size);
   }
 #endif
 }

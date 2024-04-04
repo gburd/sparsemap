@@ -80,6 +80,9 @@ sparsemap_t *sparsemap(uint8_t *data, size_t size, size_t used);
 /* Initialize sparsemap_t with data. */
 void sparsemap_init(sparsemap_t *map, uint8_t *data, size_t size, size_t used);
 
+/* Clears the whole buffer. */
+void sparsemap_clear(sparsemap_t *map);
+
 /* Opens an existing sparsemap at the specified buffer. */
 sparsemap_t *sparsemap_open(uint8_t *data, size_t data_size);
 
