@@ -1,33 +1,27 @@
 #include <assert.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 #include "../include/sparsemap.h"
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wvariadic-macros"
-#define __diag(format, ...) \
-  __diag_(__FILE__, __LINE__, __func__, format, ##__VA_ARGS__)
+#define __diag(...) \
+        do { fprintf(stderr, "%s:%d:%s(): ",__FILE__, __LINE__, __func__);\
+             fprintf(stderr, __VA_ARGS__); } while (0)
 #pragma GCC diagnostic pop
-void __attribute__((format(printf, 4, 5))) __diag_(const char *file,
-  int line, const char *func, const char *format, ...)
-{
-  va_list args;
-  va_start(args, format);
-  fprintf(stderr, "%s:%d:%s(): ", file, line, func);
-  vfprintf(stderr, format, args);
-  va_end(args);
-}
 
 // NOTE: currently, this code serves as a sample and unittest.
 
 int main() {
-  int size = 4;
+  size_t size = 4;
+  setbuf(stderr, 0); // disable buffering
   __diag("Please wait a moment...");
-#if 1
+  sparsemap_t mmap, *map = &mmap;
   uint8_t buffer[1024];
   uint8_t buffer2[1024];
-  sparsemap_t *map = sparsemap(buffer, sizeof(buffer), 0);
+  sparsemap_init(map, buffer, sizeof(buffer), 0);
   assert(sparsemap_get_size(map) == size);
   sparsemap_set(map, 0, true);
   assert(sparsemap_get_size(map) == size + 4 + 8 + 8);
@@ -43,7 +37,7 @@ int main() {
   assert(sparsemap_get_size(map) == size + 4 + 8 + 8);
 
   sparsemap_clear(map);
-  __diag(".");
+  fprintf(stderr, ".");
 
   // set [0..100000]
   for (int i = 0; i < 100000; i++) {
@@ -58,7 +52,7 @@ int main() {
     assert(sparsemap_is_set(map, i) == true);
   }
 
-  __diag(".");
+  fprintf(stderr, ".");
 
   for (int i = 0; i < 100000; i++) {
     assert(sparsemap_is_set(map, i) == true);
@@ -76,7 +70,7 @@ int main() {
   }
 
   sparsemap_clear(map);
-  __diag(".");
+  fprintf(stderr, ".");
 
   // set [10000..0]
   for (int i = 10000; i >= 0; i--) {
@@ -87,7 +81,7 @@ int main() {
 
   for (int i = 10000; i >= 0; i--) {
     assert(sparsemap_is_set(map, i) == true);
-    __diag(".");
+    fprintf(stderr, ".");
   }
 
   // open and compare
@@ -95,6 +89,7 @@ int main() {
   for (int i = 0; i < 10000; i++) {
     assert(sparsemap_is_set(sm2, i) == sparsemap_is_set(map, i));
   }
+  free(sm2);
 
   // unset [10000..0]
   for (int i = 10000; i >= 0; i--) {
@@ -107,7 +102,7 @@ int main() {
     assert(sparsemap_is_set(map, i) == false);
   }
 
-  __diag(".");
+  fprintf(stderr, ".");
   sparsemap_clear(map);
 
   sparsemap_set(map, 0, true);
@@ -127,7 +122,7 @@ int main() {
   assert(sparsemap_is_set(map, 2048 * 2 + 2) == false);
 
   sparsemap_clear(map);
-  __diag(".");
+  fprintf(stderr, ".");
 
   for (int i = 0; i < 100000; i++) {
     sparsemap_set(map, i, true);
@@ -137,7 +132,7 @@ int main() {
   }
 
   sparsemap_clear(map);
-  __diag(".");
+  fprintf(stderr, ".");
 
   for (int i = 1; i < 513; i++) {
     sparsemap_set(map, i, true);
@@ -147,7 +142,7 @@ int main() {
   }
 
   sparsemap_clear(map);
-  __diag(".");
+  fprintf(stderr, ".");
 
   for (size_t i = 0; i < 8; i++) {
     sparsemap_set(map, i * 10, true);
@@ -157,7 +152,9 @@ int main() {
   }
 
   // split and move, aligned to MiniMap capacity
-  sm2 = sparsemap(buffer2, sizeof(buffer2), 0);
+  sparsemap_t _sm2;
+  sm2 = &_sm2;
+  sparsemap_init(sm2, buffer2, sizeof(buffer2), 0);
   sparsemap_clear(sm2);
   for (int i = 0; i < 2048 * 2; i++) {
     sparsemap_set(map, i, true);
@@ -171,10 +168,10 @@ int main() {
     assert(sparsemap_is_set(map, i) == false);
     assert(sparsemap_is_set(sm2, i) == true);
   }
-  __diag(".");
+  fprintf(stderr, ".");
 
   // split and move, aligned to BitVector capacity
-  sm2 = sparsemap(buffer2, sizeof(buffer2), 0);
+  sparsemap_init(sm2, buffer2, sizeof(buffer2), 0);
   sparsemap_clear(map);
   for (int i = 0; i < 2048 * 3; i++) {
     sparsemap_set(map, i, true);
@@ -189,41 +186,5 @@ int main() {
     assert(sparsemap_is_set(sm2, i) == true);
   }
 
-  __diag("ok\n");
-#else
-  //
-  // This code was used to create the lookup table for
-  // sparsemap::MiniMap<>::calc_vector_size()
-  //
-  __diag("   ");
-  for (unsigned int ch = 0; ch <= 0xff; ch++) {
-    if (ch > 0 && ch % 16 == 0)
-      __diag("\n   ");
-
-    /*
-    // check if value is invalid (contains 2#01)
-    if ((ch & (0x3 << 0)) >> 0 == 1
-        || (ch & (0x3 << 2)) >> 2 == 1
-        || (ch & (0x3 << 4)) >> 4 == 1
-        || (ch & (0x3 << 6)) >> 6 == 1) {
-      //__diag("%d: -1\n", (int)ch);
-      __diag(" -1,");
-      continue;
-    }
-    */
-
-    // count all occurrences of 2#10
-    int size = 0;
-    if ((ch & (0x3 << 0)) >> 0 == 2)
-      size++;
-    if ((ch & (0x3 << 2)) >> 2 == 2)
-      size++;
-    if ((ch & (0x3 << 4)) >> 4 == 2)
-      size++;
-    if ((ch & (0x3 << 6)) >> 6 == 2)
-      size++;
-    //__diag("%u: %d\n", (unsigned int)ch, size);
-    __diag("  %d,", size);
+  fprintf(stderr, " ok\n");
   }
-#endif
-}
