@@ -1,3 +1,13 @@
+#if defined(__GNUC__) && (__GNUC__ >= 4)
+
+// Default to using the GCC builtin popcount.  On architectures with
+// -march popcnt, this compiles to a single popcnt instruction.
+#ifndef popcountll
+#define popcountll __builtin_popcountll
+#else
+#define popcountll sux_popcountll
+#endif
+#else
 /*
  *
  * from https://github.com/efficient/rankselect/popcount.h
@@ -49,7 +59,7 @@
 // http://sux.dsi.unimi.it/paper.pdf p4
 // This variant uses multiplication for the last summation instead of
 // continuing the shift/mask/addition chain.
-inline int suxpopcount(uint64_t x) {
+inline int sux_popcountll(uint64_t x) {
     // Step 1:  00 - 00 = 0;  01 - 00 = 01; 10 - 01 = 01; 11 - 01 = 10;
     x = x - ((x & G2) >> 1);
     // step 2:  add 2 groups of 2.
@@ -61,12 +71,5 @@ inline int suxpopcount(uint64_t x) {
     return x;
 }
 
-// Default to using the GCC builtin popcount.  On architectures
-// with -march popcnt, this compiles to a single popcnt instruction.
-#ifndef popcount
-#  define popcount __builtin_popcountll
-#else
-#  define popcount suxpopcount
-#endif
-
 #endif /* _FASTRANK_POPCOUNT_H_ */
+#endif

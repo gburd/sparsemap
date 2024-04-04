@@ -1,8 +1,8 @@
-libsparesemap.a
-libsparesemap.so
+*.a
+*.so
 **/*.o
 tests/test
-examples/main
+examples/ex_??
 .cache
 hints.txt
 tmp/

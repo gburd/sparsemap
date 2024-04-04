@@ -1,1021 +1,1199 @@
-//
-// SparseMap
-//
-// This is an implementation for a sparse, compressed bitmap. It is resizable
-// and mutable, with ok performance for random access modifications
-// and lookups.
-//
-// The implementation is separated into tiers.
-//
-// Tier 0 (lowest): bits are stored in a BitVector (usually a uint64_t).
-//
-// Tier 1 (middle): multiple BitVectors are managed in a MiniMap. The MiniMap
-//    only stores those BitVectors that have a mixed payload of bits (i.e.
-//    some bits are 1, some are 0). As soon as ALL bits in a BitVector are
-//    identical, this BitVector is no longer stored. (This is the compression
-//    aspect.)
-//    The MiniMap therefore stores additional flags (2 bit) for each BitVector
-//    in an additional word (same size as the BitVector itself).
-//
-//     00 11 22 33
-//     ^-- descriptor for BitVector 1
-//        ^-- descriptor for BitVector 2
-//           ^-- descriptor for BitVector 3
-//              ^-- descriptor for BitVector 4
-//
-//    Those flags (*) can have one of the following values:
-//
-//     00   The BitVector is all zero -> BitVector is not stored
-//     11   The BitVector is all one -> BitVector is not stored
-//     10   The BitVector contains a bitmap -> BitVector is stored
-//     01   The BitVector is not used (**)
-//
-//    The serialized size of a MiniMap in memory therefore is at least
-//    one BitVector for the flags, and (optionally) additional BitVectors
-//    if they are required.
-//
-//    (*) The code comments often use the Erlang format for binary
-//    representation, i.e. 2#10 for (binary) 01.
-//
-//    (**) This flag is set to reduce the capacity of a MiniMap. This is
-//    a hamsterdb-specific extension.
-//
-// Tier 2 (highest): the SparseMap manages multiple MiniMaps. Each MiniMap
-//    has its own offset (relative to the offset of the SparseMap). In
-//    addition, the SparseMap manages the memory of the MiniMap, and
-//    is able to grow or shrink that memory as required.
-//
+/*
+ * Copyright (c) 2024
+ *	Gregory Burd <greg@burd.me>.  All rights reserved.
+ *
+ * ISC License Permission to use, copy, modify, and/or distribute this software
+ * for any purpose with or without fee is hereby granted, provided that the
+ * above copyright notice and this permission notice appear in all copies.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH
+ * REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY
+ * AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT,
+ * INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM
+ * LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR
+ * OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
+ * PERFORMANCE OF THIS SOFTWARE.
+ */
 
-#ifndef SPARSEMAP_H
-#define SPARSEMAP_H
-
-#include <stdint.h>
-#include <stdio.h>
-#include <string.h>
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
 #include <assert.h>
-#include <stdexcept>
-#include <limits>
+#include <stdarg.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdlib.h>
+#pragma GCC diagnostic pop
 
-#include "popcount.h"
+#include <popcount.h>
+#include <sparsemap.h>
 
-
-namespace sparsemap {
-
-//
-// This helper structure is returned by MiniMap::set()
-//
-template<typename BitVector>
-struct MultiReturn
+#ifdef SPARSEMAP_DIAGNOSTIC
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wvariadic-macros"
+#define __skip_diag(format, ...) \
+  __skip_diag_(__FILE__, __LINE__, __func__, format, ##__VA_ARGS__)
+#pragma GCC diagnostic pop
+void __attribute__((format(printf, 4, 5))) __skip_diag_(const char *file,
+  int line, const char *func, const char *format, ...)
 {
-  // the return code - kOk, kNeedsToGrow, kNeedsToShrink
-  int code;
+  va_list args;
+  va_start(args, format);
+  fprintf(stderr, "%s:%d:%s(): ", file, line, func);
+  vfprintf(stderr, format, args);
+  va_end(args);
+}
+#else
+#define __skip_diag(file, line, func, format, ...) ((void)0)
+#endif
 
-  // the position of the BitVector which is inserted/deleted
-  int position;
+#ifndef SPARSEMAP_ASSERT
+#define SPARSEMAP_ASSERT
+#define __sm_assert(expr)                                                 \
+  if (!(expr))                                                            \
+  fprintf(stderr, "%s:%d:%s(): assertion failed! %s", __FILE__, __LINE__, \
+    __func__, #expr)
+#else
+#define __sm_assert(expr) ((void)0)
+#endif
 
-  // the value of the fill word (for growing)
-  BitVector fill;
+enum __SM_CHUNK_INFO {
+  /* metadata overhead: 4 bytes for __sm_chunk_t count */
+  SM_SIZEOF_OVERHEAD = sizeof(uint32_t),
 
-  // Constructor
-  MultiReturn(int _code, int _position, BitVector _fill)
-    : code(_code), position(_position), fill(_fill) {
+  /* number of bits that can be stored in a BitVector */
+  SM_BITS_PER_VECTOR = (sizeof(sm_bitvec_t) * 8),
+
+  /* number of flags that can be stored in a single index byte */
+  SM_FLAGS_PER_INDEX_BYTE = 4,
+
+  /* number of flags that can be stored in the index */
+  SM_FLAGS_PER_INDEX = (sizeof(sm_bitvec_t) * SM_FLAGS_PER_INDEX_BYTE),
+
+  /* maximum capacity of a __sm_chunk (in bits) */
+  SM_CHUNK_MAX_CAPACITY = (SM_BITS_PER_VECTOR * SM_FLAGS_PER_INDEX),
+
+  /* sm_bitvec_t payload is all zeros (2#00) */
+  SM_PAYLOAD_ZEROS = 0,
+
+  /* sm_bitvec_t payload is all ones (2#11) */
+  SM_PAYLOAD_ONES = 3,
+
+  /* sm_bitvec_t payload is mixed (2#10) */
+  SM_PAYLOAD_MIXED = 2,
+
+  /* sm_bitvec_t is not used (2#01) */
+  SM_PAYLOAD_NONE = 1,
+
+  /* a mask for checking flags (2 bits) */
+  SM_FLAG_MASK = 3,
+
+  /* return code for set(): ok, no further action required */
+  SM_OK = 0,
+
+  /* return code for set(): needs to grow this __sm_chunk_t */
+  SM_NEEDS_TO_GROW = 1,
+
+  /* return code for set(): needs to shrink this __sm_chunk_t */
+  SM_NEEDS_TO_SHRINK = 2
+};
+
+typedef struct {
+  sm_bitvec_t *m_data;
+} __sm_chunk_t;
+
+/**
+ * Calculates the number of sm_bitvec_ts required by a single byte with flags
+ * (in m_data[0]).
+ */
+static size_t
+__sm_chunk_map_calc_vector_size(uint8_t b)
+{
+  // clang-format off
+  static int lookup[] = {
+    0,  0,  1,  0,  0,  0,  1,  0,  1,  1,  2,  1,  0,  0,  1,  0,
+    0,  0,  1,  0,  0,  0,  1,  0,  1,  1,  2,  1,  0,  0,  1,  0,
+    1,  1,  2,  1,  1,  1,  2,  1,  2,  2,  3,  2,  1,  1,  2,  1,
+    0,  0,  1,  0,  0,  0,  1,  0,  1,  1,  2,  1,  0,  0,  1,  0,
+    0,  0,  1,  0,  0,  0,  1,  0,  1,  1,  2,  1,  0,  0,  1,  0,
+    0,  0,  1,  0,  0,  0,  1,  0,  1,  1,  2,  1,  0,  0,  1,  0,
+    1,  1,  2,  1,  1,  1,  2,  1,  2,  2,  3,  2,  1,  1,  2,  1,
+    0,  0,  1,  0,  0,  0,  1,  0,  1,  1,  2,  1,  0,  0,  1,  0,
+    1,  1,  2,  1,  1,  1,  2,  1,  2,  2,  3,  2,  1,  1,  2,  1,
+    1,  1,  2,  1,  1,  1,  2,  1,  2,  2,  3,  2,  1,  1,  2,  1,
+    2,  2,  3,  2,  2,  2,  3,  2,  3,  3,  4,  3,  2,  2,  3,  2,
+    1,  1,  2,  1,  1,  1,  2,  1,  2,  2,  3,  2,  1,  1,  2,  1,
+    0,  0,  1,  0,  0,  0,  1,  0,  1,  1,  2,  1,  0,  0,  1,  0,
+    0,  0,  1,  0,  0,  0,  1,  0,  1,  1,  2,  1,  0,  0,  1,  0,
+    1,  1,  2,  1,  1,  1,  2,  1,  2,  2,  3,  2,  1,  1,  2,  1,
+    0,  0,  1,  0,  0,  0,  1,  0,  1,  1,  2,  1,  0,  0,  1,  0
+  };
+  // clang-format on
+  return ((size_t)lookup[b]);
+}
+
+/**
+ * Returns the position of a sm_bitvec_t in m_data.
+ */
+static size_t
+__sm_chunk_map_get_position(__sm_chunk_t *map, size_t bv)
+{
+  // handle 4 indices (1 byte) at a time
+  size_t num_bytes = bv /
+    ((size_t)SM_FLAGS_PER_INDEX_BYTE * SM_BITS_PER_VECTOR);
+
+  size_t position = 0;
+  register uint8_t *p = (uint8_t *)map->m_data;
+  for (size_t i = 0; i < num_bytes; i++, p++) {
+    position += __sm_chunk_map_calc_vector_size(*p);
   }
-};
 
-
-//
-// The MiniMap is usually not used directly; it is used by the SparseMap
-// and can store up to 2048 bits.
-//
-template<typename BitVector>
-class MiniMap {
-  public:
-    enum {
-      // number of bits that can be stored in a BitVector
-      kBitsPerVector = sizeof(BitVector) * 8,
-
-      // number of flags that can be stored in a single index byte
-      kFlagsPerIndexByte = 4,
-
-      // number of flags that can be stored in the index
-      kFlagsPerIndex = sizeof(BitVector) * kFlagsPerIndexByte,
-
-      // maximum capacity of a MiniMap (in bits)
-      kMaxCapacity = kBitsPerVector * kFlagsPerIndex,
-
-      // BitVector payload is all zeroes (2#00)
-      kPayloadZeroes = 0,
-
-      // BitVector payload is all ones (2#11)
-      kPayloadOnes = 3,
-
-      // BitVector payload is mixed (2#10)
-      kPayloadMixed = 2,
-
-      // BitVector is not used (2#01)
-      kPayloadNone = 1,
-
-      // a mask for checking flags (2 bits)
-      kFlagMask = 3,
-
-      // return code for set(): ok, no further action required
-      kOk,
-
-      // return code for set(): needs to grow this MiniMap
-      kNeedsToGrow,
-
-      // return code for set(): needs to shrink this MiniMap
-      kNeedsToShrink
-    };
-
-  public:
-    // Constructor
-    MiniMap(uint8_t *data)
-      : m_data((BitVector *)data) {
+  bv -= num_bytes * SM_FLAGS_PER_INDEX_BYTE;
+  for (size_t i = 0; i < bv; i++) {
+    size_t flags = ((*map->m_data) & ((sm_bitvec_t)SM_FLAG_MASK << (i * 2))) >>
+      (i * 2);
+    if (flags == SM_PAYLOAD_MIXED) {
+      position++;
     }
+  }
 
-    // Sets the capacity
-    void set_capacity(size_t capacity) {
-      if (capacity >= kMaxCapacity)
-	return;
+  return (position);
+}
 
-      assert(capacity % kBitsPerVector == 0);
+/**
+ * Initialize __sm_chunk_t with provided data.
+ */
+static void
+__sm_chunk_map_init(__sm_chunk_t *map, uint8_t *data)
+{
+  map->m_data = (sm_bitvec_t *)data;
+}
 
-      size_t reduced = 0;
-      register uint8_t *p = (uint8_t *)m_data;
-      for (size_t i = sizeof(BitVector) - 1; i >= 0; i--) {
-	for (int j = kFlagsPerIndexByte - 1; j >= 0; j--) {
-	  p[i] &= ~((BitVector)0x03 << (j * 2));
-	  p[i] |= ((BitVector)0x01 << (j * 2));
-	  reduced += kBitsPerVector;
-	  if (capacity + reduced == kMaxCapacity) {
-	    assert(get_capacity() == capacity);
-	    return;
-	  }
-	}
-      }
+/**
+ * Allocate and initialize a chunk map.
+ */
+static __sm_chunk_t *
+__sm_chunk_map(uint8_t *data)
+{
+  __sm_chunk_t *chunk = (__sm_chunk_t *)calloc(1, sizeof(__sm_chunk_t));
+  if (chunk) {
+    __sm_chunk_map_init(chunk, data);
+  }
+  return chunk;
+}
 
-      assert(get_capacity() == capacity);
+/**
+ * Returns the maximum capacity of this __sm_chunk_t.
+ */
+static size_t
+__sm_chunk_map_get_capacity(__sm_chunk_t *map)
+{
+  size_t capacity = SM_CHUNK_MAX_CAPACITY;
+
+  register uint8_t *p = (uint8_t *)map->m_data;
+  for (size_t i = 0; i < sizeof(sm_bitvec_t); i++, p++) {
+    if (!*p) {
+      continue;
     }
-
-    // Returns the maximum capacity of this MiniMap
-    size_t get_capacity() {
-      size_t capacity = kMaxCapacity;
-
-      register uint8_t *p = (uint8_t *)m_data;
-      for (size_t i = 0; i < sizeof(BitVector); i++, p++) {
-	if (!*p)
-	  continue;
-	for (int j = 0; j < kFlagsPerIndexByte; j++) {
-	  int flags = ((*p) & ((BitVector)kFlagMask << (j * 2))) >> (j * 2);
-	  if (flags == kPayloadNone)
-	    capacity -= kBitsPerVector;
-	}
-      }
-      return (capacity);
-    }
-
-    // Returns true if this MiniMap is empty
-    bool is_empty() const {
-      // The MiniMap is empty if all flags (in m_data[0]) are zero.
-      if (m_data[0] == 0)
-	return (true);
-
-      // It's also empty if all flags are Zero or None
-      register uint8_t *p = (uint8_t *)m_data;
-      for (size_t i = 0; i < sizeof(BitVector); i++, p++) {
-	if (*p) {
-	  for (int j = 0; j < kFlagsPerIndexByte; j++) {
-	    int flags = ((*p) & ((BitVector)kFlagMask << (j * 2))) >> (j * 2);
-	    if (flags != kPayloadNone && flags != kPayloadZeroes)
-	      return (false);
-	  }
-	}
-      }
-      return (true);
-    }
-
-    // Returns the size of the data buffer, in bytes
-    size_t get_size() const {
-      // At least one BitVector is required for the flags (m_data[0])
-      size_t size = sizeof(BitVector);
-      // Use a lookup table for each byte of the flags
-      register uint8_t *p = (uint8_t *)m_data;
-      for (size_t i = 0; i < sizeof(BitVector); i++, p++)
-	size += sizeof(BitVector) * calc_vector_size(*p);
-
-      return (size);
-    }
-
-    // Returns the value of a bit at index |idx|
-    bool is_set(size_t idx) const {
-      // in which BitVector is |idx| stored?
-      int bv = idx / kBitsPerVector;
-      assert(bv < kFlagsPerIndex);
-
-      // now retrieve the flags of that BitVector
-      int flags = ((*m_data) & ((BitVector)kFlagMask << (bv * 2))) >> (bv * 2);
-      switch (flags) {
-	case kPayloadZeroes:
-	case kPayloadNone:
-	  return (false);
-	case kPayloadOnes:
-	  return (true);
-	default:
-	  assert(flags == kPayloadMixed);
-	  // fall through
-      }
-
-      // get the BitVector at |bv|
-      BitVector w = m_data[1 + get_position(bv)];
-      // and finally check the bit in that BitVector
-      return ((w & ((BitVector)1 << (idx % kBitsPerVector))) > 0);
-    }
-
-    // Sets the value of a bit at index |idx|. This function returns
-    // a MultiReturn structure. If MultiReturn::code is |kNeedsToGrow|
-    // or |kNeedsToShrink| then the caller has to perform the relevant
-    // actions and call set() again, this time with |retried| = true!
-    MultiReturn<BitVector> set(size_t idx, bool value, bool retried = false) {
-      // in which BitVector is |idx| stored?
-      int bv = idx / kBitsPerVector;
-      assert(bv < kFlagsPerIndex);
-
-      // now retrieve the flags of that BitVector
-      int flags = ((*m_data) & ((BitVector)kFlagMask << (bv * 2))) >> (bv * 2);
-      assert(flags != kPayloadNone);
-      if (flags == kPayloadZeroes) {
-	// easy - set bit to 0 in a BitVector of zeroes
-	if (value == false)
-	  return (MultiReturn<BitVector>(kOk, 0, 0));
-	// the SparseMap must grow this MiniMap by one additional BitVector,
-	// then try again
-	if (!retried)
-	  return (MultiReturn<BitVector>(kNeedsToGrow,
-				  1 + get_position(bv), 0));
-	// new flags are 2#10 (currently, flags are set to 2#00
-	// 2#00 | 2#10 = 2#10)
-	m_data[0] |= ((BitVector)0x2 << (bv * 2));
-	// fall through
-      }
-      else if (flags == kPayloadOnes) {
-	// easy - set bit to 1 in a BitVector of ones
-	if (value == true)
-	  return (MultiReturn<BitVector>(kOk, 0, 0));
-	// the SparseMap must grow this MiniMap by one additional BitVector,
-	// then try again
-	if (!retried)
-	  return (MultiReturn<BitVector>(kNeedsToGrow,
-				  1 + get_position(bv), (BitVector)-1));
-	// new flags are 2#10 (currently, flags are set to 2#11;
-	// 2#11 ^ 2#01 = 2#10)
-	m_data[0] ^= ((BitVector)0x1 << (bv * 2));
-	// fall through
-      }
-
-      // now flip the bit
-      size_t position = 1 + get_position(bv);
-      BitVector w = m_data[position];
-      if (value)
-	w |= (BitVector)1 << (idx % kBitsPerVector);
-      else
-	w &= ~((BitVector)1 << (idx % kBitsPerVector));
-
-      // if this BitVector is now all zeroes or ones then we can remove it
-      if (w == 0) {
-	m_data[0] &= ~((BitVector)kPayloadOnes << (bv * 2));
-	return (MultiReturn<BitVector>(kNeedsToShrink, position, 0));
-      }
-      if (w == (BitVector)-1) {
-	m_data[0] |= (BitVector)kPayloadOnes << (bv * 2);
-	return (MultiReturn<BitVector>(kNeedsToShrink, position, 0));
-      }
-
-      m_data[position] = w;
-      return (MultiReturn<BitVector>(kOk, 0, 0));
-    }
-
-    // Decompresses the whole bitmap; calls visitor's operator() for all bits
-    // Returns the number of (set) bits that were passed to the scanner
-    template<typename IndexedType, class Scanner>
-    size_t scan(IndexedType start, Scanner &scanner, size_t skip) {
-      size_t ret = 0;
-      register uint8_t *p = (uint8_t *)m_data;
-      IndexedType buffer[kBitsPerVector];
-      for (size_t i = 0; i < sizeof(BitVector); i++, p++) {
-	if (*p == 0) {
-	  // skip the zeroes
-	  continue;
-	}
-
-	for (int j = 0; j < kFlagsPerIndexByte; j++) {
-	  int flags = ((*p) & ((BitVector)kFlagMask << (j * 2))) >> (j * 2);
-	  if (flags == kPayloadNone || flags == kPayloadZeroes) {
-	    // ignore the zeroes
-	  }
-	  else if (flags == kPayloadOnes) {
-	    if (skip) {
-	      if (skip >= kBitsPerVector) {
-		skip -= kBitsPerVector;
-		ret += kBitsPerVector;
-		continue;
-	      }
-	      size_t n = 0;
-	      for (size_t b = skip; b < kBitsPerVector; b++)
-		buffer[n++] = start + b;
-	      scanner(&buffer[0], n);
-	      ret += n;
-	      skip = 0;
-	    }
-	    else {
-	      for (size_t b = 0; b < kBitsPerVector; b++)
-		buffer[b] = start + b;
-	      scanner(&buffer[0], kBitsPerVector);
-	      ret += kBitsPerVector;
-	    }
-	  }
-	  else if (flags == kPayloadMixed) {
-	    BitVector w = m_data[1 + get_position(i * kFlagsPerIndexByte + j)];
-	    int n = 0;
-	    if (skip) {
-	      for (int b = 0; b < kBitsPerVector; b++) {
-		if (w & ((BitVector)1 << b)) {
-		  if (skip) {
-		    skip--;
-		    continue;
-		  }
-		  buffer[n++] = start + b;
-		  ret++;
-		}
-	      }
-	    }
-	    else {
-	      for (int b = 0; b < kBitsPerVector; b++) {
-		if (w & ((BitVector)1 << b))
-		  buffer[n++] = start + b;
-	      }
-	      ret += n;
-	    }
-	    assert(n > 0);
-	    scanner(&buffer[0], n);
-	  }
-	}
-      }
-      return (ret);
-    }
-
-    // Returns the index of the 'nth' set bit; sets |*pnew_n| to 0 if the
-    // n'th bit was found in this MiniMap, or to the new, reduced value of |n|
-    size_t select(size_t n, ssize_t *pnew_n) {
-      size_t ret = 0;
-
-      register uint8_t *p = (uint8_t *)m_data;
-      for (size_t i = 0; i < sizeof(BitVector); i++, p++) {
-	if (*p == 0) {
-	  ret += kFlagsPerIndexByte * kBitsPerVector;
-	  continue;
-	}
-
-	for (int j = 0; j < kFlagsPerIndexByte; j++) {
-	  int flags = ((*p) & ((BitVector)kFlagMask << (j * 2))) >> (j * 2);
-	  if (flags == kPayloadNone)
-	    continue;
-	  if (flags == kPayloadZeroes) {
-	    ret += kBitsPerVector;
-	    continue;
-	  }
-	  if (flags == kPayloadOnes) {
-	    if (n > kBitsPerVector) {
-	      n -= kBitsPerVector;
-	      ret += kBitsPerVector;
-	      continue;
-	    }
-
-	    *pnew_n = -1;
-	    return (ret + n);
-	  }
-	  if (flags == kPayloadMixed) {
-	    BitVector w = m_data[1 + get_position(i * kFlagsPerIndexByte + j)];
-	    for (int k = 0; k < kBitsPerVector; k++) {
-	      if (w & ((BitVector)1 << k)) {
-		if (n == 0) {
-		  *pnew_n = -1;
-		  return (ret);
-		}
-		n--;
-	      }
-	      ret++;
-	    }
-	  }
-	}
-      }
-
-      *pnew_n = n;
-      return (ret);
-    }
-
-    // Counts the set bits in the range [0, idx]
-    size_t rank(size_t idx) {
-      size_t ret = 0;
-
-      register uint8_t *p = (uint8_t *)m_data;
-      for (size_t i = 0; i < sizeof(BitVector); i++, p++) {
-	for (int j = 0; j < kFlagsPerIndexByte; j++) {
-	  int flags = ((*p) & ((BitVector)kFlagMask << (j * 2))) >> (j * 2);
-	  if (flags == kPayloadNone)
-	    continue;
-	  if (flags == kPayloadZeroes) {
-	    if (idx > kBitsPerVector)
-	      idx -= kBitsPerVector;
-	    else
-	      return (ret);
-	  }
-	  else if (flags == kPayloadOnes) {
-	    if (idx > kBitsPerVector) {
-	      idx -= kBitsPerVector;
-	      ret += kBitsPerVector;
-	    }
-	    else
-	      return (ret + idx);
-	  }
-	  else if (flags == kPayloadMixed) {
-	    if (idx > kBitsPerVector) {
-	      idx -= kBitsPerVector;
-	      ret += popcount((uint64_t)m_data[1
-			      + get_position(i * kFlagsPerIndexByte + j)]);
-	    }
-	    else {
-	      BitVector w = m_data[1 + get_position(i * kFlagsPerIndexByte + j)];
-	      for (size_t k = 0; k < idx; k++) {
-		if (w & ((BitVector)1 << k))
-		  ret++;
-	      }
-	      return (ret);
-	    }
-	  }
-	}
-      }
-      return (ret);
-    }
-
-  private:
-    // Returns the position of a BitVector in m_data
-    size_t get_position(int bv) const {
-      // handle 4 indices (1 byte) at a time
-      size_t num_bytes = bv / (kFlagsPerIndexByte * kBitsPerVector);
-
-      size_t position = 0;
-      register uint8_t *p = (uint8_t *)m_data;
-      for (size_t i = 0; i < num_bytes; i++, p++)
-	position += calc_vector_size(*p);
-
-      bv -= num_bytes * kFlagsPerIndexByte;
-      for (int i = 0; i < bv; i++) {
-	int flags = ((*m_data) & ((BitVector)kFlagMask << (i * 2))) >> (i * 2);
-	if (flags == kPayloadMixed)
-	  position++;
-      }
-
-      return (position);
-    }
-
-    // Calculates the number of BitVectors required by a single byte
-    // with flags (in m_data[0])
-    size_t calc_vector_size(uint8_t b) const {
-      static int lookup[] = {
-	 0,  0,  1,  0,  0,  0,  1,  0,  1,  1,  2,  1,  0,  0,  1,  0,
-	 0,  0,  1,  0,  0,  0,  1,  0,  1,  1,  2,  1,  0,  0,  1,  0,
-	 1,  1,  2,  1,  1,  1,  2,  1,  2,  2,  3,  2,  1,  1,  2,  1,
-	 0,  0,  1,  0,  0,  0,  1,  0,  1,  1,  2,  1,  0,  0,  1,  0,
-	 0,  0,  1,  0,  0,  0,  1,  0,  1,  1,  2,  1,  0,  0,  1,  0,
-	 0,  0,  1,  0,  0,  0,  1,  0,  1,  1,  2,  1,  0,  0,  1,  0,
-	 1,  1,  2,  1,  1,  1,  2,  1,  2,  2,  3,  2,  1,  1,  2,  1,
-	 0,  0,  1,  0,  0,  0,  1,  0,  1,  1,  2,  1,  0,  0,  1,  0,
-	 1,  1,  2,  1,  1,  1,  2,  1,  2,  2,  3,  2,  1,  1,  2,  1,
-	 1,  1,  2,  1,  1,  1,  2,  1,  2,  2,  3,  2,  1,  1,  2,  1,
-	 2,  2,  3,  2,  2,  2,  3,  2,  3,  3,  4,  3,  2,  2,  3,  2,
-	 1,  1,  2,  1,  1,  1,  2,  1,  2,  2,  3,  2,  1,  1,  2,  1,
-	 0,  0,  1,  0,  0,  0,  1,  0,  1,  1,  2,  1,  0,  0,  1,  0,
-	 0,  0,  1,  0,  0,  0,  1,  0,  1,  1,  2,  1,  0,  0,  1,  0,
-	 1,  1,  2,  1,  1,  1,  2,  1,  2,  2,  3,  2,  1,  1,  2,  1,
-	 0,  0,  1,  0,  0,  0,  1,  0,  1,  1,  2,  1,  0,  0,  1,  0
-      };
-      return ((size_t)lookup[b]);
-    }
-
-    // Pointer to the stored data; m_data[0] always contains the index
-    BitVector *m_data;
-};
-
-
-//
-// The SparseMap is the public interface of this library.
-//
-// |IndexedType| is the user's numerical data type which is mapped to
-// a single bit in the bitmap. Usually this is uint32_t or uint64_t.
-// |BitVector| is the storage type for a bit vector used by the MiniMap.
-// Usually this is a uint64_t.
-//
-template<typename IndexedType, typename BitVector>
-class SparseMap {
-    enum {
-      // metadata overhead:
-      //    4 bytes for minimap count
-      kSizeofOverhead = sizeof(uint32_t)
-    };
-
-  public:
-    // Constructor
-    SparseMap()
-      : m_data(0), m_data_size(0), m_data_used(0) {
-    }
-
-    // Creates a new SparseMap at the specified buffer
-    void create(uint8_t *data, size_t data_size,
-	    size_t capacity = std::numeric_limits<uint64_t>::max()) {
-      m_data = data;
-      m_data_size = data_size;
-      clear();
-    }
-
-    // Opens an existing SparseMap at the specified buffer
-    void open(uint8_t *data, size_t data_size) {
-      m_data = data;
-      m_data_size = data_size;
-    }
-
-    // Resizes the data range
-    void set_data_size(size_t data_size) {
-      m_data_size = data_size;
-    }
-
-    // Returns the size of the underlying byte array
-    size_t get_range_size() const {
-      return (m_data_size);
-    }
-
-    // Returns the value of a bit at index |idx|
-    bool is_set(size_t idx) {
-      assert(get_size() >= kSizeofOverhead);
-
-      // Get the MiniMap which manages this index
-      ssize_t offset = get_minimap_offset(idx);
-
-      // No MiniMaps available -> the bit is not set
-      if (offset == -1)
-	return (false);
-
-      // Otherwise load the MiniMap
-      uint8_t *p = get_minimap_data(offset);
-      IndexedType start = *(IndexedType *)p;
-
-      MiniMap<BitVector> minimap(p + sizeof(IndexedType));
-
-      // Check if the bit is out of bounds of the MiniMap; if yes then
-      // the bit is not set
-      if (idx < start || idx - start >= minimap.get_capacity())
-	return (false);
-
-      // Otherwise ask the MiniMap whether the bit is set
-      return (minimap.is_set(idx - start));
-    }
-
-    // Sets the bit at index |idx| to true or false, depending on |value|
-    void set(size_t idx, bool value) {
-      assert(get_size() >= kSizeofOverhead);
-
-      // Get the MiniMap which manages this index
-      ssize_t offset = get_minimap_offset(idx);
-      bool dont_grow = false;
-
-      // If there is no MiniMap and the bit is set to zero then return
-      // immediately; otherwise create an initial MiniMap
-      if (offset == -1) {
-	if (value == false)
-	  return;
-
-	uint8_t buf[sizeof(IndexedType) + sizeof(BitVector) * 2] = {0};
-	append_data(&buf[0], sizeof(buf));
-
-	uint8_t *p = get_minimap_data(0);
-	*(IndexedType *)p = get_aligned_offset(idx);
-
-	set_minimap_count(1);
-
-	// we already inserted an additional BitVector; later on there
-	// is no need to grow the vector even further
-	dont_grow = true;
-	offset = 0;
-      }
-
-      // Load the MiniMap
-      uint8_t *p = get_minimap_data(offset);
-      IndexedType start = *(IndexedType *)p;
-
-      // The new index is smaller than the first MiniMap: create a new
-      // MiniMap and insert it at the front
-      if (idx < start) {
-	if (value == false) // nothing to do
-	  return;
-
-	uint8_t buf[sizeof(IndexedType) + sizeof(BitVector) * 2] = {0};
-	insert_data(offset, &buf[0], sizeof(buf));
-
-	size_t aligned_idx = get_fully_aligned_offset(idx);
-	if (start - aligned_idx < MiniMap<BitVector>::kMaxCapacity) {
-	  MiniMap<BitVector> minimap(p + sizeof(IndexedType));
-	  minimap.set_capacity(start - aligned_idx);
-	}
-	*(IndexedType *)p = start = aligned_idx;
-
-	// we just added another minimap!
-	set_minimap_count(get_minimap_count() + 1);
-
-	// we already inserted an additional BitVector; later on there
-	// is no need to grow the vector even further
-	dont_grow = true;
-      }
-
-      // A MiniMap exists, but the new index exceeds its capacities: create
-      // a new MiniMap and insert it after the current one
-      else {
-	MiniMap<BitVector> minimap(p + sizeof(IndexedType));
-	if (idx - start >= minimap.get_capacity()) {
-	  if (value == false) // nothing to do
-	    return;
-
-	  size_t size = minimap.get_size();
-	  offset += sizeof(IndexedType) + size;
-	  p += sizeof(IndexedType) + size;
-
-	  uint8_t buf[sizeof(IndexedType) + sizeof(BitVector) * 2] = {0};
-	  insert_data(offset, &buf[0], sizeof(buf));
-
-	  start += minimap.get_capacity();
-	  if ((size_t)start + MiniMap<BitVector>::kMaxCapacity < idx)
-	    start = get_fully_aligned_offset(idx);
-	  *(IndexedType *)p = start;
-
-	  // we just added another minimap!
-	  set_minimap_count(get_minimap_count() + 1);
-
-	  // we already inserted an additional BitVector; later on there
-	  // is no need to grow the vector even further
-	  dont_grow = true;
-	}
-      }
-
-      MiniMap<BitVector> minimap(p + sizeof(IndexedType));
-
-      // Now update the MiniMap
-      MultiReturn<BitVector> mret = minimap.set(idx - start, value);
-      switch (mret.code) {
-	case MiniMap<BitVector>::kOk:
-	  break;
-	case MiniMap<BitVector>::kNeedsToGrow:
-	  if (!dont_grow) {
-	    offset += sizeof(IndexedType) + mret.position * sizeof(BitVector);
-	    insert_data(offset, (uint8_t *)&mret.fill, sizeof(BitVector));
-	  }
-	  mret = minimap.set(idx - start, value, true);
-	  assert(mret.code == MiniMap<BitVector>::kOk);
-	  break;
-	case MiniMap<BitVector>::kNeedsToShrink:
-	  // if the MiniMap is empty then remove it
-	  if (minimap.is_empty()) {
-	    assert(mret.position == 1);
-	    remove_data(offset, sizeof(IndexedType) + sizeof(BitVector) * 2);
-	    set_minimap_count(get_minimap_count() - 1);
-	  }
-	  else {
-	    offset += sizeof(IndexedType) + mret.position * sizeof(BitVector);
-	    remove_data(offset, sizeof(BitVector));
-	  }
-	  break;
-	default:
-	  assert(!"shouldn't be here");
-	  break;
-      }
-      assert(get_size() >= kSizeofOverhead);
-    }
-
-    // Clears the whole buffer
-    void clear() {
-      m_data_used = kSizeofOverhead;
-      set_minimap_count(0);
-    }
-
-    // Returns the offset of the very first bit
-    IndexedType get_start_offset() {
-      if (get_minimap_count() == 0)
-	return (0);
-      return (*(IndexedType *)get_minimap_data(0));
-    }
-
-    // Returns the used size in the data buffer
-    size_t get_size() {
-      if (m_data_used) {
-	assert(m_data_used == get_size_impl());
-	return (m_data_used);
-      }
-      return (m_data_used = get_size_impl());
-    }
-
-    // Decompresses the whole bitmap; calls visitor's operator() for all bits
-    template<class Scanner>
-    void scan(Scanner &scanner, size_t skip) {
-      uint8_t *p = get_minimap_data(0);
-
-      size_t count = get_minimap_count();
-      for (size_t i = 0; i < count; i++) {
-	IndexedType start = *(IndexedType *)p;
-	p += sizeof(IndexedType);
-	MiniMap<BitVector> minimap(p);
-	size_t skipped = minimap.scan(start, scanner, skip);
-	if (skip) {
-	  assert(skip >= skipped);
-	  skip -= skipped;
-	}
-	p += minimap.get_size();
+    for (int j = 0; j < SM_FLAGS_PER_INDEX_BYTE; j++) {
+      size_t flags = ((*p) & ((sm_bitvec_t)SM_FLAG_MASK << (j * 2))) >> (j * 2);
+      if (flags == SM_PAYLOAD_NONE) {
+        capacity -= SM_BITS_PER_VECTOR;
       }
     }
+  }
+  return (capacity);
+}
 
-    // Appends all MiniMaps from |sstart| to |other|, then reduces the
-    // MiniMap-count appropriately
-    //
-    // |sstart| must be BitVector-aligned!
-    void split(size_t sstart, SparseMap<IndexedType, BitVector> *other) {
-      assert(sstart % MiniMap<BitVector>::kBitsPerVector == 0);
+/**
+ * Sets the capacity.
+ */
+static void
+__sm_chunk_map_set_capacity(__sm_chunk_t *map, size_t capacity)
+{
+  if (capacity >= SM_CHUNK_MAX_CAPACITY) {
+    return;
+  }
 
-      // |dst| points to the destination buffer
-      uint8_t *dst = other->get_minimap_end();
+  __sm_assert(capacity % SM_BITS_PER_VECTOR == 0);
 
-      // |src| points to the source-MiniMap
-      uint8_t *src = get_minimap_data(0);
-
-      // |sstart| is relative to the beginning of this SparseMap; better
-      // make it absolute
-      sstart += *(IndexedType *)src;
-
-      bool in_middle = false;
-      uint8_t *prev = src;
-      size_t i, count = get_minimap_count();
-      for (i = 0; i < count; i++) {
-	IndexedType start = *(IndexedType *)src;
-	MiniMap<BitVector> minimap(src + sizeof(IndexedType));
-	if (start == sstart)
-	  break;
-	if (start + minimap.get_capacity() > sstart) {
-	  in_middle = true;
-	  break;
-	}
-	if (start > sstart) {
-	  src = prev;
-	  i--;
-	  break;
-	}
-
-	prev = src;
-	src += sizeof(IndexedType) + minimap.get_size();
+  size_t reduced = 0;
+  register uint8_t *p = (uint8_t *)map->m_data;
+  for (size_t i = sizeof(sm_bitvec_t) - 1; i >= 0; i--) { // TODO:
+    for (int j = SM_FLAGS_PER_INDEX_BYTE - 1; j >= 0; j--) {
+      p[i] &= ~((sm_bitvec_t)0x03 << (j * 2));
+      p[i] |= ((sm_bitvec_t)0x01 << (j * 2));
+      reduced += SM_BITS_PER_VECTOR;
+      if (capacity + reduced == SM_CHUNK_MAX_CAPACITY) {
+        __sm_assert(__sm_chunk_map_get_capacity(map) == capacity);
+        return;
       }
-      if (i == count) {
-	assert(get_size() > kSizeofOverhead);
-	assert(other->get_size() > kSizeofOverhead);
-	return;
+    }
+  }
+  __sm_assert(__sm_chunk_map_get_capacity(map) == capacity);
+}
+
+/**
+ * Returns true if this __sm_chunk_t is empty.
+ */
+static bool
+__sm_chunk_map_is_empty(__sm_chunk_t *map)
+{
+  /* The __sm_chunk_t is empty if all flags (in m_data[0]) are zero. */
+  if (map->m_data[0] == 0) {
+    return (true);
+  }
+
+  /* It's also empty if all flags are Zero or None. */
+  register uint8_t *p = (uint8_t *)map->m_data;
+  for (size_t i = 0; i < sizeof(sm_bitvec_t); i++, p++) {
+    if (*p) {
+      for (int j = 0; j < SM_FLAGS_PER_INDEX_BYTE; j++) {
+        size_t flags = ((*p) & ((sm_bitvec_t)SM_FLAG_MASK << (j * 2))) >>
+          (j * 2);
+        if (flags != SM_PAYLOAD_NONE && flags != SM_PAYLOAD_ZEROS) {
+          return (false);
+        }
       }
+    }
+  }
+  return (true);
+}
 
-      // Now copy all the remaining MiniMaps
-      int moved = 0;
+/**
+ * Returns the size of the data buffer, in bytes.
+ */
+static size_t
+__sm_chunk_map_get_size(__sm_chunk_t *map)
+{
+  /* At least one sm_bitvec_t is required for the flags (m_data[0]) */
+  size_t size = sizeof(sm_bitvec_t);
+  /* Use a lookup table for each byte of the flags */
+  register uint8_t *p = (uint8_t *)map->m_data;
+  for (size_t i = 0; i < sizeof(sm_bitvec_t); i++, p++) {
+    size += sizeof(sm_bitvec_t) * __sm_chunk_map_calc_vector_size(*p);
+  }
 
-      // If |sstart| is in the middle of a MiniMap then this MiniMap has
-      // to be split
-      if (in_middle) {
-	uint8_t buf[sizeof(IndexedType) + sizeof(BitVector) * 2] = {0};
-	memcpy(dst, &buf[0], sizeof(buf));
+  return (size);
+}
 
-	*(IndexedType *)dst = sstart;
-	dst += sizeof(IndexedType);
+/**
+ * Returns the value of a bit at index |idx|.
+ */
+static bool
+__sm_chunk_map_is_set(__sm_chunk_t *map, size_t idx)
+{
+  /* in which sm_bitvec_t is |idx| stored? */
+  size_t bv = idx / SM_BITS_PER_VECTOR;
+  __sm_assert(bv < SM_FLAGS_PER_INDEX);
 
-	// the |other| SparseMap now has one additional MiniMap
-	other->set_minimap_count(other->get_minimap_count() + 1);
-	if (other->m_data_used != 0)
-	  other->m_data_used += sizeof(IndexedType) + sizeof(BitVector);
+  /* now retrieve the flags of that sm_bitvec_t */
+  size_t flags = ((*map->m_data) & ((sm_bitvec_t)SM_FLAG_MASK << (bv * 2))) >>
+    (bv * 2);
+  switch (flags) {
+  case SM_PAYLOAD_ZEROS:
+  case SM_PAYLOAD_NONE:
+    return (false);
+  case SM_PAYLOAD_ONES:
+    return (true);
+  default:
+    __sm_assert(flags == SM_PAYLOAD_MIXED);
+    /* FALLTHROUGH */
+  }
 
-	src += sizeof(IndexedType);
-	MiniMap<BitVector> sminimap(src);
-	size_t capacity = sminimap.get_capacity();
+  /* get the sm_bitvec_t at |bv| */
+  sm_bitvec_t w = map->m_data[1 + __sm_chunk_map_get_position(map, bv)];
+  /* and finally check the bit in that sm_bitvec_t */
+  return ((w & ((sm_bitvec_t)1 << (idx % SM_BITS_PER_VECTOR))) > 0);
+}
 
-	MiniMap<BitVector> dminimap(dst);
-	dminimap.set_capacity(capacity - (sstart % capacity));
+/**
+ * Sets the value of a bit at index |idx|. Returns SM_NEEDS_TO_GROW,
+ * SM_NEEDS_TO_SHRINK, or SM_OK. Sets |position| to the position of the
+ * sm_bitvec_t which is inserted/deleted and |fill| - the value of the fill
+ * word (used when growing).
+ *
+ * Note, the caller MUST to perform the relevant actions and call set() again,
+ * this time with |retried| = true.
+ */
+static int
+__sm_chunk_map_set(__sm_chunk_t *map, size_t idx, bool value, size_t *pos,
+  sm_bitvec_t *fill, bool retried)
+{
+  /* in which sm_bitvec_t is |idx| stored? */
+  size_t bv = idx / SM_BITS_PER_VECTOR;
+  __sm_assert(bv < SM_FLAGS_PER_INDEX);
 
-	// now copy the bits
-	size_t d = sstart;
-	for (size_t j = sstart % capacity; j < capacity; j++, d++) {
-	  if (sminimap.is_set(j))
-	    other->set(d, true);
-	}
+  /* now retrieve the flags of that sm_bitvec_t */
+  size_t flags = ((*map->m_data) & ((sm_bitvec_t)SM_FLAG_MASK << (bv * 2))) >>
+    (bv * 2);
+  assert(flags != SM_PAYLOAD_NONE);
+  if (flags == SM_PAYLOAD_ZEROS) {
+    /* easy - set bit to 0 in a sm_bitvec_t of zeroes */
+    if (value == false) {
+      *pos = 0;
+      *fill = 0;
+      return SM_OK;
+    }
+    /* the sparsemap must grow this __sm_chunk_t by one additional sm_bitvec_t,
+       then try again */
+    if (!retried) {
+      *pos = 1 + __sm_chunk_map_get_position(map, bv);
+      *fill = 0;
+      return SM_NEEDS_TO_GROW;
+    }
+    /* new flags are 2#10 (currently, flags are set to 2#00
+       2#00 | 2#10 = 2#10) */
+    map->m_data[0] |= ((sm_bitvec_t)0x2 << (bv * 2));
+    /* FALLTHROUGH */
+  } else if (flags == SM_PAYLOAD_ONES) {
+    /* easy - set bit to 1 in a sm_bitvec_t of ones */
+    if (value == true) {
+      *pos = 0;
+      *fill = 0;
+      return SM_OK;
+    }
+    /* the sparsemap must grow this __sm_chunk_t by one additional sm_bitvec_t,
+       then try again */
+    if (!retried) {
+      *pos = 1 + __sm_chunk_map_get_position(map, bv);
+      *fill = (sm_bitvec_t)-1;
+      return SM_NEEDS_TO_GROW;
+    }
+    /* new flags are 2#10 (currently, flags are set to 2#11;
+       2#11 ^ 2#01 = 2#10) */
+    map->m_data[0] ^= ((sm_bitvec_t)0x1 << (bv * 2));
+    /* FALLTHROUGH */
+  }
 
-	src += sminimap.get_size();
-	size_t dsize = dminimap.get_size();
-	dst += dsize;
-	i++;
+  /* now flip the bit */
+  size_t position = 1 + __sm_chunk_map_get_position(map, bv);
+  sm_bitvec_t w = map->m_data[position];
+  if (value) {
+    w |= (sm_bitvec_t)1 << (idx % SM_BITS_PER_VECTOR);
+  } else {
+    w &= ~((sm_bitvec_t)1 << (idx % SM_BITS_PER_VECTOR));
+  }
 
-	// reduce the capacity of the source-MiniMap
-	sminimap.set_capacity(sstart % capacity);
-      }
+  /* if this sm_bitvec_t is now all zeroes or ones then we can remove it */
+  if (w == 0) {
+    map->m_data[0] &= ~((sm_bitvec_t)SM_PAYLOAD_ONES << (bv * 2));
+    *pos = position;
+    *fill = 0;
+    return SM_NEEDS_TO_SHRINK;
+  }
+  if (w == (sm_bitvec_t)-1) {
+    map->m_data[0] |= (sm_bitvec_t)SM_PAYLOAD_ONES << (bv * 2);
+    *pos = position;
+    *fill = 0;
+    return SM_NEEDS_TO_SHRINK;
+  }
 
-      // Now continue with all remaining minimaps
-      for (; i < count; i++) {
-	IndexedType start = *(IndexedType *)src;
-	src += sizeof(IndexedType);
-	MiniMap<BitVector> minimap(src);
-	size_t s = minimap.get_size();
+  map->m_data[position] = w;
+  *pos = 0;
+  *fill = 0;
+  return SM_OK;
+}
 
-	*(IndexedType *)dst = start;
-	dst += sizeof(IndexedType);
-	memcpy(dst, src, s);
-	src += s;
-	dst += s;
+/**
+ * Returns the index of the 'nth' set bit; sets |*pnew_n| to 0 if the
+ * n'th bit was found in this __sm_chunk_t, or to the new, reduced value of |n|
+ */
+static size_t
+__sm_chunk_map_select(__sm_chunk_t *map, size_t n, size_t *pnew_n)
+{
+  size_t ret = 0;
+  register uint8_t *p;
 
-	moved++;
-      }
-
-      // force new calculation
-      other->m_data_used = 0;
-      m_data_used = 0;
-
-      // Update the MiniMap counters
-      set_minimap_count(get_minimap_count() - moved);
-      other->set_minimap_count(other->get_minimap_count() + moved);
-
-      assert(get_size() >= kSizeofOverhead);
-      assert(other->get_size() > kSizeofOverhead);
+  p = (uint8_t *)map->m_data;
+  for (size_t i = 0; i < sizeof(sm_bitvec_t); i++, p++) {
+    if (*p == 0) {
+      ret += (size_t)SM_FLAGS_PER_INDEX_BYTE * SM_BITS_PER_VECTOR;
+      continue;
     }
 
-    // Returns the index of the 'nth' set bit; uses a 0-based index,
-    // i.e. n == 0 for the first bit which is set, n == 1 for the second bit etc
-    size_t select(size_t n) {
-      assert(get_size() >= kSizeofOverhead);
-      size_t result = 0;
-      size_t count = get_minimap_count();
-
-      uint8_t *p = get_minimap_data(0);
-
-      for (size_t i = 0; i < count; i++) {
-	result = *(IndexedType *)p;
-	p += sizeof(IndexedType);
-	MiniMap<BitVector> minimap(p);
-
-	ssize_t new_n = (ssize_t)n;
-	size_t index = minimap.select(n, &new_n);
-	if (new_n == -1)
-	  return (result + index);
-	n = (size_t)new_n;
-
-	p += minimap.get_size();
+    for (int j = 0; j < SM_FLAGS_PER_INDEX_BYTE; j++) {
+      size_t flags = ((*p) & ((sm_bitvec_t)SM_FLAG_MASK << (j * 2))) >> (j * 2);
+      if (flags == SM_PAYLOAD_NONE) {
+        continue;
       }
-      assert(!"shouldn't be here");
-      return (0);
+      if (flags == SM_PAYLOAD_ZEROS) {
+        ret += SM_BITS_PER_VECTOR;
+        continue;
+      }
+      if (flags == SM_PAYLOAD_ONES) {
+        if (n > SM_BITS_PER_VECTOR) {
+          n -= SM_BITS_PER_VECTOR;
+          ret += SM_BITS_PER_VECTOR;
+          continue;
+        }
+
+        *pnew_n = -1;
+        return (ret + n);
+      }
+      if (flags == SM_PAYLOAD_MIXED) {
+        sm_bitvec_t w = map->m_data[1 +
+          __sm_chunk_map_get_position(map, i * SM_FLAGS_PER_INDEX_BYTE + j)];
+        for (int k = 0; k < SM_BITS_PER_VECTOR; k++) {
+          if (w & ((sm_bitvec_t)1 << k)) {
+            if (n == 0) {
+              *pnew_n = -1;
+              return (ret);
+            }
+            n--;
+          }
+          ret++;
+        }
+      }
+    }
+  }
+
+  *pnew_n = n;
+  return (ret);
+}
+
+/**
+ * Counts the set bits in the range [0, idx].
+ */
+static size_t
+__sm_chunk_map_rank(__sm_chunk_t *map, size_t idx)
+{
+  size_t ret = 0;
+
+  register uint8_t *p = (uint8_t *)map->m_data;
+  for (size_t i = 0; i < sizeof(sm_bitvec_t); i++, p++) {
+    for (int j = 0; j < SM_FLAGS_PER_INDEX_BYTE; j++) {
+      size_t flags = ((*p) & ((sm_bitvec_t)SM_FLAG_MASK << (j * 2))) >> (j * 2);
+      if (flags == SM_PAYLOAD_NONE) {
+        continue;
+      }
+      if (flags == SM_PAYLOAD_ZEROS) {
+        if (idx > SM_BITS_PER_VECTOR) {
+          idx -= SM_BITS_PER_VECTOR;
+        } else {
+          return (ret);
+        }
+      } else if (flags == SM_PAYLOAD_ONES) {
+        if (idx > SM_BITS_PER_VECTOR) {
+          idx -= SM_BITS_PER_VECTOR;
+          ret += SM_BITS_PER_VECTOR;
+        } else {
+          return (ret + idx);
+        }
+      } else if (flags == SM_PAYLOAD_MIXED) {
+        if (idx > SM_BITS_PER_VECTOR) {
+          idx -= SM_BITS_PER_VECTOR;
+          ret += popcountll((uint64_t)map->m_data[1 +
+            __sm_chunk_map_get_position(map, i * SM_FLAGS_PER_INDEX_BYTE + j)]);
+        } else {
+          sm_bitvec_t w = map->m_data[1 +
+            __sm_chunk_map_get_position(map, i * SM_FLAGS_PER_INDEX_BYTE + j)];
+          for (size_t k = 0; k < idx; k++) {
+            if (w & ((sm_bitvec_t)1 << k)) {
+              ret++;
+            }
+          }
+          return (ret);
+        }
+      }
+    }
+  }
+  return (ret);
+}
+
+/**
+ * Decompresses the whole bitmap; calls visitor's operator() for all bits
+ * Returns the number of (set) bits that were passed to the scanner
+ */
+static size_t
+__sm_chunk_map_scan(__sm_chunk_t *map, sm_idx_t start,
+  void (*scanner)(sm_idx_t[], size_t), size_t skip)
+{
+  size_t ret = 0;
+  register uint8_t *p = (uint8_t *)map->m_data;
+  sm_idx_t buffer[SM_BITS_PER_VECTOR];
+  for (size_t i = 0; i < sizeof(sm_bitvec_t); i++, p++) {
+    if (*p == 0) {
+      /* skip the zeroes */
+      continue;
     }
 
-    // Counts the set bits in the range [offset, idx]
-    size_t rank(size_t offset, size_t idx) {
-      assert(get_size() >= kSizeofOverhead);
-      size_t result = 0;
-      size_t count = get_minimap_count();
+    for (int j = 0; j < SM_FLAGS_PER_INDEX_BYTE; j++) {
+      size_t flags = ((*p) & ((sm_bitvec_t)SM_FLAG_MASK << (j * 2))) >> (j * 2);
+      if (flags == SM_PAYLOAD_NONE || flags == SM_PAYLOAD_ZEROS) {
+        /* ignore the zeroes */
+      } else if (flags == SM_PAYLOAD_ONES) {
+        if (skip) {
+          if (skip >= SM_BITS_PER_VECTOR) {
+            skip -= SM_BITS_PER_VECTOR;
+            ret += SM_BITS_PER_VECTOR;
+            continue;
+          }
+          size_t n = 0;
+          for (size_t b = skip; b < SM_BITS_PER_VECTOR; b++) {
+            buffer[n++] = start + b;
+          }
+          scanner(&buffer[0], n);
+          ret += n;
+          skip = 0;
+        } else {
+          for (size_t b = 0; b < SM_BITS_PER_VECTOR; b++) {
+            buffer[b] = start + b;
+          }
+          scanner(&buffer[0], SM_BITS_PER_VECTOR);
+          ret += SM_BITS_PER_VECTOR;
+        }
+      } else if (flags == SM_PAYLOAD_MIXED) {
+        sm_bitvec_t w = map->m_data[1 +
+          __sm_chunk_map_get_position(map, i * SM_FLAGS_PER_INDEX_BYTE + j)];
+        int n = 0;
+        if (skip) {
+          for (int b = 0; b < SM_BITS_PER_VECTOR; b++) {
+            if (w & ((sm_bitvec_t)1 << b)) {
 
-      uint8_t *p = get_minimap_data(offset);
-
-      for (size_t i = 0; i < count; i++) {
-	IndexedType start = *(IndexedType *)p;
-	if (start > idx)
-	  return (result);
-	p += sizeof(IndexedType);
-	MiniMap<BitVector> minimap(p);
-
-	result += minimap.rank(idx - start);
-	p += minimap.get_size();
+              skip--;
+              continue;
+              // TODO: unreachable lines below... why?
+              buffer[n++] = start + b;
+              ret++;
+            }
+          }
+        } else {
+          for (int b = 0; b < SM_BITS_PER_VECTOR; b++) {
+            if (w & ((sm_bitvec_t)1 << b)) {
+              buffer[n++] = start + b;
+            }
+          }
+          ret += n;
+        }
+        __sm_assert(n > 0);
+        scanner(&buffer[0], n);
       }
+    }
+  }
+  return (ret);
+}
+
+/*
+ * The following is the "Sparsemap" implementation, it uses Chunk Maps (above).
+ */
+
+/**
+ * Returns the number of chunk maps.
+ */
+static size_t
+__sm_get_chunk_map_count(sparsemap_t *map)
+{
+  return (*(uint32_t *)&map->m_data[0]);
+}
+
+/**
+ * Returns the data at the specified |offset|.
+ */
+static uint8_t *
+__sm_get_chunk_map_data(sparsemap_t *map, size_t offset)
+{
+  return (&map->m_data[SM_SIZEOF_OVERHEAD + offset]);
+}
+
+/**
+ * Returns a pointer after the end of the used data.
+ */
+static uint8_t *
+__sm_get_chunk_map_end(sparsemap_t *map)
+{
+  // TODO: could this simply use m_data_used?
+  uint8_t *p = __sm_get_chunk_map_data(map, 0);
+  size_t count = __sm_get_chunk_map_count(map);
+  for (size_t i = 0; i < count; i++) {
+    p += sizeof(sm_idx_t);
+    __sm_chunk_t chunk;
+    __sm_chunk_map_init(&chunk, p);
+    p += __sm_chunk_map_get_size(&chunk);
+  }
+  return (p);
+}
+
+/**
+ * Returns the used size in the data buffer.
+ */
+static size_t
+__sm_get_size_impl(sparsemap_t *map)
+{
+  uint8_t *start = __sm_get_chunk_map_data(map, 0);
+  uint8_t *p = start;
+
+  size_t count = __sm_get_chunk_map_count(map);
+  for (size_t i = 0; i < count; i++) {
+    p += sizeof(sm_idx_t);
+    __sm_chunk_t chunk;
+    __sm_chunk_map_init(&chunk, p);
+    p += __sm_chunk_map_get_size(&chunk);
+  }
+  return (SM_SIZEOF_OVERHEAD + p - start);
+}
+
+/**
+ * Returns the byte offset of a __sm_chunk_t in m_data
+ */
+static ssize_t
+__sm_get_chunk_map_offset(sparsemap_t *map, size_t idx)
+{
+  size_t count;
+  uint8_t *p;
+  sm_idx_t start;
+
+  count = __sm_get_chunk_map_count(map);
+  if (count == 0) {
+    return (-1);
+  }
+
+  p = __sm_get_chunk_map_data(map, 0);
+  for (size_t i = 0; i < count - 1; i++) {
+    // TODO: was "sm_idx_t start = *(sm_idx_t *)p;" review this...
+    start = *(sm_idx_t *)p;
+    __sm_assert(start == get_aligned_offset(start));
+    __sm_chunk_t chunk;
+    __sm_chunk_map_init(&chunk, p + sizeof(sm_idx_t));
+    if (start >= idx || idx < start + __sm_chunk_map_get_capacity(&chunk)) {
+      break;
+    }
+    p += sizeof(sm_idx_t) + __sm_chunk_map_get_size(&chunk);
+  }
+
+  return ((ssize_t)(p - start));
+}
+
+/**
+ * Returns the aligned offset (aligned to sm_bitvec_t capacity).
+ */
+static sm_idx_t
+__sm_get_aligned_offset(size_t idx)
+{
+  const size_t capacity = SM_BITS_PER_VECTOR;
+  return ((idx / capacity) * capacity);
+}
+
+/**
+ * Returns the aligned offset (aligned to __sm_chunk_t capacity).
+ */
+static sm_idx_t
+__sm_get_fully_aligned_offset(size_t idx)
+{
+  const size_t capacity = SM_CHUNK_MAX_CAPACITY;
+  return ((idx / capacity) * capacity);
+}
+
+/**
+ * Sets the number of __sm_chunk_t's.
+ */
+static void
+__sm_set_chunk_map_count(sparsemap_t *map, size_t new_count)
+{
+  *(uint32_t *)&map->m_data[0] = (uint32_t)new_count;
+}
+
+/**
+ * Appends more data.
+ */
+static void
+__sm_append_data(sparsemap_t *map, uint8_t *buffer, size_t buffer_size)
+{
+  memcpy(&map->m_data[map->m_data_used], buffer, buffer_size);
+  map->m_data_used += buffer_size;
+}
+
+/**
+ * Inserts data somewhere in the middle of m_data.
+ */
+static void
+__sm_insert_data(sparsemap_t *map, size_t offset, uint8_t *buffer,
+  size_t buffer_size)
+{
+  if (map->m_data_used + buffer_size > map->m_data_size) {
+    __sm_assert(!"buffer overflow");
+    abort();
+  }
+
+  uint8_t *p = __sm_get_chunk_map_data(map, offset);
+  memmove(p + buffer_size, p, map->m_data_used - offset);
+  memcpy(p, buffer, buffer_size);
+  map->m_data_used += buffer_size;
+}
+
+/**
+ * Removes data from m_data.
+ */
+static void
+__sm_remove_data(sparsemap_t *map, size_t offset, size_t gap_size)
+{
+  assert(map->m_data_used >= offset + gap_size);
+  uint8_t *p = __sm_get_chunk_map_data(map, offset);
+  memmove(p, p + gap_size, map->m_data_used - offset - gap_size);
+  map->m_data_used -= gap_size;
+}
+
+/**
+ *  Clears the whole buffer
+ */
+void
+__sm_clear(sparsemap_t *map)
+{
+  map->m_data_used = SM_SIZEOF_OVERHEAD;
+  __sm_set_chunk_map_count(map, 0);
+}
+
+/**
+ * Allocate on a sparsemap_t on the heap and initialize it.
+ */
+sparsemap_t *
+sparsemap(uint8_t *data, size_t size, size_t used)
+{
+  sparsemap_t *map = (sparsemap_t *)calloc(1, sizeof(sparsemap_t));
+  if (map) {
+    sparsemap_init(map, data, size, used);
+  }
+  return map;
+}
+
+/**
+ * Initialize sparsemap_t with data.
+ */
+void
+sparsemap_init(sparsemap_t *map, uint8_t *data, size_t size, size_t used)
+{
+  map->m_data = data;
+  map->m_data_used = 0;
+  map->m_data_size = size == 0 ? UINT64_MAX : size;
+  __sm_clear(map);
+}
+
+/**
+ * Opens an existing sparsemap at the specified buffer.
+ */
+sparsemap_t *
+sparsemap_open(uint8_t *data, size_t data_size)
+{
+  sparsemap_t *map = (sparsemap_t *)calloc(1, sizeof(sparsemap_t));
+  if (map) {
+    map->m_data = data;
+    map->m_data_used = 0;
+    map->m_data_size = data_size;
+  }
+  return map;
+}
+
+/**
+ * Resizes the data range.
+ */
+void
+sparsemap_set_data_size(sparsemap_t *map, size_t data_size)
+{
+  map->m_data_size = data_size;
+}
+
+/**
+ * Returns the size of the underlying byte array.
+ */
+size_t
+sparsemap_get_range_size(sparsemap_t *map)
+{
+  return (map->m_data_size);
+}
+
+/**
+ * Returns the value of a bit at index |idx|.
+ */
+bool
+sparsemap_is_set(sparsemap_t *map, size_t idx)
+{
+  __sm_assert(get_size() >= SM_SIZEOF_OVERHEAD);
+
+  /* Get the __sm_chunk_t which manages this index */
+  ssize_t offset = __sm_get_chunk_map_offset(map, idx);
+
+  /* No __sm_chunk_t's available -> the bit is not set */
+  if (offset == -1) {
+    return (false);
+  }
+
+  /* Otherwise load the __sm_chunk_t */
+  uint8_t *p = __sm_get_chunk_map_data(map, offset);
+  sm_idx_t start = *(sm_idx_t *)p;
+  __sm_chunk_t chunk;
+  __sm_chunk_map_init(&chunk, p + sizeof(sm_idx_t));
+
+  /* Determine if the bit is out of bounds of the __sm_chunk_t; if yes then
+    the bit is not set. */
+  if (idx < start || idx - start >= __sm_chunk_map_get_capacity(&chunk)) {
+    return (false);
+  }
+
+  /* Otherwise ask the __sm_chunk_t whether the bit is set. */
+  return (__sm_chunk_map_is_set(&chunk, idx - start));
+}
+
+/**
+ * Sets the bit at index |idx| to true or false, depending on |value|.
+ */
+void
+sparsemap_set(sparsemap_t *map, size_t idx, bool value)
+{
+  __sm_assert(get_size() >= SM_SIZEOF_OVERHEAD);
+
+  /* Get the __sm_chunk_t which manages this index */
+  ssize_t offset = __sm_get_chunk_map_offset(map, idx);
+  bool dont_grow = false;
+
+  /* If there is no __sm_chunk_t and the bit is set to zero then return
+     immediately; otherwise create an initial __sm_chunk_t. */
+  if (offset == -1) {
+    if (value == false) {
+      return;
+    }
+
+    uint8_t buf[sizeof(sm_idx_t) + sizeof(sm_bitvec_t) * 2] = { 0 };
+    __sm_append_data(map, &buf[0], sizeof(buf));
+
+    uint8_t *p = __sm_get_chunk_map_data(map, 0);
+    *(sm_idx_t *)p = __sm_get_aligned_offset(idx);
+
+    __sm_set_chunk_map_count(map, 1);
+
+    /* We already inserted an additional sm_bitvec_t; later on there
+       is no need to grow the vector even further. */
+    dont_grow = true;
+    offset = 0;
+  }
+
+  /* Load the __sm_chunk_t */
+  uint8_t *p = __sm_get_chunk_map_data(map, offset);
+  sm_idx_t start = *(sm_idx_t *)p;
+
+  /* The new index is smaller than the first __sm_chunk_t: create a new
+     __sm_chunk_t and insert it at the front. */
+  if (idx < start) {
+    if (value == false) {
+      /* nothing to do */
+      return;
+    }
+
+    uint8_t buf[sizeof(sm_idx_t) + sizeof(sm_bitvec_t) * 2] = { 0 };
+    __sm_insert_data(map, offset, &buf[0], sizeof(buf));
+
+    size_t aligned_idx = __sm_get_fully_aligned_offset(idx);
+    if (start - aligned_idx < SM_CHUNK_MAX_CAPACITY) {
+      __sm_chunk_t chunk;
+      __sm_chunk_map_init(&chunk, p + sizeof(sm_idx_t));
+      __sm_chunk_map_set_capacity(&chunk, start - aligned_idx);
+    }
+    *(sm_idx_t *)p = start = aligned_idx;
+
+    /* We just added another chunk map! */
+    __sm_set_chunk_map_count(map, __sm_get_chunk_map_count(map) + 1);
+
+    // we already inserted an additional sm_bitvec_t; later on there
+    // is no need to grow the vector even further
+    dont_grow = true;
+  }
+
+  /* A __sm_chunk_t exists, but the new index exceeds its capacities: create
+    a new __sm_chunk_t and insert it after the current one. */
+  else {
+    __sm_chunk_t chunk;
+    __sm_chunk_map_init(&chunk, p + sizeof(sm_idx_t));
+    if (idx - start >= __sm_chunk_map_get_capacity(&chunk)) {
+      if (value == false) {
+        /* nothing to do */
+        return;
+      }
+
+      size_t size = __sm_chunk_map_get_size(&chunk);
+      offset += sizeof(sm_idx_t) + size;
+      p += sizeof(sm_idx_t) + size;
+
+      uint8_t buf[sizeof(sm_idx_t) + sizeof(sm_bitvec_t) * 2] = { 0 };
+      __sm_insert_data(map, offset, &buf[0], sizeof(buf));
+
+      start += __sm_chunk_map_get_capacity(&chunk);
+      if ((size_t)start + SM_CHUNK_MAX_CAPACITY < idx) {
+        start = __sm_get_fully_aligned_offset(idx);
+      }
+      *(sm_idx_t *)p = start;
+
+      /* We just added another chunk map! */
+      __sm_set_chunk_map_count(map, __sm_get_chunk_map_count(map) + 1);
+
+      /* We already inserted an additional sm_bitvec_t; later on there
+         is no need to grow the vector even further. */
+      dont_grow = true;
+    }
+  }
+
+  __sm_chunk_t chunk;
+  __sm_chunk_map_init(&chunk, p + sizeof(sm_idx_t));
+
+  /* Now update the __sm_chunk_t. */
+  size_t position;
+  sm_bitvec_t fill;
+  int code = __sm_chunk_map_set(&chunk, idx - start, value, &position, &fill,
+    false);
+  switch (code) {
+  case SM_OK:
+    break;
+  case SM_NEEDS_TO_GROW:
+    if (!dont_grow) {
+      offset += sizeof(sm_idx_t) + position * sizeof(sm_bitvec_t);
+      __sm_insert_data(map, offset, (uint8_t *)&fill, sizeof(sm_bitvec_t));
+    }
+    code = __sm_chunk_map_set(&chunk, idx - start, value, &position, &fill,
+      true);
+    __sm_assert(code == SM_OK);
+    break;
+  case SM_NEEDS_TO_SHRINK:
+    /* If the __sm_chunk_t is empty then remove it. */
+    if (__sm_chunk_map_is_empty(&chunk)) {
+      __sm_assert(position == 1);
+      __sm_remove_data(map, offset, sizeof(sm_idx_t) + sizeof(sm_bitvec_t) * 2);
+      __sm_set_chunk_map_count(map, __sm_get_chunk_map_count(map) - 1);
+    } else {
+      offset += sizeof(sm_idx_t) + position * sizeof(sm_bitvec_t);
+      __sm_remove_data(map, offset, sizeof(sm_bitvec_t));
+    }
+    break;
+  default:
+    __sm_assert(!"shouldn't be here");
+#ifdef DEBUG
+    abort();
+#endif
+    break;
+  }
+  __sm_assert(get_size() >= SM_SIZEOF_OVERHEAD);
+}
+
+/**
+ * Returns the offset of the very first bit.
+ */
+sm_idx_t
+sparsemap_get_start_offset(sparsemap_t *map)
+{
+  if (__sm_get_chunk_map_count(map) == 0)
+    return (0);
+  return (*(sm_idx_t *)__sm_get_chunk_map_data(map, 0));
+}
+
+/**
+ * Returns the used size in the data buffer.
+ */
+size_t
+sparsemap_get_size(sparsemap_t *map)
+{
+  if (map->m_data_used) {
+    assert(map->m_data_used == __sm_get_size_impl(map));
+    return (map->m_data_used);
+  }
+  return (map->m_data_used = __sm_get_size_impl(map));
+}
+
+/**
+ * Decompresses the whole bitmap; calls scanner for all bits.
+ */
+void
+sparsemap_scan(sparsemap_t *map, void (*scanner)(sm_idx_t[], size_t),
+  size_t skip)
+{
+  uint8_t *p = __sm_get_chunk_map_data(map, 0);
+  size_t count = __sm_get_chunk_map_count(map);
+
+  for (size_t i = 0; i < count; i++) {
+    sm_idx_t start = *(sm_idx_t *)p;
+    p += sizeof(sm_idx_t);
+    __sm_chunk_t chunk;
+    __sm_chunk_map_init(&chunk, p);
+    size_t skipped = __sm_chunk_map_scan(&chunk, start, scanner, skip);
+    if (skip) {
+      assert(skip >= skipped);
+      skip -= skipped;
+    }
+    p += __sm_chunk_map_get_size(&chunk);
+  }
+}
+
+/**
+ * Appends all chunk maps from |sstart| to |other|, then reduces the chunk
+ * map-count appropriately. |sstart| must be BitVector-aligned!
+ */
+void
+sparsemap_split(sparsemap_t *map, size_t sstart, sparsemap_t *other)
+{
+  assert(sstart % SM_BITS_PER_VECTOR == 0);
+
+  /* |dst| points to the destination buffer */
+  uint8_t *dst = __sm_get_chunk_map_end(other);
+
+  /* |src| points to the source-chunk map */
+  uint8_t *src = __sm_get_chunk_map_data(map, 0);
+
+  /* |sstart| is relative to the beginning of this sparsemap_t; best
+     make it absolute. */
+  sstart += *(sm_idx_t *)src;
+
+  bool in_middle = false;
+  uint8_t *prev = src;
+  size_t i, count = __sm_get_chunk_map_count(map);
+  for (i = 0; i < count; i++) {
+    sm_idx_t start = *(sm_idx_t *)src;
+    __sm_chunk_t chunk;
+    __sm_chunk_map_init(&chunk, src + sizeof(sm_idx_t));
+    if (start == sstart) {
+      break;
+    }
+    if (start + __sm_chunk_map_get_capacity(&chunk) > sstart) {
+      in_middle = true;
+      break;
+    }
+    if (start > sstart) {
+      src = prev;
+      i--;
+      break;
+    }
+
+    prev = src;
+    src += sizeof(sm_idx_t) + __sm_chunk_map_get_size(&chunk);
+  }
+  if (i == count) {
+    assert(sparsemap_get_size(map) > SM_SIZEOF_OVERHEAD);
+    assert(sparsemap_get_size(other) > SM_SIZEOF_OVERHEAD);
+    return;
+  }
+
+  /* Now copy all the remaining chunks. */
+  int moved = 0;
+
+  /* If |sstart| is in the middle of a chunk then this chunk has to be split */
+  if (in_middle) {
+    uint8_t buf[sizeof(sm_idx_t) + sizeof(sm_bitvec_t) * 2] = { 0 };
+    memcpy(dst, &buf[0], sizeof(buf));
+
+    *(sm_idx_t *)dst = sstart;
+    dst += sizeof(sm_idx_t);
+
+    /* the |other| sparsemap_t now has one additional chunk */
+    __sm_set_chunk_map_count(other, __sm_get_chunk_map_count(other) + 1);
+    if (other->m_data_used != 0) {
+      other->m_data_used += sizeof(sm_idx_t) + sizeof(sm_bitvec_t);
+    }
+
+    src += sizeof(sm_idx_t);
+    __sm_chunk_t s_chunk;
+    __sm_chunk_map_init(&s_chunk, src);
+    size_t capacity = __sm_chunk_map_get_capacity(&s_chunk);
+
+    __sm_chunk_t d_chunk;
+    __sm_chunk_map_init(&d_chunk, dst);
+    __sm_chunk_map_set_capacity(&d_chunk, capacity - (sstart % capacity));
+
+    /* Now copy the bits. */
+    size_t d = sstart;
+    for (size_t j = sstart % capacity; j < capacity; j++, d++) {
+      if (__sm_chunk_map_is_set(&s_chunk, j)) {
+        sparsemap_set(other, d, true);
+      }
+    }
+
+    src += __sm_chunk_map_get_size(&s_chunk);
+    size_t dsize = __sm_chunk_map_get_size(&d_chunk);
+    dst += dsize;
+    i++;
+
+    /* Reduce the capacity of the source-chunk map. */
+    __sm_chunk_map_set_capacity(&s_chunk, sstart % capacity);
+  }
+
+  /* Now continue with all remaining minimaps. */
+  for (; i < count; i++) {
+    sm_idx_t start = *(sm_idx_t *)src;
+    src += sizeof(sm_idx_t);
+    __sm_chunk_t chunk;
+    __sm_chunk_map_init(&chunk, src);
+    size_t s = __sm_chunk_map_get_size(&chunk);
+
+    *(sm_idx_t *)dst = start;
+    dst += sizeof(sm_idx_t);
+    memcpy(dst, src, s);
+    src += s;
+    dst += s;
+
+    moved++;
+  }
+
+  /* Force new calculation. */
+  other->m_data_used = 0;
+  map->m_data_used = 0;
+
+  /* Update the Chunk Map counters. */
+  __sm_set_chunk_map_count(map, __sm_get_chunk_map_count(map) - moved);
+  __sm_set_chunk_map_count(other, __sm_get_chunk_map_count(other) + moved);
+
+  assert(sparsemap_get_size(map) >= SM_SIZEOF_OVERHEAD);
+  assert(sparsemap_get_size(other) > SM_SIZEOF_OVERHEAD);
+}
+
+/**
+ * Returns the index of the n'th set bit; uses a 0-based index,
+ * i.e. n == 0 for the first bit which is set, n == 1 for the second bit etc.
+ */
+size_t
+sparsemap_select(sparsemap_t *map, size_t n)
+{
+  assert(sparsemap_get_size(map) >= SM_SIZEOF_OVERHEAD);
+  size_t result = 0;
+  size_t count = __sm_get_chunk_map_count(map);
+
+  uint8_t *p = __sm_get_chunk_map_data(map, 0);
+
+  for (size_t i = 0; i < count; i++) {
+    result = *(sm_idx_t *)p;
+    p += sizeof(sm_idx_t);
+    __sm_chunk_t chunk;
+    __sm_chunk_map_init(&chunk, p);
+
+    size_t new_n = (ssize_t)n;
+    size_t index = __sm_chunk_map_select(&chunk, n, &new_n);
+    if (new_n == -1) {
+      return (result + index);
+    }
+    n = new_n;
+
+    p += __sm_chunk_map_get_size(&chunk);
+  }
+  assert(!"shouldn't be here");
+  return (0);
+}
+
+/**
+ * Counts the set bits in the range [offset, idx].
+ */
+size_t
+sparsemap_rank(sparsemap_t *map, size_t offset, size_t idx)
+{
+  assert(sparsemap_get_size(map) >= SM_SIZEOF_OVERHEAD);
+  size_t result = 0;
+  size_t count = __sm_get_chunk_map_count(map);
+
+  uint8_t *p = __sm_get_chunk_map_data(map, offset);
+
+  for (size_t i = 0; i < count; i++) {
+    sm_idx_t start = *(sm_idx_t *)p;
+    if (start > idx) {
       return (result);
     }
+    p += sizeof(sm_idx_t);
+    __sm_chunk_t chunk;
+    __sm_chunk_map_init(&chunk, p);
 
-    // Counts the set bits in the range [0, idx]
-    size_t rank(size_t idx) {
-      rank(0, idx);
-    }
-
-    // Returns the number of MiniMaps
-    size_t get_minimap_count() const {
-      return (*(uint32_t *)&m_data[0]);
-    }
-
-  private:
-    // Returns the used size in the data buffer
-    size_t get_size_impl() {
-      uint8_t *start = get_minimap_data(0);
-      uint8_t *p = start;
-
-      size_t count = get_minimap_count();
-      for (size_t i = 0; i < count; i++) {
-	p += sizeof(IndexedType);
-	MiniMap<BitVector> minimap(p);
-	p += minimap.get_size();
-      }
-      return (kSizeofOverhead + p - start);
-    }
-
-    // Returns the byte offset of a MiniMap in m_data
-    ssize_t get_minimap_offset(size_t idx) {
-      size_t count = get_minimap_count();
-      if (count == 0)
-	return (-1);
-
-      uint8_t *start = get_minimap_data(0);
-      uint8_t *p = start;
-
-      for (size_t i = 0; i < count - 1; i++) {
-	IndexedType start = *(IndexedType *)p;
-	assert(start == get_aligned_offset(start));
-	MiniMap<BitVector> minimap(p + sizeof(IndexedType));
-	if (start >= idx || idx < start + minimap.get_capacity())
-	  break;
-	p += sizeof(IndexedType) + minimap.get_size();
-      }
-
-      return ((ssize_t)(p - start));
-    }
-
-    // Returns the data at the specified |offset|
-    uint8_t *get_minimap_data(size_t offset) {
-      return (&m_data[kSizeofOverhead + offset]);
-    }
-
-    // Returns a pointer after the end of the used data
-    // TODO can also use m_data_used?
-    uint8_t *get_minimap_end() {
-      uint8_t *p = get_minimap_data(0);
-
-      size_t count = get_minimap_count();
-      for (size_t i = 0; i < count; i++) {
-	p += sizeof(IndexedType);
-	MiniMap<BitVector> minimap(p);
-	p += minimap.get_size();
-      }
-      return (p);
-    }
-
-    // Returns the aligned offset (aligned to BitVector capacity)
-    IndexedType get_aligned_offset(size_t idx) const {
-      const size_t capacity = MiniMap<BitVector>::kBitsPerVector;
-      return ((idx / capacity) * capacity);
-    }
-
-    // Returns the aligned offset (aligned to MiniMap capacity)
-    IndexedType get_fully_aligned_offset(size_t idx) const {
-      const size_t capacity = MiniMap<BitVector>::kMaxCapacity;
-      return ((idx / capacity) * capacity);
-    }
-
-    // Sets the number of MiniMaps
-    void set_minimap_count(size_t new_count) {
-      *(uint32_t *)&m_data[0] = (uint32_t)new_count;
-    }
-
-    // Appends more data
-    void append_data(uint8_t *buffer, size_t buffer_size) {
-      memcpy(&m_data[m_data_used], buffer, buffer_size);
-      m_data_used += buffer_size;
-    }
-
-    // Inserts data somewhere in the middle of m_data
-    void insert_data(size_t offset, uint8_t *buffer, size_t buffer_size) {
-      if (m_data_used + buffer_size > m_data_size)
-	throw std::overflow_error("buffer overflow");
-
-      uint8_t *p = get_minimap_data(offset);
-      memmove(p + buffer_size, p, m_data_used - offset);
-      memcpy(p, buffer, buffer_size);
-      m_data_used += buffer_size;
-    }
-
-    // Removes data from m_data
-    void remove_data(size_t offset, size_t gap_size) {
-      assert(m_data_used >= offset + gap_size);
-      uint8_t *p = get_minimap_data(offset);
-      memmove(p, p + gap_size, m_data_used - offset - gap_size);
-      m_data_used -= gap_size;
-    }
-
-    // The serialized bitmap data
-    uint8_t *m_data;
-
-    // The total size of m_data
-    size_t m_data_size;
-
-    // The used size of m_data
-    size_t m_data_used;
-};
-
-} // namespace sparsemap
-
-#endif // SPARSEMAP_H
+    result += __sm_chunk_map_rank(&chunk, idx - start);
+    p += __sm_chunk_map_get_size(&chunk);
+  }
+  return (result);
+}

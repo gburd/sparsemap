@@ -20,6 +20,7 @@ Checks:    >
   -misc-unused-parameters,
   -misc-no-recursion,
   -performance-no-int-to-ptr,
+  -readability-braces-around-statements,
   -bugprone-assignment-in-if-condition,
 
 ...
