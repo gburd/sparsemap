@@ -219,7 +219,7 @@ __sm_chunk_map_set_capacity(__sm_chunk_t *map, size_t capacity)
 
   size_t reduced = 0;
   register uint8_t *p = (uint8_t *)map->m_data;
-  for (size_t i = sizeof(sm_bitvec_t) - 1; i >= 0; i--) { // TODO:
+  for (ssize_t i = sizeof(sm_bitvec_t) - 1; i >= 0; i--) { // TODO:
     for (int j = SM_FLAGS_PER_INDEX_BYTE - 1; j >= 0; j--) {
       p[i] &= ~((sm_bitvec_t)0x03 << (j * 2));
       p[i] |= ((sm_bitvec_t)0x01 << (j * 2));
@@ -400,7 +400,7 @@ __sm_chunk_map_set(__sm_chunk_t *map, size_t idx, bool value, size_t *pos,
  * n'th bit was found in this __sm_chunk_t, or to the new, reduced value of |n|
  */
 static size_t
-__sm_chunk_map_select(__sm_chunk_t *map, size_t n, size_t *pnew_n)
+__sm_chunk_map_select(__sm_chunk_t *map, ssize_t n, ssize_t *pnew_n)
 {
   size_t ret = 0;
   register uint8_t *p;
@@ -641,7 +641,7 @@ __sm_get_chunk_map_offset(sparsemap_t *map, size_t idx)
 {
   size_t count;
   uint8_t *p;
-  sm_idx_t start;
+  sm_idx_t start = 0;
 
   count = __sm_get_chunk_map_count(map);
   if (count == 0) {
@@ -652,7 +652,7 @@ __sm_get_chunk_map_offset(sparsemap_t *map, size_t idx)
   for (size_t i = 0; i < count - 1; i++) {
     // TODO: was "sm_idx_t start = *(sm_idx_t *)p;" review this...
     start = *(sm_idx_t *)p;
-    __sm_assert(start == get_aligned_offset(start));
+    __sm_assert(start == __sm_get_aligned_offset(start));
     __sm_chunk_t chunk;
     __sm_chunk_map_init(&chunk, p + sizeof(sm_idx_t));
     if (start >= idx || idx < start + __sm_chunk_map_get_capacity(&chunk)) {
@@ -763,7 +763,7 @@ void
 sparsemap_init(sparsemap_t *map, uint8_t *data, size_t size, size_t used)
 {
   map->m_data = data;
-  map->m_data_used = 0;
+  map->m_data_used = used;
   map->m_data_size = size == 0 ? UINT64_MAX : size;
   __sm_clear(map);
 }
@@ -1158,7 +1158,7 @@ sparsemap_select(sparsemap_t *map, size_t n)
     __sm_chunk_t chunk;
     __sm_chunk_map_init(&chunk, p);
 
-    size_t new_n = (ssize_t)n;
+    ssize_t new_n = n;
     size_t index = __sm_chunk_map_select(&chunk, n, &new_n);
     if (new_n == -1) {
       return (result + index);
