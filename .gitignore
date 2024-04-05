@@ -2,7 +2,7 @@
 *.so
 **/*.o
 tests/test
-examples/ex_??
+examples/ex_*
 .cache
 hints.txt
 tmp/
