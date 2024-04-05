@@ -17,12 +17,11 @@
 
 #include <assert.h>
 #include <errno.h>
+#include <popcount.h>
+#include <sparsemap.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
-
-#include <popcount.h>
-#include <sparsemap.h>
 
 #ifdef SPARSEMAP_DIAGNOSTIC
 #pragma GCC diagnostic push
@@ -59,7 +58,7 @@ enum __SM_CHUNK_INFO {
   /* metadata overhead: 4 bytes for __sm_chunk_t count */
   SM_SIZEOF_OVERHEAD = sizeof(uint32_t),
 
-  /* number of bits that can be stored in a BitVector */
+  /* number of bits that can be stored in a sm_bitvec_t */
   SM_BITS_PER_VECTOR = (sizeof(sm_bitvec_t) * 8),
 
   /* number of flags that can be stored in a single index byte */
@@ -161,7 +160,7 @@ __sm_chunk_map_get_position(__sm_chunk_t *map, size_t bv)
 /**
  * Initialize __sm_chunk_t with provided data.
  */
-static void
+static inline void
 __sm_chunk_map_init(__sm_chunk_t *map, uint8_t *data)
 {
   map->m_data = (sm_bitvec_t *)data;
@@ -381,8 +380,8 @@ __sm_chunk_map_set(__sm_chunk_t *map, size_t idx, bool value, size_t *pos,
 }
 
 /**
- * Returns the index of the 'nth' set bit; sets |*pnew_n| to 0 if the
- * n'th bit was found in this __sm_chunk_t, or to the new, reduced value of |n|
+ * Returns the index of the n'th set bit; sets |*pnew_n| to 0 if the
+ * n'th bit was found in this __sm_chunk_t, or to the new, reduced value of |n|.
  */
 static size_t
 __sm_chunk_map_select(__sm_chunk_t *map, ssize_t n, ssize_t *pnew_n)
@@ -438,10 +437,10 @@ __sm_chunk_map_select(__sm_chunk_t *map, ssize_t n, ssize_t *pnew_n)
 }
 
 /**
- * Counts the set bits in the range [0, idx].
+ * Counts the set bits in the range [start, idx].
  */
 static size_t
-__sm_chunk_map_rank(__sm_chunk_t *map, size_t idx)
+__sm_chunk_map_rank(__sm_chunk_t *map, size_t start, size_t idx)
 {
   size_t ret = 0;
 
@@ -454,22 +453,39 @@ __sm_chunk_map_rank(__sm_chunk_t *map, size_t idx)
       }
       if (flags == SM_PAYLOAD_ZEROS) {
         if (idx > SM_BITS_PER_VECTOR) {
-          idx -= SM_BITS_PER_VECTOR;
+          if (start > SM_BITS_PER_VECTOR) {
+            start -= SM_BITS_PER_VECTOR;
+          } else {
+            idx -= SM_BITS_PER_VECTOR - start;
+            start = 0;
+          }
         } else {
           return (ret);
         }
       } else if (flags == SM_PAYLOAD_ONES) {
         if (idx > SM_BITS_PER_VECTOR) {
-          idx -= SM_BITS_PER_VECTOR;
-          ret += SM_BITS_PER_VECTOR;
+          if (start > SM_BITS_PER_VECTOR) {
+            start -= SM_BITS_PER_VECTOR;
+          } else {
+            idx -= SM_BITS_PER_VECTOR - start;
+            if (start == 0)
+              ret += SM_BITS_PER_VECTOR;
+            start = 0;
+          }
         } else {
           return (ret + idx);
         }
       } else if (flags == SM_PAYLOAD_MIXED) {
         if (idx > SM_BITS_PER_VECTOR) {
-          idx -= SM_BITS_PER_VECTOR;
-          ret += popcountll((uint64_t)map->m_data[1 +
-            __sm_chunk_map_get_position(map, i * SM_FLAGS_PER_INDEX_BYTE + j)]);
+          if (start > SM_BITS_PER_VECTOR) {
+            start -= SM_BITS_PER_VECTOR;
+          } else {
+            idx -= SM_BITS_PER_VECTOR - start;
+            if (start == 0)
+              ret += popcountll((uint64_t)map->m_data[1 +
+                __sm_chunk_map_get_position(map, i * SM_FLAGS_PER_INDEX_BYTE + j)]);
+            start = 0;
+          }
         } else {
           sm_bitvec_t w = map->m_data[1 +
             __sm_chunk_map_get_position(map, i * SM_FLAGS_PER_INDEX_BYTE + j)];
@@ -718,8 +734,8 @@ __sm_remove_data(sparsemap_t *map, size_t offset, size_t gap_size)
 }
 
 /**
-*  Clears the whole buffer
-*/
+ *  Clears the whole buffer
+ */
 void
 sparsemap_clear(sparsemap_t *map)
 {
@@ -1124,7 +1140,7 @@ sparsemap_split(sparsemap_t *map, size_t sstart, sparsemap_t *other)
  * i.e. n == 0 for the first bit which is set, n == 1 for the second bit etc.
  */
 size_t
-sparsemap_select(sparsemap_t *map, size_t n)
+sparsemap_select(sparsemap_t *map, size_t loc, size_t n)
 {
   assert(sparsemap_get_size(map) >= SM_SIZEOF_OVERHEAD);
   size_t result = 0;
@@ -1137,6 +1153,14 @@ sparsemap_select(sparsemap_t *map, size_t n)
     p += sizeof(sm_idx_t);
     __sm_chunk_t chunk;
     __sm_chunk_map_init(&chunk, p);
+
+    /* Determine if the bit is out of bounds of the __sm_chunk_t; if yes then
+       move to the next chunk. */
+    size_t capacity =  __sm_chunk_map_get_capacity(&chunk);
+    if (loc < result || loc - result >= capacity) {
+      loc -= capacity;
+      continue;
+    }
 
     ssize_t new_n = n;
     size_t index = __sm_chunk_map_select(&chunk, n, &new_n);
@@ -1152,16 +1176,16 @@ sparsemap_select(sparsemap_t *map, size_t n)
 }
 
 /**
- * Counts the set bits in the range [offset, idx].
+ * Counts the set bits in the range [loc, idx].
  */
 size_t
-sparsemap_rank(sparsemap_t *map, size_t offset, size_t idx)
+sparsemap_rank(sparsemap_t *map, size_t loc, size_t idx)
 {
   assert(sparsemap_get_size(map) >= SM_SIZEOF_OVERHEAD);
   size_t result = 0;
   size_t count = __sm_get_chunk_map_count(map);
 
-  uint8_t *p = __sm_get_chunk_map_data(map, offset);
+  uint8_t *p = __sm_get_chunk_map_data(map, 0);
 
   for (size_t i = 0; i < count; i++) {
     sm_idx_t start = *(sm_idx_t *)p;
@@ -1172,18 +1196,42 @@ sparsemap_rank(sparsemap_t *map, size_t offset, size_t idx)
     __sm_chunk_t chunk;
     __sm_chunk_map_init(&chunk, p);
 
-    result += __sm_chunk_map_rank(&chunk, idx - start);
+    /* Determine if the bit is out of bounds of the __sm_chunk_t; if yes then
+       move to the next chunk. */
+    size_t capacity =  __sm_chunk_map_get_capacity(&chunk);
+    if (loc < start || loc - start >= capacity) {
+      loc -= capacity;
+      continue;
+    }
+
+    result += __sm_chunk_map_rank(&chunk, loc, idx - start);
     p += __sm_chunk_map_get_size(&chunk);
   }
   return (result);
 }
 
 /**
- * Finds a span of set bits of at least |len| after |offset|.
+ * Finds a span of set bits of at least |len| after |loc|. Returns the index of
+ * the n'th set bit that starts a span of at least |len| bits set to true.
+ * Returns ???TODO??? when a span of suitable length was not found.
  */
-size_t sparsemap_span(sparsemap_t *map, size_t offset, size_t len) {
-  ((void)map);
-  ((void)offset);
-  ((void)len);
-  return 0; // TODO
+size_t
+sparsemap_span(sparsemap_t *map, size_t loc, size_t len)
+{
+  size_t size = 1024;
+//  size_t size = sparsemap_get_size(map);
+//  assert(size >= SM_SIZEOF_OVERHEAD);
+//  if (loc + 1 > size - len || len < size) {
+//    return size;
+//  }
+
+  do {
+    size_t nth = sparsemap_select(map, loc, len);
+    size_t count = sparsemap_rank(map, nth - len, nth);
+    if (count == len) {
+      return nth - len;
+    }
+  } while ((loc = sparsemap_select(map, loc + 1, 1)) < size - len);
+
+  return size;
 }

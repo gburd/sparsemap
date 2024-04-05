@@ -130,7 +130,7 @@ main()
     sparsemap_set(map, i, true);
   }
   for (int i = 0; i < 100000; i++) {
-    assert(sparsemap_select(map, i) == (unsigned)i);
+    assert(sparsemap_select(map, 0, i) == (unsigned)i);
   }
 
   sparsemap_clear(map);
@@ -140,7 +140,7 @@ main()
     sparsemap_set(map, i, true);
   }
   for (int i = 1; i < 513; i++) {
-    assert(sparsemap_select(map, i - 1) == (unsigned)i);
+    assert(sparsemap_select(map, 0, i - 1) == (unsigned)i);
   }
 
   sparsemap_clear(map);
@@ -150,7 +150,7 @@ main()
     sparsemap_set(map, i * 10, true);
   }
   for (size_t i = 0; i < 8; i++) {
-    assert(sparsemap_select(map, i) == i * 10);
+    assert(sparsemap_select(map, 0, i) == i * 10);
   }
 
   // split and move, aligned to MiniMap capacity
