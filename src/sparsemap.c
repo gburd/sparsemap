@@ -15,22 +15,20 @@
  * PERFORMANCE OF THIS SOFTWARE.
  */
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wpedantic"
 #include <assert.h>
-#include <stdarg.h>
+#include <errno.h>
 #include <stdbool.h>
-#include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
-#pragma GCC diagnostic pop
 
 #include <popcount.h>
 #include <sparsemap.h>
 
 #ifdef SPARSEMAP_DIAGNOSTIC
 #pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
 #pragma GCC diagnostic ignored "-Wvariadic-macros"
+#include <stdarg.h>
 #define __sm_diag(format, ...) \
   __sm_diag_(__FILE__, __LINE__, __func__, format, ##__VA_ARGS__)
 #pragma GCC diagnostic pop
@@ -647,7 +645,7 @@ __sm_get_chunk_map_offset(sparsemap_t *map, size_t idx)
   uint8_t *p = start;
 
   for (size_t i = 0; i < count - 1; i++) {
-    sm_idx_t start = *(sm_idx_t *)p; //TODO wtf...
+    sm_idx_t start = *(sm_idx_t *)p;
     __sm_assert(start == __sm_get_aligned_offset(start));
     __sm_chunk_t chunk;
     __sm_chunk_map_init(&chunk, p + sizeof(sm_idx_t));
@@ -692,7 +690,7 @@ __sm_append_data(sparsemap_t *map, uint8_t *buffer, size_t buffer_size)
 /**
  * Inserts data somewhere in the middle of m_data.
  */
-static void
+static int
 __sm_insert_data(sparsemap_t *map, size_t offset, uint8_t *buffer,
   size_t buffer_size)
 {
@@ -757,16 +755,12 @@ sparsemap_init(sparsemap_t *map, uint8_t *data, size_t size, size_t used)
 /**
  * Opens an existing sparsemap at the specified buffer.
  */
-sparsemap_t *
-sparsemap_open(uint8_t *data, size_t data_size)
+void
+sparsemap_open(sparsemap_t *map, uint8_t *data, size_t data_size)
 {
-  sparsemap_t *map = (sparsemap_t *)calloc(1, sizeof(sparsemap_t));
-  if (map) {
-    map->m_data = data;
-    map->m_data_used = 0;
-    map->m_data_size = data_size;
-  }
-  return map;
+  map->m_data = data;
+  map->m_data_used = 0;
+  map->m_data_size = data_size;
 }
 
 /**

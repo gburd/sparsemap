@@ -1,8 +1,10 @@
 {
   description = "A Concurrent Skip List library for key/value pairs.";
 
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
-  inputs.flake-utils.url = "github:numtide/flake-utils";
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+    flake-utils.url = "github:numtide/flake-utils";
+  };
 
   outputs =
     { self
@@ -12,40 +14,45 @@
     }:
     flake-utils.lib.eachDefaultSystem (system:
       let
-#        pkgs = nixpkgs.legacyPackages.${system};
         pkgs = import nixpkgs {
           inherit system;
           config = { allowUnfree = true; };
         };
-      in
-      {
-        devShells.default = pkgs.mkShell {
-          packages = with pkgs; [
-            autoconf
-            bashInteractive
-            clang-tools
-            ed
-            gdb
-            graphviz-nox
-            meson
-            python311Packages.rbtools
-          ];
+        supportedSystems = [ "x86_64-linux" ];
+        forAllSystems = nixpkgs.lib.genAttrs supportedSystems;
+        nixpkgsFor = forAllSystems (system: import nixpkgs {
+          inherit system;
+          overlays = [ self.overlay ];
+        });
+      in {
+        pkgs = import nixpkgs {
+          inherit system;
+          devShell = nixpkgs.legacyPackages.${system} {
+            pkgs.mkShell = {
+              nativeBuildInputs = with pkgs.buildPackages; [
+                act
+                autoconf
+                clang
+                ed
+                gcc
+                gdb
+                gettext
+                graphviz-nox
+                libtool
+                m4
+                perl
+                pkg-config
+                python3
+                ripgrep
+              ];
+              buildInputs = with pkgs; [
+                libbacktrace
+                glibc.out
+                glibc.static
+              ];
+            };
+            DOCKER_BUILDKIT = 1;
+          };
         };
-        buildInputs = with pkgs; [
-          glibc
-        ];
-        nativeBuildInputs = with pkgs.buildPackages; [
-          act
-          binutils
-          coreutils
-          gcc
-          gettext
-          libtool
-          m4
-          make
-          perl
-          pkg-config
-          ripgrep
-        ];
       });
 }
