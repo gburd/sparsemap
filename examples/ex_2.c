@@ -31,6 +31,7 @@ main(void)
 
   // create the sparse bitmap
   sparsemap_t *map = sparsemap(buf, sizeof(uint8_t) * 1024);
+  map->resize = sparsemap_on_heap_resize_fn;
 
   // Set every other bit (pathologically worst case) to see what happens
   // when the map is full.
@@ -42,7 +43,8 @@ main(void)
   }
   // On 1024 KiB of buffer with every other bit set the map holds 7744 bits
   // and then runs out of space.  This next _set() call will fail/abort.
-  sparsemap_set(map, ++i, true);
+  i++;
+  sparsemap_set(map, i, true);
   assert(sparsemap_is_set(map, i) == true);
   return 0;
 }

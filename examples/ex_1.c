@@ -158,7 +158,7 @@ main()
     assert(sparsemap_select(map, i) == i * 10);
   }
 
-  // split and move, aligned to MiniMap capacity
+  // split and move, aligned to chunk map capacity
   sparsemap_t _sm2, *sm2 = &_sm2;
   sparsemap_init(sm2, buffer2, sizeof(buffer2));
   sparsemap_clear(sm2);

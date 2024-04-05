@@ -43,7 +43,7 @@ void __attribute__((format(printf, 4, 5))) __sm_diag_(const char *file, int line
   va_end(args);
 }
 #else
-#define __sm_diag(file, line, func, format, ...) ((void)0)
+#define __sm_diag(...) ((void)0)
 #endif
 
 #ifndef SPARSEMAP_ASSERT
@@ -87,13 +87,7 @@ enum __SM_CHUNK_INFO {
   SM_FLAG_MASK = 3,
 
   /* return code for set(): ok, no further action required */
-  SM_OK = 0,
-
-  /* return code for set(): needs to grow this __sm_chunk_t */
-  SM_NEEDS_TO_GROW = 1,
-
-  /* return code for set(): needs to shrink this __sm_chunk_t */
-  SM_NEEDS_TO_SHRINK = 2
+  SM_OK = 0
 };
 
 #define SM_CHUNK_GET_FLAGS(from, at) (((from)) & ((sm_bitvec_t)SM_FLAG_MASK << ((at) * 2))) >> ((at) * 2)
@@ -581,7 +575,7 @@ __sm_chunk_map_scan(__sm_chunk_t *map, sm_idx_t start, void (*scanner)(sm_idx_t[
 /**
  * Returns the number of chunk maps.
  */
-static size_t
+static inline size_t
 __sm_get_chunk_map_count(sparsemap_t *map)
 {
   return (*(uint32_t *)&map->m_data[0]);
@@ -636,7 +630,7 @@ __sm_get_size_impl(sparsemap_t *map)
 /**
  * Returns the aligned offset (aligned to sm_bitvec_t capacity).
  */
-static sm_idx_t
+static inline sm_idx_t
 __sm_get_aligned_offset(size_t idx)
 {
   const size_t capacity = SM_BITS_PER_VECTOR;
@@ -660,11 +654,11 @@ __sm_get_chunk_map_offset(sparsemap_t *map, size_t idx)
   uint8_t *p = start;
 
   for (size_t i = 0; i < count - 1; i++) {
-    sm_idx_t start = *(sm_idx_t *)p;
-    __sm_assert(start == __sm_get_aligned_offset(start));
+    sm_idx_t bytes = *(sm_idx_t *)p;
+    __sm_assert(bytes == __sm_get_aligned_offset(bytes));
     __sm_chunk_t chunk;
     __sm_chunk_map_init(&chunk, p + sizeof(sm_idx_t));
-    if (start >= idx || idx < start + __sm_chunk_map_get_capacity(&chunk)) {
+    if (bytes >= idx || idx < bytes + __sm_chunk_map_get_capacity(&chunk)) {
       break;
     }
     p += sizeof(sm_idx_t) + __sm_chunk_map_get_size(&chunk);
@@ -676,7 +670,7 @@ __sm_get_chunk_map_offset(sparsemap_t *map, size_t idx)
 /**
  * Returns the aligned offset (aligned to __sm_chunk_t capacity).
  */
-static sm_idx_t
+static inline sm_idx_t
 __sm_get_fully_aligned_offset(size_t idx)
 {
   const size_t capacity = SM_CHUNK_MAX_CAPACITY;
@@ -686,7 +680,7 @@ __sm_get_fully_aligned_offset(size_t idx)
 /**
  * Sets the number of __sm_chunk_t's.
  */
-static void
+static inline void
 __sm_set_chunk_map_count(sparsemap_t *map, size_t new_count)
 {
   *(uint32_t *)&map->m_data[0] = (uint32_t)new_count;
@@ -702,22 +696,64 @@ __sm_append_data(sparsemap_t *map, uint8_t *buffer, size_t buffer_size)
   map->m_data_used += buffer_size;
 }
 
+int
+sparsemap_on_heap_resize_fn(sparsemap_t *map, sparsemap_adaptations_t desire, size_t cur_size, size_t *new_size) {
+  int rc = 0;
+  size_t nsz;
+  uint8_t *new, *formerly = map->m_data;
+
+  if (desire == SM_NEEDS_TO_GROW) {
+    nsz = (cur_size * 2) * sizeof(uint8_t);
+    new = realloc(map->m_data, nsz);
+    if (!new) {
+      map->m_data = formerly;
+      rc = errno;
+    } else {
+      map->m_data = new;
+      *new_size = nsz;
+      rc = -(int)(nsz - cur_size);
+    }
+  }
+
+  // TODO SM_NEEDS_TO_SHRINK
+  return rc;
+}
+
 /**
  * Inserts data somewhere in the middle of m_data.
  */
 static int
 __sm_insert_data(sparsemap_t *map, size_t offset, uint8_t *buffer, size_t buffer_size)
 {
-  if (map->m_data_used + buffer_size > map->m_capacity) {
-    __sm_assert(!"buffer overflow");
-    abort();
+  int rc = 0;
+  size_t osz, nsz;
+
+  if (map->m_data_used + buffer_size > map->m_data_size) {
+    /* attempt to grow the heap buffer */
+    if (map->resize) {
+      osz = map->m_data_size;
+      rc = map->resize(map, SM_NEEDS_TO_GROW, osz, &nsz);
+      if (rc <= 0) {
+        sparsemap_set_data_size(map, nsz);
+        memset(map->m_data + osz, 0, nsz - osz);
+        return rc;
+      }
+    }
+    goto fail;
   }
 
   uint8_t *p = __sm_get_chunk_map_data(map, offset);
   memmove(p + buffer_size, p, map->m_data_used - offset);
   memcpy(p, buffer, buffer_size);
   map->m_data_used += buffer_size;
-  return 0;
+
+  return rc;
+fail:;
+  __sm_assert(!"buffer overflow");
+#ifdef DEBUG
+  abort();
+#endif
+  return rc;
 }
 
 /**
@@ -733,9 +769,9 @@ __sm_remove_data(sparsemap_t *map, size_t offset, size_t gap_size)
 }
 
 /**
- *  Clears the whole buffer
+ * Clears the whole buffer.
  */
-void
+inline void
 sparsemap_clear(sparsemap_t *map)
 {
   memset(map->m_data, 0, map->m_capacity);
@@ -771,7 +807,7 @@ sparsemap_init(sparsemap_t *map, uint8_t *data, size_t size)
 /**
  * Opens an existing sparsemap at the specified buffer.
  */
-void
+inline void
 sparsemap_open(sparsemap_t *map, uint8_t *data, size_t data_size)
 {
   map->m_data = data;
@@ -785,7 +821,7 @@ sparsemap_open(sparsemap_t *map, uint8_t *data, size_t data_size)
  * TODO/NOTE: This is a dangerous operation because we cannot verify that
  *       data_size is not exceeding the size of the underlying buffer.
  */
-void
+inline void
 sparsemap_set_data_size(sparsemap_t *map, size_t data_size)
 {
   map->m_capacity = data_size;
@@ -810,8 +846,8 @@ sparsemap_capacity_remaining(sparsemap_t *map)
 /**
  * Returns the size of the underlying byte array.
  */
-size_t
-sparsemap_get_capacity(sparsemap_t *map)
+inline size_t
+sparsemap_get_range_size(sparsemap_t *map)
 {
   return (map->m_capacity);
 }
@@ -851,9 +887,11 @@ sparsemap_is_set(sparsemap_t *map, size_t idx)
 /**
  * Sets the bit at index |idx| to true or false, depending on |value|.
  */
-void
+int
 sparsemap_set(sparsemap_t *map, size_t idx, bool value)
 {
+  int rc = 0;
+
   __sm_assert(sparsemap_get_size(map) >= SM_SIZEOF_OVERHEAD);
 
   /* Get the __sm_chunk_t which manages this index */
@@ -864,7 +902,7 @@ sparsemap_set(sparsemap_t *map, size_t idx, bool value)
      immediately; otherwise create an initial __sm_chunk_t. */
   if (offset == -1) {
     if (value == false) {
-      return;
+      return 0;
     }
 
     uint8_t buf[sizeof(sm_idx_t) + sizeof(sm_bitvec_t) * 2] = { 0 };
@@ -890,7 +928,7 @@ sparsemap_set(sparsemap_t *map, size_t idx, bool value)
   if (idx < start) {
     if (value == false) {
       /* nothing to do */
-      return;
+      return 0;
     }
 
     uint8_t buf[sizeof(sm_idx_t) + sizeof(sm_bitvec_t) * 2] = { 0 };
@@ -920,7 +958,7 @@ sparsemap_set(sparsemap_t *map, size_t idx, bool value)
     if (idx - start >= __sm_chunk_map_get_capacity(&chunk)) {
       if (value == false) {
         /* nothing to do */
-        return;
+        return 0;
       }
 
       size_t size = __sm_chunk_map_get_size(&chunk);
@@ -957,10 +995,17 @@ sparsemap_set(sparsemap_t *map, size_t idx, bool value)
     break;
   case SM_NEEDS_TO_GROW:
     if (!dont_grow) {
-      offset += (ssize_t)(sizeof(sm_idx_t) + position * sizeof(sm_bitvec_t));
-      __sm_insert_data(map, offset, (uint8_t *)&fill, sizeof(sm_bitvec_t));
+      offset += sizeof(sm_idx_t) + position * sizeof(sm_bitvec_t);
+      rc = __sm_insert_data(map, offset, (uint8_t *)&fill, sizeof(sm_bitvec_t));
+      if (rc > 0) {
+        return rc;
+      } else if (rc < 0) {
+        __sm_diag("added %d bytes to the map", -(rc));
+        return sparsemap_set(map, idx, false);
+      }
     }
     code = __sm_chunk_map_set(&chunk, idx - start, value, &position, &fill, true);
+    ((void)code);
     __sm_assert(code == SM_OK);
     break;
   case SM_NEEDS_TO_SHRINK:
@@ -982,6 +1027,7 @@ sparsemap_set(sparsemap_t *map, size_t idx, bool value)
     break;
   }
   __sm_assert(sparsemap_get_size(map) >= SM_SIZEOF_OVERHEAD);
+  return rc;
 }
 
 /**

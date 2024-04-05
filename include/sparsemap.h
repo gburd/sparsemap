@@ -91,6 +91,22 @@ typedef struct sparsemap sparsemap_t;
 typedef uint32_t sm_idx_t;
 typedef uint64_t sm_bitvec_t;
 
+typedef enum {
+  /* return code for set(): needs to grow this __sm_chunk_t */
+  SM_NEEDS_TO_GROW = 1,
+
+  /* return code for set(): needs to shrink this __sm_chunk_t */
+  SM_NEEDS_TO_SHRINK = 2
+} sparsemap_adaptations_t;
+
+typedef struct sparsemap {
+  uint8_t *m_data;    /* The serialized bitmap data */
+  size_t m_data_size; /* The total size of m_data */
+  size_t m_data_used; /* The used size of m_data */
+  int (*resize)(struct sparsemap *, sparsemap_adaptations_t, size_t, size_t *);
+} sparsemap_t;
+
+
 /* Allocate on a sparsemap_t on the heap and initialize it. */
 sparsemap_t *sparsemap(uint8_t *data, size_t size);
 
@@ -116,7 +132,7 @@ size_t sparsemap_get_capacity(sparsemap_t *map);
 bool sparsemap_is_set(sparsemap_t *map, size_t idx);
 
 /* Sets the bit at index |idx| to true or false, depending on |value|. */
-void sparsemap_set(sparsemap_t *map, size_t idx, bool value);
+int sparsemap_set(sparsemap_t *map, size_t idx, bool value);
 
 /* Returns the offset of the very first bit. */
 sm_idx_t sparsemap_get_start_offset(sparsemap_t *map);
@@ -131,12 +147,21 @@ void sparsemap_scan(sparsemap_t *map, void (*scanner)(sm_idx_t[], size_t), size_
    reduces the chunk map-count appropriately. */
 void sparsemap_split(sparsemap_t *map, size_t sstart, sparsemap_t *other);
 
+#if 0 // TODO
+/* Sets/clears bits starting at |ssize| in other in |map| possibly invoking the resize function. */
+void sparsemap_combine(sparsemap_t *map, size_t sstart, sparsemap_t *other);
+#endif
+
 /* Returns the index of the n'th set bit; uses a 0-based index. */
 size_t sparsemap_select(sparsemap_t *map, size_t n);
 
 /* Counts the set bits in the range [offset, idx]. */
 size_t sparsemap_rank(sparsemap_t *map, size_t offset, size_t idx);
 
-size_t sparsemap_span(sparsemap_t *map, size_t loc, size_t len);
+/* Returns the 0-based index of a span of the first set bits of at least |len| starting after |offset|. */
+size_t sparsemap_span(sparsemap_t *map, size_t offset, size_t len);
+
+/* This isn't API, it's the default implementation for a resize function. */
+int sparsemap_on_heap_resize_fn(sparsemap_t *map, sparsemap_adaptations_t desire, size_t cur_size, size_t *new_size);
 
 #endif
