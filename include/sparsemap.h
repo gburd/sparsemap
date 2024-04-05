@@ -112,10 +112,18 @@ void sparsemap_scan(sparsemap_t *map, void (*scanner)(sm_idx_t[], size_t),
    reduces the chunk map-count appropriately. */
 void sparsemap_split(sparsemap_t *map, size_t sstart, sparsemap_t *other);
 
+#if 0 // TODO
+/* Sets/clears bits starting at |ssize| in other in |map| possibly invoking the resize function. */
+void sparsemap_combine(sparsemap_t *map, size_t sstart, sparsemap_t *other);
+#endif
+
 /* Returns the index of the n'th set bit; uses a 0-based index. */
 size_t sparsemap_select(sparsemap_t *map, size_t n);
 
 /* Counts the set bits in the range [offset, idx]. */
 size_t sparsemap_rank(sparsemap_t *map, size_t offset, size_t idx);
+
+/* Returns the 0-based index of a span of the first set bits of at least |len| starting after |offset|. */
+size_t sparsemap_span(sparsemap_t *map, size_t offset, size_t len);
 
 #endif

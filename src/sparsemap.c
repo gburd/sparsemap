@@ -1177,3 +1177,13 @@ sparsemap_rank(sparsemap_t *map, size_t offset, size_t idx)
   }
   return (result);
 }
+
+/**
+ * Finds a span of set bits of at least |len| after |offset|.
+ */
+size_t sparsemap_span(sparsemap_t *map, size_t offset, size_t len) {
+  ((void)map);
+  ((void)offset);
+  ((void)len);
+  return 0; // TODO
+}
