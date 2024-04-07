@@ -105,8 +105,7 @@ sm_idx_t sparsemap_get_start_offset(sparsemap_t *map);
 size_t sparsemap_get_size(sparsemap_t *map);
 
 /* Decompresses the whole bitmap; calls scanner for all bits. */
-void sparsemap_scan(sparsemap_t *map, void (*scanner)(sm_idx_t[], size_t),
-  size_t skip);
+void sparsemap_scan(sparsemap_t *map, void (*scanner)(sm_idx_t[], size_t), size_t skip);
 
 /* Appends all chunk maps from |map| starting at |sstart| to |other|, then
    reduces the chunk map-count appropriately. */
@@ -117,5 +116,7 @@ size_t sparsemap_select(sparsemap_t *map, size_t n);
 
 /* Counts the set bits in the range [offset, idx]. */
 size_t sparsemap_rank(sparsemap_t *map, size_t offset, size_t idx);
+
+size_t sparsemap_span(sparsemap_t *map, size_t loc, size_t len);
 
 #endif
