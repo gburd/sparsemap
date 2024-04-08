@@ -432,6 +432,99 @@ test_api_split(const MunitParameter params[], void *data)
   return MUNIT_OK;
 }
 
+static void *
+test_api_select_setup(const MunitParameter params[], void *user_data)
+{
+  uint8_t *buf = munit_calloc(1024, sizeof(uint8_t));
+  sparsemap_t *map = (sparsemap_t *)test_api_setup(params, user_data);
+
+  sparsemap_init(map, buf, 1024, 0);
+  populate_map(map, 1024, 3 * 1024);
+
+  return (void *)map;
+}
+static void
+test_api_select_tear_down(void *fixture)
+{
+  sparsemap_t *map = (sparsemap_t *)fixture;
+  free(map->m_data);
+  test_api_tear_down(fixture);
+}
+static MunitResult
+test_api_select(const MunitParameter params[], void *data)
+{
+  sparsemap_t *map = (sparsemap_t *)data;
+  (void)params;
+
+  assert_ptr_not_null(map);
+
+  size_t size = sparsemap_select(map, 1);
+
+  return MUNIT_OK;
+}
+
+static void *
+test_api_rank_setup(const MunitParameter params[], void *user_data)
+{
+  uint8_t *buf = munit_calloc(1024, sizeof(uint8_t));
+  sparsemap_t *map = (sparsemap_t *)test_api_setup(params, user_data);
+
+  sparsemap_init(map, buf, 1024, 0);
+  populate_map(map, 1024, 3 * 1024);
+
+  return (void *)map;
+}
+static void
+test_api_rank_tear_down(void *fixture)
+{
+  sparsemap_t *map = (sparsemap_t *)fixture;
+  free(map->m_data);
+  test_api_tear_down(fixture);
+}
+static MunitResult
+test_api_rank(const MunitParameter params[], void *data)
+{
+  sparsemap_t *map = (sparsemap_t *)data;
+  (void)params;
+
+  assert_ptr_not_null(map);
+
+  size_t size = sparsemap_rank(map, 0, 1);
+
+  return MUNIT_OK;
+}
+
+static void *
+test_api_span_setup(const MunitParameter params[], void *user_data)
+{
+  uint8_t *buf = munit_calloc(1024, sizeof(uint8_t));
+  sparsemap_t *map = (sparsemap_t *)test_api_setup(params, user_data);
+
+  sparsemap_init(map, buf, 1024, 0);
+  populate_map(map, 1024, 3 * 1024);
+
+  return (void *)map;
+}
+static void
+test_api_span_tear_down(void *fixture)
+{
+  sparsemap_t *map = (sparsemap_t *)fixture;
+  free(map->m_data);
+  test_api_tear_down(fixture);
+}
+static MunitResult
+test_api_span(const MunitParameter params[], void *data)
+{
+  sparsemap_t *map = (sparsemap_t *)data;
+  (void)params;
+
+  assert_ptr_not_null(map);
+
+  size_t size = sparsemap_span(map, 0, 1);
+
+  return MUNIT_OK;
+}
+
 static MunitTest api_test_suite[] = { { (char *)"/api/static_init", test_api_static_init, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
   { (char *)"/api/clear", test_api_clear, test_api_clear_setup, test_api_clear_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
   { (char *)"/api/open", test_api_open, test_api_open_setup, test_api_open_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
@@ -443,6 +536,9 @@ static MunitTest api_test_suite[] = { { (char *)"/api/static_init", test_api_sta
   { (char *)"/api/get_size", test_api_get_size, test_api_get_size_setup, test_api_get_size_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
   { (char *)"/api/scan", test_api_scan, test_api_scan_setup, test_api_scan_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
   { (char *)"/api/split", test_api_split, test_api_split_setup, test_api_split_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
+  { (char *)"/api/select", test_api_select, test_api_select_setup, test_api_select_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
+  { (char *)"/api/rank", test_api_rank, test_api_rank_setup, test_api_rank_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
+  { (char *)"/api/span", test_api_span, test_api_span_setup, test_api_span_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
   { NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL } };
 
 static MunitTest scale_tests[] = { { NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL } };
