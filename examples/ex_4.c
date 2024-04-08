@@ -1,23 +1,17 @@
 #include <assert.h>
-#include <ctype.h>
-#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <time.h>
 #include <unistd.h>
 
 #include "../include/sparsemap.h"
-
-#define EXAMPLE_CODE
-#include "../tests/common.c"
+#include "../tests/common.h"
 
 #define TEST_ARRAY_SIZE 1024
 
 int
 main(void)
 {
-  int i = 0;
-  size_t rank;
+  int i;
   int array[TEST_ARRAY_SIZE];
 
   xorshift32_seed();
@@ -27,7 +21,7 @@ main(void)
   setvbuf(stderr, NULL, _IONBF, 0); // Disable buffering for stdout
 
   // start with a 3KiB buffer, TEST_ARRAY_SIZE bits
-  uint8_t *buf = calloc(3 * 1024, sizeof(uint8_t));
+  uint8_t *buf = calloc((size_t)3 * 1024, sizeof(uint8_t));
 
   // create the sparse bitmap
   sparsemap_t *map = sparsemap(buf, sizeof(uint8_t) * 3 * 1024, 0);
@@ -58,14 +52,14 @@ main(void)
     __diag("================> %lu\n", len);
     sparsemap_clear(map);
     // set all the bits on in a random order
-    ensure_sequential_set(array, TEST_ARRAY_SIZE, len);
+    ensure_sequential_set(array, TEST_ARRAY_SIZE, (int)len);
     shuffle(array, TEST_ARRAY_SIZE);
     print_spans(array, TEST_ARRAY_SIZE);
     for (i = 0; i < TEST_ARRAY_SIZE; i++) {
       sparsemap_set(map, array[i], true);
       assert(sparsemap_is_set(map, array[i]) == true);
     }
-    has_span(map, array, TEST_ARRAY_SIZE, len);
+    has_span(map, array, TEST_ARRAY_SIZE, (int)len);
     size_t l = sparsemap_span(map, 0, len);
     if (l != (size_t)-1) {
       __diag("Found span in map starting at %lu of length %lu\n", l, len);
@@ -76,9 +70,9 @@ main(void)
         if (set) {
           __diag("verified %d was set\n", i);
         } else {
-          __diag("darn, %d was not really set, %s\n", i, was_set(i, array) ? "but we thought it was" : "because it wasn't");
+          __diag("darn, %d was not really set, %s\n", i, is_set(array, i) ? "but we thought it was" : "because it wasn't");
         }
-      } while (++i < l + len);
+      } while (++i < (int)(l + len));
     } else {
       __diag("UNABLE TO FIND SPAN in map of length %lu\n", len);
     }

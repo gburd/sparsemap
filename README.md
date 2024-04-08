@@ -1,3 +1,5 @@
+# Sparsemap
+
 `sparsemap` is a sparse, compressed bitmap. In best case, it can store 2048
 bits in just 8 bytes. In worst case, it stores the 2048 bits uncompressed and
 requires additional 8 bytes of overhead.
@@ -41,7 +43,7 @@ absolute address (i.e. if the user sets bit 0 and bit 10000, and the chunk map
 capacity is 2048, the sparsemap creates two chunk maps; the first starts at
 offset 0, the second starts at offset 8192).
 
-# Usage instructions
+## Usage instructions
 
 The file `examples/ex_1.c` has example code.
 

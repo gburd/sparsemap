@@ -1,3 +1,14 @@
+#include <sys/types.h>
+
+#include <assert.h>
+#include <pthread.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+#include "../include/sparsemap.h"
+#include "common.h"
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wvariadic-macros"
@@ -8,51 +19,37 @@
   } while (0)
 #pragma GCC diagnostic pop
 
-#ifdef EXAMPLE_CODE
-int __prng = 0;
+int __xorshift32_state = 0;
 
 // Xorshift algorithm for PRNG
 uint32_t
 xorshift32()
 {
-  uint32_t x = *state = &__prng;
+  uint32_t x = __xorshift32_state;
   if (x == 0)
     x = 123456789;
   x ^= x << 13;
   x ^= x >> 17;
   x ^= x << 5;
-  *state = x;
+  __xorshift32_state = x;
   return x;
 }
 
 void
 xorshift32_seed()
 {
-  // Seed the PRNG
-#ifdef STABLE_SEED
-  __prng = 8675309;
-#else
-  __prng = (unsigned int)time(NULL) ^ getpid();
-#endif
+  __xorshift32_state = XORSHIFT_SEED_VALUE;
 }
-#else
-#define xorshift32 munit_rand_uint32
-#endif
 
 void
 shuffle(int *array, size_t n)
 {
-  size_t i, j;
-
-  if (n > 1) {
-    for (i = n - 1; i > 0; i--) {
-      j = (unsigned int)(xorshift32() % (i + 1));
-      // XOR swap algorithm
-      if (i != j) { // avoid self-swap leading to zero-ing the element
-        array[i] = array[i] ^ array[j];
-        array[j] = array[i] ^ array[j];
-        array[i] = array[i] ^ array[j];
-      }
+  for (size_t i = n - 1; i > 0; --i) {
+    size_t j = xorshift32() % (i + 1);
+    if (i != j) {
+      array[i] ^= array[j];
+      array[j] ^= array[i];
+      array[i] ^= array[j];
     }
   }
 }
@@ -65,10 +62,10 @@ compare_ints(const void *a, const void *b)
 
 // Check if there's already a sequence of 'r' sequential integers
 int
-has_sequential_set(int *a, size_t l, int r)
+has_sequential_set(int a[], int l, int r)
 {
   int count = 1; // Start with a count of 1 for the first number
-  for (size_t i = 1; i < l; ++i) {
+  for (int i = 1; i < l; ++i) {
     if (a[i] - a[i - 1] == 1) { // Check if the current and previous elements are sequential
       count++;
       if (count >= r)
@@ -82,10 +79,10 @@ has_sequential_set(int *a, size_t l, int r)
 
 // Function to ensure an array contains a set of 'r' sequential integers
 void
-ensure_sequential_set(int *a, size_t l, int r)
+ensure_sequential_set(int *a, int l, int r)
 {
-  if (r > l)
-    return; // If 'r' is greater than array length, cannot satisfy the condition
+  if (!a || l == 0 || r > l)
+    return;
 
   // Sort the array to check for existing sequences
   qsort(a, l, sizeof(int), compare_ints);
@@ -100,10 +97,10 @@ ensure_sequential_set(int *a, size_t l, int r)
   int max_value = a[l - 1];
 
   // Generate a random value between min_value and max_value
-  int value = xorshift32() % (max_value - min_value - r + 1);
+  int value = random_uint32() % (max_value - min_value - r + 1);
 
   // Generate a random location between 0 and l - r
-  int offset = xorshift32() % (l + r + 1);
+  int offset = random_uint32() % (l + r + 1);
 
   // Adjust the array to include a sequential set of 'r' integers at the random offset
   for (int i = 0; i < r; ++i) {
@@ -112,24 +109,24 @@ ensure_sequential_set(int *a, size_t l, int r)
 }
 
 void
-print_array(int *array, size_t l)
+print_array(int *array, int l)
 {
   int a[l];
   memcpy(a, array, sizeof(int) * l);
   qsort(a, l, sizeof(int), compare_ints);
 
-  printf("int a[] = {");
+  fprintf(stderr, "int a[] = {");
   for (int i = 0; i < l; i++) {
-    printf("%d", a[i]);
-    if (i != l) {
-      printf(", ");
+    fprintf(stderr, "%d", a[i]);
+    if (i != l - 1) {
+      fprintf(stderr, ", ");
     }
   }
-  printf("};\n");
+  fprintf(stderr, "};\n");
 }
 
 bool
-has_span(sparsemap_t *map, int *array, size_t l, size_t n)
+has_span(sparsemap_t *map, int *array, int l, int n)
 {
   if (n == 0 || l == 0 || n > l) {
     return false;
@@ -139,21 +136,14 @@ has_span(sparsemap_t *map, int *array, size_t l, size_t n)
   memcpy(sorted, array, sizeof(int) * l);
   qsort(sorted, l, sizeof(int), compare_ints);
 
-  for (size_t i = 0; i <= l - n; i++) {
+  for (int i = 0; i <= l - n; i++) {
     if (sorted[i] + n - 1 == sorted[i + n - 1]) {
-#if 0
-      fprintf(stderr, "Found span: ");
-      for (size_t j = i; j < i + n; j++) {
-        fprintf(stderr, "%d ", sorted[j]);
-      }
-       fprintf(stderr, "\n");
-#endif
-      for (size_t j = 0; j < n; j++) {
+      for (int j = 0; j < n; j++) {
         size_t pos = sorted[j + i];
         bool set = sparsemap_is_set(map, pos);
         assert(set);
       }
-      __diag("Found span: [%d, %d], length: %zu\n", sorted[i], sorted[i + n - 1], n);
+      __diag("Found span: [%d, %d], length: %d\n", sorted[i], sorted[i + n - 1], n);
       return true;
     }
   }
@@ -162,7 +152,7 @@ has_span(sparsemap_t *map, int *array, size_t l, size_t n)
 }
 
 bool
-is_span(int *array, size_t n, int x, int l)
+is_span(int *array, int n, int x, int l)
 {
   if (n == 0 || l < 0) {
     return false;
@@ -173,7 +163,7 @@ is_span(int *array, size_t n, int x, int l)
   qsort(a, n, sizeof(int), compare_ints);
 
   // Iterate through the array to find a span starting at x of length l
-  for (size_t i = 0; i < n; i++) {
+  for (int i = 0; i < n; i++) {
     if (a[i] == x) {
       // Check if the span can fit in the array
       if (i + l - 1 < n && a[i + l - 1] == x + l - 1) {
@@ -185,7 +175,7 @@ is_span(int *array, size_t n, int x, int l)
 }
 
 void
-print_spans(int *array, size_t n)
+print_spans(int *array, int n)
 {
   int a[n];
   size_t start = 0, end = 0;
@@ -198,7 +188,7 @@ print_spans(int *array, size_t n)
   memcpy(a, array, sizeof(int) * n);
   qsort(a, n, sizeof(int), compare_ints);
 
-  for (size_t i = 1; i < n; i++) {
+  for (int i = 1; i < n; i++) {
     if (a[i] == a[i - 1] + 1) {
       end = i; // Extend the span
     } else {
@@ -223,7 +213,7 @@ print_spans(int *array, size_t n)
 }
 
 bool
-was_set(size_t bit, const int array[])
+is_set(const int array[], int bit)
 {
   for (int i = 0; i < 1024; i++) {
     if (array[i] == (int)bit) {
@@ -234,9 +224,9 @@ was_set(size_t bit, const int array[])
 }
 
 int
-is_unique(int a[], size_t l, int value)
+is_unique(int a[], int l, int value)
 {
-  for (size_t i = 0; i < l; ++i) {
+  for (int i = 0; i < l; ++i) {
     if (a[i] == value) {
       return 0; // Not unique
     }
@@ -245,16 +235,32 @@ is_unique(int a[], size_t l, int value)
 }
 
 void
-setup_test_array(int a[], size_t l, int max_value)
+setup_test_array(int a[], int l, int max_value)
 {
   if (a == NULL || max_value < 0)
     return; // Basic error handling and validation
 
-  for (size_t i = 0; i < l; ++i) {
+  for (int i = 0; i < l; ++i) {
     int candidate;
     do {
-      candidate = xorshift32() % (max_value + 1); // Generate a new value within the specified range
-    } while (!is_unique(a, i, candidate));        // Repeat until a unique value is found
-    a[i] = candidate;                             // Assign the unique value to the array
+      candidate = random_uint32() % (max_value + 1); // Generate a new value within the specified range
+    } while (!is_unique(a, i, candidate));           // Repeat until a unique value is found
+    a[i] = candidate;                                // Assign the unique value to the array
   }
+}
+
+void
+bitmap_from_uint32(sparsemap_t *map, uint32_t number) {
+    for (int i = 0; i < 32; ++i) {
+        bool bit = number & (1 << i);
+        sparsemap_set(map, i, bit);
+    }
+}
+
+void
+bitmap_from_uint64(sparsemap_t *map, uint64_t number) {
+    for (int i = 0; i < 64; ++i) {
+        bool bit = number & (1 << i);
+        sparsemap_set(map, i, bit);
+    }
 }

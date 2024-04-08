@@ -16,7 +16,6 @@
  */
 
 #include <assert.h>
-#include <errno.h>
 #include <popcount.h>
 #include <sparsemap.h>
 #include <stdbool.h>
@@ -33,8 +32,8 @@
 void __attribute__((format(printf, 4, 5))) __sm_diag_(const char *file, int line, const char *func, const char *format, ...)
 {
   va_list args;
-  va_start(args, format);
   fprintf(stderr, "%s:%d:%s(): ", file, line, func);
+  va_start(args, format);
   vfprintf(stderr, format, args);
   va_end(args);
 }
@@ -433,6 +432,7 @@ static size_t
 __sm_chunk_map_rank(__sm_chunk_t *map, size_t first, size_t last, size_t *after)
 {
   size_t ret = 0;
+  (void)first; // TODO
 
   register uint8_t *p = (uint8_t *)map->m_data;
   for (size_t i = 0; i < sizeof(sm_bitvec_t); i++, p++) {
@@ -499,7 +499,7 @@ __sm_chunk_map_rank(__sm_chunk_t *map, size_t first, size_t last, size_t *after)
               *after = 0;
             }
           }
-          for (size_t k = ks; k < last; k++) {
+          for (size_t k = ks; k < last && k < sizeof(sm_bitvec_t); k++) {
             if (w & ((sm_bitvec_t)1 << k)) {
               ret++;
             }
@@ -946,7 +946,7 @@ sparsemap_set(sparsemap_t *map, size_t idx, bool value)
     break;
   case SM_NEEDS_TO_GROW:
     if (!dont_grow) {
-      offset += sizeof(sm_idx_t) + position * sizeof(sm_bitvec_t);
+      offset += (ssize_t)(sizeof(sm_idx_t) + position * sizeof(sm_bitvec_t));
       __sm_insert_data(map, offset, (uint8_t *)&fill, sizeof(sm_bitvec_t));
     }
     code = __sm_chunk_map_set(&chunk, idx - start, value, &position, &fill, true);
@@ -959,7 +959,7 @@ sparsemap_set(sparsemap_t *map, size_t idx, bool value)
       __sm_remove_data(map, offset, sizeof(sm_idx_t) + sizeof(sm_bitvec_t) * 2);
       __sm_set_chunk_map_count(map, __sm_get_chunk_map_count(map) - 1);
     } else {
-      offset += sizeof(sm_idx_t) + position * sizeof(sm_bitvec_t);
+      offset += (ssize_t)(sizeof(sm_idx_t) + position * sizeof(sm_bitvec_t));
       __sm_remove_data(map, offset, sizeof(sm_bitvec_t));
     }
     break;
@@ -979,8 +979,9 @@ sparsemap_set(sparsemap_t *map, size_t idx, bool value)
 sm_idx_t
 sparsemap_get_start_offset(sparsemap_t *map)
 {
-  if (__sm_get_chunk_map_count(map) == 0)
+  if (__sm_get_chunk_map_count(map) == 0) {
     return (0);
+  }
   return (*(sm_idx_t *)__sm_get_chunk_map_data(map, 0));
 }
 
@@ -1148,7 +1149,7 @@ size_t
 sparsemap_select(sparsemap_t *map, size_t n)
 {
   assert(sparsemap_get_size(map) >= SM_SIZEOF_OVERHEAD);
-  size_t result = 0;
+  size_t result;
   size_t count = __sm_get_chunk_map_count(map);
   uint8_t *p = __sm_get_chunk_map_data(map, 0);
 
@@ -1205,7 +1206,8 @@ sparsemap_rank(sparsemap_t *map, size_t first, size_t last)
 size_t
 sparsemap_span(sparsemap_t *map, size_t loc, size_t len)
 {
-  size_t offset, nth = 0, count = 0;
+  size_t offset, nth = 0, count;
+  (void)loc; // TODO
 
   offset = sparsemap_select(map, 0);
   if (len == 1) {
