@@ -2,7 +2,7 @@
 *.so
 **/*.o
 tests/test
-examples/ex_*
+examples/ex_?
 .cache
 hints.txt
 tmp/
@@ -13,6 +13,8 @@ git.diff
 .codelite/
 .cmaketools.json
 *.tags
+tags
+TAGS
 *.dll
 build/
 cmake-build*

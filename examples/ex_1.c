@@ -1,20 +1,22 @@
 #include <assert.h>
-#include <stdarg.h>
 #include <stdio.h>
-#include <stdlib.h>
 
 #include "../include/sparsemap.h"
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wvariadic-macros"
-#define __diag(...) \
-        do { fprintf(stderr, "%s:%d:%s(): ",__FILE__, __LINE__, __func__);\
-             fprintf(stderr, __VA_ARGS__); } while (0)
+#define __diag(...)                                                \
+  do {                                                             \
+    fprintf(stderr, "%s:%d:%s(): ", __FILE__, __LINE__, __func__); \
+    fprintf(stderr, __VA_ARGS__);                                  \
+  } while (0)
 #pragma GCC diagnostic pop
 
 // NOTE: currently, this code serves as a sample and unittest.
 
-int main() {
+int
+main()
+{
   size_t size = 4;
   setbuf(stderr, 0); // disable buffering
   __diag("Please wait a moment...");
@@ -85,11 +87,11 @@ int main() {
   }
 
   // open and compare
-  sparsemap_t *sm2 = sparsemap_open(buffer, sizeof(buffer));
+  sparsemap_t _sm3, *sm3 = &_sm3;
+  sparsemap_open(sm3, buffer, sizeof(buffer));
   for (int i = 0; i < 10000; i++) {
-    assert(sparsemap_is_set(sm2, i) == sparsemap_is_set(map, i));
+    assert(sparsemap_is_set(sm3, i) == sparsemap_is_set(map, i));
   }
-  free(sm2);
 
   // unset [10000..0]
   for (int i = 10000; i >= 0; i--) {
@@ -152,8 +154,7 @@ int main() {
   }
 
   // split and move, aligned to MiniMap capacity
-  sparsemap_t _sm2;
-  sm2 = &_sm2;
+  sparsemap_t _sm2, *sm2 = &_sm2;
   sparsemap_init(sm2, buffer2, sizeof(buffer2), 0);
   sparsemap_clear(sm2);
   for (int i = 0; i < 2048 * 2; i++) {
@@ -187,4 +188,4 @@ int main() {
   }
 
   fprintf(stderr, " ok\n");
-  }
+}

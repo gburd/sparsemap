@@ -15,27 +15,22 @@
  * PERFORMANCE OF THIS SOFTWARE.
  */
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wpedantic"
 #include <assert.h>
-#include <stdarg.h>
-#include <stdbool.h>
-#include <stddef.h>
-#include <stdint.h>
-#include <stdlib.h>
-#pragma GCC diagnostic pop
-
+#include <errno.h>
 #include <popcount.h>
 #include <sparsemap.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdlib.h>
 
 #ifdef SPARSEMAP_DIAGNOSTIC
 #pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
 #pragma GCC diagnostic ignored "-Wvariadic-macros"
-#define __sm_diag(format, ...) \
-  __sm_diag_(__FILE__, __LINE__, __func__, format, ##__VA_ARGS__)
+#include <stdarg.h>
+#define __sm_diag(format, ...) __sm_diag_(__FILE__, __LINE__, __func__, format, ##__VA_ARGS__)
 #pragma GCC diagnostic pop
-void __attribute__((format(printf, 4, 5))) __sm_diag_(const char *file,
-  int line, const char *func, const char *format, ...)
+void __attribute__((format(printf, 4, 5))) __sm_diag_(const char *file, int line, const char *func, const char *format, ...)
 {
   va_list args;
   va_start(args, format);
@@ -49,10 +44,9 @@ void __attribute__((format(printf, 4, 5))) __sm_diag_(const char *file,
 
 #ifndef SPARSEMAP_ASSERT
 #define SPARSEMAP_ASSERT
-#define __sm_assert(expr)                                                 \
-  if (!(expr))                                                            \
-  fprintf(stderr, "%s:%d:%s(): assertion failed! %s", __FILE__, __LINE__, \
-    __func__, #expr)
+#define __sm_assert(expr) \
+  if (!(expr))            \
+  fprintf(stderr, "%s:%d:%s(): assertion failed! %s", __FILE__, __LINE__, __func__, #expr)
 #else
 #define __sm_assert(expr) ((void)0)
 #endif
@@ -61,7 +55,7 @@ enum __SM_CHUNK_INFO {
   /* metadata overhead: 4 bytes for __sm_chunk_t count */
   SM_SIZEOF_OVERHEAD = sizeof(uint32_t),
 
-  /* number of bits that can be stored in a BitVector */
+  /* number of bits that can be stored in a sm_bitvec_t */
   SM_BITS_PER_VECTOR = (sizeof(sm_bitvec_t) * 8),
 
   /* number of flags that can be stored in a single index byte */
@@ -139,8 +133,7 @@ static size_t
 __sm_chunk_map_get_position(__sm_chunk_t *map, size_t bv)
 {
   // handle 4 indices (1 byte) at a time
-  size_t num_bytes = bv /
-    ((size_t)SM_FLAGS_PER_INDEX_BYTE * SM_BITS_PER_VECTOR);
+  size_t num_bytes = bv / ((size_t)SM_FLAGS_PER_INDEX_BYTE * SM_BITS_PER_VECTOR);
 
   size_t position = 0;
   register uint8_t *p = (uint8_t *)map->m_data;
@@ -150,8 +143,7 @@ __sm_chunk_map_get_position(__sm_chunk_t *map, size_t bv)
 
   bv -= num_bytes * SM_FLAGS_PER_INDEX_BYTE;
   for (size_t i = 0; i < bv; i++) {
-    size_t flags = ((*map->m_data) & ((sm_bitvec_t)SM_FLAG_MASK << (i * 2))) >>
-      (i * 2);
+    size_t flags = ((*map->m_data) & ((sm_bitvec_t)SM_FLAG_MASK << (i * 2))) >> (i * 2);
     if (flags == SM_PAYLOAD_MIXED) {
       position++;
     }
@@ -163,7 +155,7 @@ __sm_chunk_map_get_position(__sm_chunk_t *map, size_t bv)
 /**
  * Initialize __sm_chunk_t with provided data.
  */
-static void
+static inline void
 __sm_chunk_map_init(__sm_chunk_t *map, uint8_t *data)
 {
   map->m_data = (sm_bitvec_t *)data;
@@ -236,8 +228,7 @@ __sm_chunk_map_is_empty(__sm_chunk_t *map)
   for (size_t i = 0; i < sizeof(sm_bitvec_t); i++, p++) {
     if (*p) {
       for (int j = 0; j < SM_FLAGS_PER_INDEX_BYTE; j++) {
-        size_t flags = ((*p) & ((sm_bitvec_t)SM_FLAG_MASK << (j * 2))) >>
-          (j * 2);
+        size_t flags = ((*p) & ((sm_bitvec_t)SM_FLAG_MASK << (j * 2))) >> (j * 2);
         if (flags != SM_PAYLOAD_NONE && flags != SM_PAYLOAD_ZEROS) {
           return (false);
         }
@@ -275,8 +266,7 @@ __sm_chunk_map_is_set(__sm_chunk_t *map, size_t idx)
   __sm_assert(bv < SM_FLAGS_PER_INDEX);
 
   /* now retrieve the flags of that sm_bitvec_t */
-  size_t flags = ((*map->m_data) & ((sm_bitvec_t)SM_FLAG_MASK << (bv * 2))) >>
-    (bv * 2);
+  size_t flags = ((*map->m_data) & ((sm_bitvec_t)SM_FLAG_MASK << (bv * 2))) >> (bv * 2);
   switch (flags) {
   case SM_PAYLOAD_ZEROS:
   case SM_PAYLOAD_NONE:
@@ -304,16 +294,14 @@ __sm_chunk_map_is_set(__sm_chunk_t *map, size_t idx)
  * this time with |retried| = true.
  */
 static int
-__sm_chunk_map_set(__sm_chunk_t *map, size_t idx, bool value, size_t *pos,
-  sm_bitvec_t *fill, bool retried)
+__sm_chunk_map_set(__sm_chunk_t *map, size_t idx, bool value, size_t *pos, sm_bitvec_t *fill, bool retried)
 {
   /* In which sm_bitvec_t is |idx| stored? */
   size_t bv = idx / SM_BITS_PER_VECTOR;
   __sm_assert(bv < SM_FLAGS_PER_INDEX);
 
   /* Now retrieve the flags of that sm_bitvec_t. */
-  size_t flags = ((*map->m_data) & ((sm_bitvec_t)SM_FLAG_MASK << (bv * 2))) >>
-    (bv * 2);
+  size_t flags = ((*map->m_data) & ((sm_bitvec_t)SM_FLAG_MASK << (bv * 2))) >> (bv * 2);
   assert(flags != SM_PAYLOAD_NONE);
   if (flags == SM_PAYLOAD_ZEROS) {
     /* Easy - set bit to 0 in a sm_bitvec_t of zeroes. */
@@ -383,11 +371,11 @@ __sm_chunk_map_set(__sm_chunk_t *map, size_t idx, bool value, size_t *pos,
 }
 
 /**
- * Returns the index of the 'nth' set bit; sets |*pnew_n| to 0 if the
+ * Returns the index of the n'th set bit; sets |*pnew_n| to 0 if the
  * n'th bit was found in this __sm_chunk_t, or to the new, reduced value of |n|
  */
 static size_t
-__sm_chunk_map_select(__sm_chunk_t *map, ssize_t n, ssize_t *pnew_n)
+__sm_chunk_map_select(__sm_chunk_t *map, size_t n, ssize_t *pnew_n)
 {
   size_t ret = 0;
   register uint8_t *p;
@@ -419,8 +407,7 @@ __sm_chunk_map_select(__sm_chunk_t *map, ssize_t n, ssize_t *pnew_n)
         return (ret + n);
       }
       if (flags == SM_PAYLOAD_MIXED) {
-        sm_bitvec_t w = map->m_data[1 +
-          __sm_chunk_map_get_position(map, i * SM_FLAGS_PER_INDEX_BYTE + j)];
+        sm_bitvec_t w = map->m_data[1 + __sm_chunk_map_get_position(map, i * SM_FLAGS_PER_INDEX_BYTE + j)];
         for (int k = 0; k < SM_BITS_PER_VECTOR; k++) {
           if (w & ((sm_bitvec_t)1 << k)) {
             if (n == 0) {
@@ -435,15 +422,15 @@ __sm_chunk_map_select(__sm_chunk_t *map, ssize_t n, ssize_t *pnew_n)
     }
   }
 
-  *pnew_n = n;
+  *pnew_n = (ssize_t)n;
   return (ret);
 }
 
 /**
- * Counts the set bits in the range [0, idx].
+ * Counts the set bits in the range [first, last] inclusive.
  */
 static size_t
-__sm_chunk_map_rank(__sm_chunk_t *map, size_t idx)
+__sm_chunk_map_rank(__sm_chunk_t *map, size_t first, size_t last, size_t *after)
 {
   size_t ret = 0;
 
@@ -455,27 +442,64 @@ __sm_chunk_map_rank(__sm_chunk_t *map, size_t idx)
         continue;
       }
       if (flags == SM_PAYLOAD_ZEROS) {
-        if (idx > SM_BITS_PER_VECTOR) {
-          idx -= SM_BITS_PER_VECTOR;
+        if (last > SM_BITS_PER_VECTOR) {
+          if (*after > SM_BITS_PER_VECTOR) {
+            *after = *after - SM_BITS_PER_VECTOR;
+          } else {
+            last -= SM_BITS_PER_VECTOR - *after;
+            *after = 0;
+          }
         } else {
           return (ret);
         }
       } else if (flags == SM_PAYLOAD_ONES) {
-        if (idx > SM_BITS_PER_VECTOR) {
-          idx -= SM_BITS_PER_VECTOR;
-          ret += SM_BITS_PER_VECTOR;
+        if (last > SM_BITS_PER_VECTOR) {
+          if (*after > SM_BITS_PER_VECTOR) {
+            *after = *after - SM_BITS_PER_VECTOR;
+          } else {
+            last -= SM_BITS_PER_VECTOR - *after;
+            if (*after == 0) {
+              ret += SM_BITS_PER_VECTOR;
+            }
+            *after = 0;
+          }
         } else {
-          return (ret + idx);
+          return (ret + last);
         }
       } else if (flags == SM_PAYLOAD_MIXED) {
-        if (idx > SM_BITS_PER_VECTOR) {
-          idx -= SM_BITS_PER_VECTOR;
-          ret += popcountll((uint64_t)map->m_data[1 +
-            __sm_chunk_map_get_position(map, i * SM_FLAGS_PER_INDEX_BYTE + j)]);
+        if (last > SM_BITS_PER_VECTOR) {
+          last -= SM_BITS_PER_VECTOR;
+          if (*after > SM_BITS_PER_VECTOR) {
+            *after = *after - SM_BITS_PER_VECTOR;
+          } else {
+            sm_bitvec_t w = map->m_data[1 + __sm_chunk_map_get_position(map, i * SM_FLAGS_PER_INDEX_BYTE + j)];
+            uint64_t mask = UINT64_MAX;
+            if (*after > 0) {
+              mask = ~(mask >> (SM_BITS_PER_VECTOR - *after));
+              size_t amt = popcountll(w & mask);
+              if (amt <= *after) {
+                *after = *after - amt;
+              } else {
+                *after = 0;
+                ret += popcountll(w & ~mask);
+              }
+            } else {
+              ret += popcountll(w);
+            }
+          }
         } else {
-          sm_bitvec_t w = map->m_data[1 +
-            __sm_chunk_map_get_position(map, i * SM_FLAGS_PER_INDEX_BYTE + j)];
-          for (size_t k = 0; k < idx; k++) {
+          sm_bitvec_t w = map->m_data[1 + __sm_chunk_map_get_position(map, i * SM_FLAGS_PER_INDEX_BYTE + j)];
+          size_t ks = 0;
+          if (*after > 0) {
+            if (*after > last) {
+              ks = last;
+              *after = *after - last;
+            } else {
+              ks += *after;
+              *after = 0;
+            }
+          }
+          for (size_t k = ks; k < last; k++) {
             if (w & ((sm_bitvec_t)1 << k)) {
               ret++;
             }
@@ -493,8 +517,7 @@ __sm_chunk_map_rank(__sm_chunk_t *map, size_t idx)
  * Returns the number of (set) bits that were passed to the scanner
  */
 static size_t
-__sm_chunk_map_scan(__sm_chunk_t *map, sm_idx_t start,
-  void (*scanner)(sm_idx_t[], size_t), size_t skip)
+__sm_chunk_map_scan(__sm_chunk_t *map, sm_idx_t start, void (*scanner)(sm_idx_t[], size_t), size_t skip)
 {
   size_t ret = 0;
   register uint8_t *p = (uint8_t *)map->m_data;
@@ -531,8 +554,7 @@ __sm_chunk_map_scan(__sm_chunk_t *map, sm_idx_t start,
           ret += SM_BITS_PER_VECTOR;
         }
       } else if (flags == SM_PAYLOAD_MIXED) {
-        sm_bitvec_t w = map->m_data[1 +
-          __sm_chunk_map_get_position(map, i * SM_FLAGS_PER_INDEX_BYTE + j)];
+        sm_bitvec_t w = map->m_data[1 + __sm_chunk_map_get_position(map, i * SM_FLAGS_PER_INDEX_BYTE + j)];
         int n = 0;
         if (skip) {
           for (int b = 0; b < SM_BITS_PER_VECTOR; b++) {
@@ -647,7 +669,7 @@ __sm_get_chunk_map_offset(sparsemap_t *map, size_t idx)
   uint8_t *p = start;
 
   for (size_t i = 0; i < count - 1; i++) {
-    sm_idx_t start = *(sm_idx_t *)p; //TODO wtf...
+    sm_idx_t start = *(sm_idx_t *)p;
     __sm_assert(start == __sm_get_aligned_offset(start));
     __sm_chunk_t chunk;
     __sm_chunk_map_init(&chunk, p + sizeof(sm_idx_t));
@@ -692,9 +714,8 @@ __sm_append_data(sparsemap_t *map, uint8_t *buffer, size_t buffer_size)
 /**
  * Inserts data somewhere in the middle of m_data.
  */
-static void
-__sm_insert_data(sparsemap_t *map, size_t offset, uint8_t *buffer,
-  size_t buffer_size)
+static int
+__sm_insert_data(sparsemap_t *map, size_t offset, uint8_t *buffer, size_t buffer_size)
 {
   if (map->m_data_used + buffer_size > map->m_data_size) {
     __sm_assert(!"buffer overflow");
@@ -705,6 +726,7 @@ __sm_insert_data(sparsemap_t *map, size_t offset, uint8_t *buffer,
   memmove(p + buffer_size, p, map->m_data_used - offset);
   memcpy(p, buffer, buffer_size);
   map->m_data_used += buffer_size;
+  return 0;
 }
 
 /**
@@ -720,8 +742,8 @@ __sm_remove_data(sparsemap_t *map, size_t offset, size_t gap_size)
 }
 
 /**
-*  Clears the whole buffer
-*/
+ *  Clears the whole buffer
+ */
 void
 sparsemap_clear(sparsemap_t *map)
 {
@@ -757,16 +779,12 @@ sparsemap_init(sparsemap_t *map, uint8_t *data, size_t size, size_t used)
 /**
  * Opens an existing sparsemap at the specified buffer.
  */
-sparsemap_t *
-sparsemap_open(uint8_t *data, size_t data_size)
+void
+sparsemap_open(sparsemap_t *map, uint8_t *data, size_t data_size)
 {
-  sparsemap_t *map = (sparsemap_t *)calloc(1, sizeof(sparsemap_t));
-  if (map) {
-    map->m_data = data;
-    map->m_data_used = 0;
-    map->m_data_size = data_size;
-  }
-  return map;
+  map->m_data = data;
+  map->m_data_used = 0;
+  map->m_data_size = data_size;
 }
 
 /**
@@ -922,8 +940,7 @@ sparsemap_set(sparsemap_t *map, size_t idx, bool value)
   /* Now update the __sm_chunk_t. */
   size_t position;
   sm_bitvec_t fill;
-  int code = __sm_chunk_map_set(&chunk, idx - start, value, &position, &fill,
-    false);
+  int code = __sm_chunk_map_set(&chunk, idx - start, value, &position, &fill, false);
   switch (code) {
   case SM_OK:
     break;
@@ -932,8 +949,7 @@ sparsemap_set(sparsemap_t *map, size_t idx, bool value)
       offset += sizeof(sm_idx_t) + position * sizeof(sm_bitvec_t);
       __sm_insert_data(map, offset, (uint8_t *)&fill, sizeof(sm_bitvec_t));
     }
-    code = __sm_chunk_map_set(&chunk, idx - start, value, &position, &fill,
-      true);
+    code = __sm_chunk_map_set(&chunk, idx - start, value, &position, &fill, true);
     __sm_assert(code == SM_OK);
     break;
   case SM_NEEDS_TO_SHRINK:
@@ -985,8 +1001,7 @@ sparsemap_get_size(sparsemap_t *map)
  * Decompresses the whole bitmap; calls scanner for all bits.
  */
 void
-sparsemap_scan(sparsemap_t *map, void (*scanner)(sm_idx_t[], size_t),
-  size_t skip)
+sparsemap_scan(sparsemap_t *map, void (*scanner)(sm_idx_t[], size_t), size_t skip)
 {
   uint8_t *p = __sm_get_chunk_map_data(map, 0);
   size_t count = __sm_get_chunk_map_count(map);
@@ -1135,7 +1150,6 @@ sparsemap_select(sparsemap_t *map, size_t n)
   assert(sparsemap_get_size(map) >= SM_SIZEOF_OVERHEAD);
   size_t result = 0;
   size_t count = __sm_get_chunk_map_count(map);
-
   uint8_t *p = __sm_get_chunk_map_data(map, 0);
 
   for (size_t i = 0; i < count; i++) {
@@ -1144,7 +1158,7 @@ sparsemap_select(sparsemap_t *map, size_t n)
     __sm_chunk_t chunk;
     __sm_chunk_map_init(&chunk, p);
 
-    ssize_t new_n = n;
+    ssize_t new_n = (ssize_t)n;
     size_t index = __sm_chunk_map_select(&chunk, n, &new_n);
     if (new_n == -1) {
       return (result + index);
@@ -1153,33 +1167,62 @@ sparsemap_select(sparsemap_t *map, size_t n)
 
     p += __sm_chunk_map_get_size(&chunk);
   }
+#ifdef DEBUG
   assert(!"shouldn't be here");
-  return (0);
+#endif
+  return (size_t)-1;
 }
 
 /**
- * Counts the set bits in the range [offset, idx].
+ * Counts the set bits in the range [first, last] inclusive.
  */
 size_t
-sparsemap_rank(sparsemap_t *map, size_t offset, size_t idx)
+sparsemap_rank(sparsemap_t *map, size_t first, size_t last)
 {
   assert(sparsemap_get_size(map) >= SM_SIZEOF_OVERHEAD);
-  size_t result = 0;
-  size_t count = __sm_get_chunk_map_count(map);
-
-  uint8_t *p = __sm_get_chunk_map_data(map, offset);
+  size_t result = 0, after = first, count = __sm_get_chunk_map_count(map);
+  uint8_t *p = __sm_get_chunk_map_data(map, 0);
 
   for (size_t i = 0; i < count; i++) {
     sm_idx_t start = *(sm_idx_t *)p;
-    if (start > idx) {
+    if (start > last) {
       return (result);
     }
     p += sizeof(sm_idx_t);
     __sm_chunk_t chunk;
     __sm_chunk_map_init(&chunk, p);
 
-    result += __sm_chunk_map_rank(&chunk, idx - start);
+    result += __sm_chunk_map_rank(&chunk, first - start, last - start, &after);
     p += __sm_chunk_map_get_size(&chunk);
   }
   return (result);
+}
+
+/**
+ * Finds a span of set bits of at least |len| after |loc|. Returns the index of
+ * the n'th set bit that starts a span of at least |len| bits set to true.
+ */
+size_t
+sparsemap_span(sparsemap_t *map, size_t loc, size_t len)
+{
+  size_t offset, nth = 0, count = 0;
+
+  offset = sparsemap_select(map, 0);
+  if (len == 1) {
+    return offset;
+  }
+  do {
+    count = sparsemap_rank(map, offset, offset + len);
+    if (count == len) {
+      return offset;
+    } else {
+      count = len;
+      while (--count && sparsemap_is_set(map, offset)) {
+        nth++;
+      }
+    }
+    offset = sparsemap_select(map, nth);
+  } while (offset != ((size_t)-1));
+
+  return offset;
 }
