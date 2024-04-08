@@ -37,8 +37,8 @@ main(void)
 
   // randomize setting the bits on
   shuffle(array, TEST_ARRAY_SIZE);
-  //print_array(array, TEST_ARRAY_SIZE);
-  //print_spans(array, TEST_ARRAY_SIZE);
+  // print_array(array, TEST_ARRAY_SIZE);
+  // print_spans(array, TEST_ARRAY_SIZE);
 
   // set all the bits on in a random order
   for (i = 0; i < TEST_ARRAY_SIZE; i++) {
@@ -46,15 +46,15 @@ main(void)
     assert(sparsemap_is_set(map, array[i]) == true);
   }
 
-    // for (size_t len = 1; len < 20; len++) {
-    // for (size_t len = 1; len < TEST_ARRAY_SIZE - 1; len++) {
-    // for (size_t len = 1; len <= 1; len++) {
-    // for (size_t len = 2; len <= 2; len++) {
-    // for (size_t len = 3; len <= 3; len++) {
-    // for (size_t len = 4; len <= 4; len++) {
-    // for (size_t len = 5; len <= 5; len++) {
-    // for (size_t len = 8; len <= 8; len++) {
-    for (size_t len = 372; len <= 372; len++) {
+  // for (size_t len = 1; len < 20; len++) {
+  // for (size_t len = 1; len < TEST_ARRAY_SIZE - 1; len++) {
+  // for (size_t len = 1; len <= 1; len++) {
+  // for (size_t len = 2; len <= 2; len++) {
+  // for (size_t len = 3; len <= 3; len++) {
+  // for (size_t len = 4; len <= 4; len++) {
+  // for (size_t len = 5; len <= 5; len++) {
+  // for (size_t len = 8; len <= 8; len++) {
+  for (size_t len = 372; len <= 372; len++) {
     __diag("================> %lu\n", len);
     sparsemap_clear(map);
     // set all the bits on in a random order

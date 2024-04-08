@@ -21,6 +21,9 @@
  * SOFTWARE.
  */
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
+
 /*** Configuration ***/
 
 /* This is just where the output from the test goes.  It's really just
@@ -2253,3 +2256,5 @@ munit_suite_main(const MunitSuite *suite, void *user_data, int argc,
 {
   return munit_suite_main_custom(suite, user_data, argc, argv, NULL);
 }
+
+#pragma GCC diagnostic pop

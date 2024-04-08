@@ -16,7 +16,8 @@ uint32_t
 xorshift32()
 {
   uint32_t x = *state = &__prng;
-  if (x == 0) x = 123456789;
+  if (x == 0)
+    x = 123456789;
   x ^= x << 13;
   x ^= x >> 17;
   x ^= x << 5;
@@ -25,7 +26,8 @@ xorshift32()
 }
 
 void
-xorshift32_seed() {
+xorshift32_seed()
+{
   // Seed the PRNG
 #ifdef STABLE_SEED
   __prng = 8675309;
@@ -62,12 +64,15 @@ compare_ints(const void *a, const void *b)
 }
 
 // Check if there's already a sequence of 'r' sequential integers
-int has_sequential_set(int *a, size_t l, int r) {
+int
+has_sequential_set(int *a, size_t l, int r)
+{
   int count = 1; // Start with a count of 1 for the first number
   for (size_t i = 1; i < l; ++i) {
     if (a[i] - a[i - 1] == 1) { // Check if the current and previous elements are sequential
       count++;
-      if (count >= r) return 1; // Found a sequential set of length 'r'
+      if (count >= r)
+        return 1; // Found a sequential set of length 'r'
     } else {
       count = 1; // Reset count if the sequence breaks
     }
@@ -76,8 +81,11 @@ int has_sequential_set(int *a, size_t l, int r) {
 }
 
 // Function to ensure an array contains a set of 'r' sequential integers
-void ensure_sequential_set(int *a, size_t l, int r) {
-  if (r > l) return; // If 'r' is greater than array length, cannot satisfy the condition
+void
+ensure_sequential_set(int *a, size_t l, int r)
+{
+  if (r > l)
+    return; // If 'r' is greater than array length, cannot satisfy the condition
 
   // Sort the array to check for existing sequences
   qsort(a, l, sizeof(int), compare_ints);
@@ -226,7 +234,8 @@ was_set(size_t bit, const int array[])
 }
 
 int
-is_unique(int a[], size_t l, int value) {
+is_unique(int a[], size_t l, int value)
+{
   for (size_t i = 0; i < l; ++i) {
     if (a[i] == value) {
       return 0; // Not unique
@@ -238,14 +247,14 @@ is_unique(int a[], size_t l, int value) {
 void
 setup_test_array(int a[], size_t l, int max_value)
 {
-  if (a == NULL || max_value < 0) return; // Basic error handling and validation
+  if (a == NULL || max_value < 0)
+    return; // Basic error handling and validation
 
   for (size_t i = 0; i < l; ++i) {
     int candidate;
     do {
       candidate = xorshift32() % (max_value + 1); // Generate a new value within the specified range
-    } while (!is_unique(a, i, candidate)); // Repeat until a unique value is found
-    a[i] = candidate; // Assign the unique value to the array
+    } while (!is_unique(a, i, candidate));        // Repeat until a unique value is found
+    a[i] = candidate;                             // Assign the unique value to the array
   }
 }
-

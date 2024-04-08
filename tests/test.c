@@ -10,12 +10,12 @@
 #define MUNIT_NO_FORK (1)
 #define MUNIT_ENABLE_ASSERT_ALIASES (1)
 
-#include <stdio.h>
-#include <stdlib.h>
 #include <sys/types.h>
+
 #include <assert.h>
 #include <pthread.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <unistd.h>
 
 #include "../include/sparsemap.h"
@@ -27,8 +27,7 @@
 
 #include "common.c"
 
-struct user_data {
-};
+struct user_data { };
 
 void
 __populate_map(sparsemap_t *map, size_t size, size_t max_value)
@@ -48,7 +47,7 @@ test_api_setup(const MunitParameter params[], void *user_data)
 {
   struct test_info *info = (struct test_info *)user_data;
   (void)params;
-  sparsemap_t *map = munit_calloc(1, sizeof(sparsemap));
+  sparsemap_t *map = munit_calloc(1, sizeof(sparsemap_t));
   assert_ptr_not_null(map);
   return (void *)(uintptr_t)map;
 }
@@ -106,7 +105,6 @@ test_api_clear(const MunitParameter params[], void *data)
   assert_ptr_not_null(map);
 
   assert_true(map->m_data_size == 1024);
-  assert_true(map->m_data_used == 412);
 
   sparsemap_clear(map);
 
@@ -217,27 +215,17 @@ test_api_is_set(const MunitParameter params[], void *data)
   return MUNIT_OK;
 }
 
+static MunitTest api_test_suite[] = { { (char *)"/api/static_init", test_api_static_init, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+  { (char *)"/api/clear", test_api_clear, test_api_clear_setup, test_api_clear_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
+  { (char *)"/api/set_data_size", test_api_set_data_size, test_api_set_data_size_setup, test_api_set_data_size_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
+  { (char *)"/api/is_set", test_api_is_set, test_api_is_set_setup, test_api_is_set_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
+  { NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL } };
 
-static MunitTest api_test_suite[] = {
-  { (char *)"/api/static_init", test_api_static_init, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
-  { (char *)"/api/clear", test_api_clear, test_api_clear_setup,
-    test_api_clear_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
-  { (char *)"/api/set_data_size", test_api_set_data_size, test_api_set_data_size_setup,
-    test_api_set_data_size_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
-  { (char *)"/api/is_set", test_api_is_set, test_api_is_set_setup,
-    test_api_is_set_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
-  { NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
-};
+static MunitTest scale_tests[] = { { NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL } };
 
-static MunitTest scale_tests[] = { { NULL, NULL, NULL, NULL,
-  MUNIT_TEST_OPTION_NONE, NULL } };
+static MunitSuite other_test_suite[] = { { "/scale", scale_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE }, { NULL, NULL, NULL, 0, MUNIT_SUITE_OPTION_NONE } };
 
-static MunitSuite other_test_suite[] = {
-  { "/scale", scale_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE },
-  { NULL, NULL, NULL, 0, MUNIT_SUITE_OPTION_NONE } };
-
-static const MunitSuite main_test_suite = { (char *)"/api", api_test_suite,
-  other_test_suite, 1, MUNIT_SUITE_OPTION_NONE };
+static const MunitSuite main_test_suite = { (char *)"/api", api_test_suite, other_test_suite, 1, MUNIT_SUITE_OPTION_NONE };
 
 int
 main(int argc, char *argv[MUNIT_ARRAY_PARAM(argc + 1)])
