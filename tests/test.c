@@ -201,13 +201,25 @@ test_api_remaining_capacity(const MunitParameter params[], void *data)
 
   assert_ptr_not_null(map);
 
-  int i = 0, cap = sparsemap_remaining_capacity(map);
-  while (cap > 0 && i < 10000) {
+  int i = 0;
+  double cap;
+  do {
     sparsemap_set(map, i++, true);
-    int new_cap =  sparsemap_remaining_capacity(map);
-    assert_true(new_cap <= cap);
-    cap = new_cap;
-  }
+    cap = sparsemap_capacity_remaining(map);
+  } while (cap > 1.0);
+  //assert_true(i == 169985); when seed is 8675309
+  assert_true(cap <= 1.0);
+
+  sparsemap_clear(map);
+  i = 0;
+  do {
+    int p = munit_rand_int_range(0, 150000);
+    sparsemap_set(map, p, true);
+    i++;
+    cap = sparsemap_capacity_remaining(map);
+  } while (cap > 1.0);
+  //assert_true(i == 64); when seed is 8675309
+  assert_true(cap <= 1.0);
 
   return MUNIT_OK;
 }

@@ -802,13 +802,15 @@ sparsemap_set_data_size(sparsemap_t *map, size_t data_size)
  * Calculates the remaining capacity as an integer that approaches 0 to
  * indicate full.
  */
-int
-sparsemap_remaining_capacity(sparsemap_t *map) {
+double
+sparsemap_capacity_remaining(sparsemap_t *map) {
   if (map->m_data_used > map->m_data_size) {
     return 0;
   }
-  int remaining = (int)(map->m_data_size - map->m_data_used);
-  return (remaining > 100) ? 100 : remaining;
+  if (map->m_data_size == 0) {
+    return 100.0;
+  }
+  return 100 - (double)(((double)map->m_data_used / map->m_data_size) * 100);
 }
 
 /**

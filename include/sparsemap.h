@@ -90,7 +90,7 @@ void sparsemap_open(sparsemap_t *, uint8_t *data, size_t data_size);
 void sparsemap_set_data_size(sparsemap_t *map, size_t data_size);
 
 /* Calculate remaining capacity, full when 0. */
-int sparsemap_remaining_capacity(sparsemap_t *map);
+double sparsemap_capacity_remaining(sparsemap_t *map);
 
 /* Returns the size of the underlying byte array. */
 size_t sparsemap_get_range_size(sparsemap_t *map);
