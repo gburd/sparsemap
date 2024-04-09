@@ -748,6 +748,7 @@ __sm_remove_data(sparsemap_t *map, size_t offset, size_t gap_size)
 void
 sparsemap_clear(sparsemap_t *map)
 {
+  memset(map->m_data, 0, map->m_data_size);
   map->m_data_used = SM_SIZEOF_OVERHEAD;
   __sm_set_chunk_map_count(map, 0);
 }
@@ -795,6 +796,19 @@ void
 sparsemap_set_data_size(sparsemap_t *map, size_t data_size)
 {
   map->m_data_size = data_size;
+}
+
+/**
+ * Calculates the remaining capacity as an integer that approaches 0 to
+ * indicate full.
+ */
+int
+sparsemap_remaining_capacity(sparsemap_t *map) {
+  if (map->m_data_used > map->m_data_size) {
+    return 0;
+  }
+  int remaining = (int)(map->m_data_size - map->m_data_used);
+  return (remaining > 100) ? 100 : remaining;
 }
 
 /**

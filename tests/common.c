@@ -251,7 +251,7 @@ setup_test_array(int a[], int l, int max_value)
 
 void
 bitmap_from_uint32(sparsemap_t *map, uint32_t number) {
-    for (int i = 0; i < 32; ++i) {
+    for (int i = 0; i < 32; i++) {
         bool bit = number & (1 << i);
         sparsemap_set(map, i, bit);
     }
@@ -259,7 +259,7 @@ bitmap_from_uint32(sparsemap_t *map, uint32_t number) {
 
 void
 bitmap_from_uint64(sparsemap_t *map, uint64_t number) {
-    for (int i = 0; i < 64; ++i) {
+    for (int i = 0; i < 64; i++) {
         bool bit = number & (1 << i);
         sparsemap_set(map, i, bit);
     }
@@ -290,4 +290,18 @@ rank_uint64(uint64_t number, int n, int p)
     }
 
     return count;
+}
+
+int
+whats_set_uint64(uint64_t number, int pos[64])
+{
+    int length = 0;
+
+    for (int i = 0; i < 64; i++) {
+        if (number & ((uint64_t)1 << i)) {
+            pos[length++] = i;
+        }
+    }
+
+    return length;
 }

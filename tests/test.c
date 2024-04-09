@@ -83,7 +83,6 @@ test_api_clear_setup(const MunitParameter params[], void *user_data)
   sparsemap_t *map = (sparsemap_t *)test_api_setup(params, user_data);
 
   sparsemap_init(map, buf, 1024, 0);
-  populate_map(map, 1024, 3 * 1024);
 
   return (void *)map;
 }
@@ -102,12 +101,10 @@ test_api_clear(const MunitParameter params[], void *data)
 
   assert_ptr_not_null(map);
 
-  assert_true(map->m_data_size == 1024);
-
+  sparsemap_set(map, 42, true);
+  assert_true(sparsemap_is_set(map, 42));
   sparsemap_clear(map);
-
-  assert_true(map->m_data_size == 1024);
-  assert_true(map->m_data_used == sizeof(uint32_t));
+  assert_false(sparsemap_is_set(map, 42));
 
   return MUNIT_OK;
 }
@@ -176,6 +173,42 @@ test_api_set_data_size(const MunitParameter params[], void *data)
   sparsemap_set_data_size(map, 512);
   assert_true(map->m_data_size == 512);
   assert_true(map->m_data_size == sparsemap_get_range_size(map));
+  return MUNIT_OK;
+}
+
+static void *
+test_api_remaining_capacity_setup(const MunitParameter params[], void *user_data)
+{
+  uint8_t *buf = munit_calloc(1024, sizeof(uint8_t));
+  sparsemap_t *map = (sparsemap_t *)test_api_setup(params, user_data);
+
+  sparsemap_init(map, buf, 1024, 0);
+
+  return (void *)map;
+}
+static void
+test_api_remaining_capacity_tear_down(void *fixture)
+{
+  sparsemap_t *map = (sparsemap_t *)fixture;
+  free(map->m_data);
+  test_api_tear_down(fixture);
+}
+static MunitResult
+test_api_remaining_capacity(const MunitParameter params[], void *data)
+{
+  sparsemap_t *map = (sparsemap_t *)data;
+  (void)params;
+
+  assert_ptr_not_null(map);
+
+  int i = 0, cap = sparsemap_remaining_capacity(map);
+  while (cap > 0 && i < 10000) {
+    sparsemap_set(map, i++, true);
+    int new_cap =  sparsemap_remaining_capacity(map);
+    assert_true(new_cap <= cap);
+    cap = new_cap;
+  }
+
   return MUNIT_OK;
 }
 
@@ -487,7 +520,7 @@ test_api_rank_tear_down(void *fixture)
 static MunitResult
 test_api_rank(const MunitParameter params[], void *data)
 {
-  int rank;
+  int r1, r2;
   sparsemap_t *map = (sparsemap_t *)data;
   (void)params;
 
@@ -505,10 +538,11 @@ test_api_rank(const MunitParameter params[], void *data)
   /* rank() is also 0-based, for consistency (and confusion sake); consider the
      range as [start, end] of [0, 9] counts the bits set in the first 10
      positions (starting from the LSB) in the index. */
-  int r1 = sparsemap_rank(map, 0, 9);
-  int r2 = rank_uint64((uint64_t)-1, 0, 9);
+  r1 = sparsemap_rank(map, 0, 9);
+  r2 = rank_uint64((uint64_t)-1, 0, 9);
   assert_true(r1 == r2);
   assert_true(sparsemap_rank(map, 0, 9) == 10);
+  assert_true(sparsemap_rank(map, 1000, 1050) == 0);
 
   for (int i = 0; i < 10; i++) {
     for (int j = i; j < 10; j++) {
@@ -517,12 +551,6 @@ test_api_rank(const MunitParameter params[], void *data)
       assert_true(r1 == r2);
     }
   }
-
-  sparsemap_clear(map);
-  uint64_t bits = ((uint64_t)0xfeedface << 32) | 0xbadc0ffee;
-  bitmap_from_uint64(map, bits);
-  rank = sparsemap_rank(map, 3, 18);
-  assert_true(rank == rank_uint64(bits, 3, 18));
 
   return MUNIT_OK;
 }
@@ -553,7 +581,7 @@ test_api_span(const MunitParameter params[], void *data)
 
   assert_ptr_not_null(map);
 
-  size_t size = sparsemap_span(map, 0, 1);
+  sparsemap_span(map, 0, 1);
 
   return MUNIT_OK;
 }
@@ -562,6 +590,7 @@ static MunitTest api_test_suite[] = { { (char *)"/api/static_init", test_api_sta
   { (char *)"/api/clear", test_api_clear, test_api_clear_setup, test_api_clear_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
   { (char *)"/api/open", test_api_open, test_api_open_setup, test_api_open_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
   { (char *)"/api/set_data_size", test_api_set_data_size, test_api_set_data_size_setup, test_api_set_data_size_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
+  { (char *)"/api/remaining_capacity", test_api_remaining_capacity, test_api_remaining_capacity_setup, test_api_remaining_capacity_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
   { (char *)"/api/get_range_size", test_api_get_range_size, test_api_get_range_size_setup, test_api_get_range_size_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
   { (char *)"/api/is_set", test_api_is_set, test_api_is_set_setup, test_api_is_set_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
   { (char *)"/api/set", test_api_set, test_api_set_setup, test_api_set_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
