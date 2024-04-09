@@ -42,7 +42,7 @@ xorshift32_seed()
 }
 
 void
-shuffle(int *array, size_t n)
+shuffle(int *array, size_t n) // TODO working?
 {
   for (size_t i = n - 1; i > 0; --i) {
     size_t j = xorshift32() % (i + 1);
@@ -64,32 +64,40 @@ compare_ints(const void *a, const void *b)
 int
 has_sequential_set(int a[], int l, int r)
 {
-  int count = 1; // Start with a count of 1 for the first number
+  // Start with a count of 1 for the first number
+  int count = 1;
   for (int i = 1; i < l; ++i) {
-    if (a[i] - a[i - 1] == 1) { // Check if the current and previous elements are sequential
+    // Check if the current and previous elements are sequential
+    if (a[i] - a[i - 1] == 1) {
       count++;
-      if (count >= r)
-        return 1; // Found a sequential set of length 'r'
+      if (count >= r) {
+        // Found a sequential set of length 'r' starting at 'i'
+        return i;
+      }
     } else {
-      count = 1; // Reset count if the sequence breaks
+      // Reset count if the sequence breaks
+      count = 1;
     }
   }
-  return 0; // No sequential set of length 'r' found
+  // No sequential set of length 'r' found
+  return -1;
 }
 
 // Function to ensure an array contains a set of 'r' sequential integers
-void
-ensure_sequential_set(int *a, int l, int r)
+int
+ensure_sequential_set(int a[], int l, int r)
 {
-  if (!a || l == 0 || r > l)
-    return;
+  if (!a || l == 0 || r < 1 || r > l) {
+    return 0;
+  }
 
   // Sort the array to check for existing sequences
   qsort(a, l, sizeof(int), compare_ints);
 
   // Check if a sequential set of length 'r' already exists
-  if (has_sequential_set(a, l, r)) {
-    return; // Sequence already exists, no modification needed
+  int offset = has_sequential_set(a, l, r);
+  if (offset >= 0) {
+    return offset; // Sequence already exists, no modification needed
   }
 
   // Find the minimum and maximum values in the array
@@ -98,14 +106,25 @@ ensure_sequential_set(int *a, int l, int r)
 
   // Generate a random value between min_value and max_value
   int value = random_uint32() % (max_value - min_value - r + 1);
-
   // Generate a random location between 0 and l - r
-  int offset = random_uint32() % (l + r + 1);
+  offset = random_uint32() % (l - r - 1);
 
   // Adjust the array to include a sequential set of 'r' integers at the random offset
   for (int i = 0; i < r; ++i) {
     a[i + offset] = value + i;
   }
+  return value;
+}
+
+int
+create_sequential_set_in_empty_map(sparsemap_t *map, int s, int r)
+{
+  int placed_at;
+  placed_at = random_uint32() % (s - r - 1);
+  for (int i = placed_at; i < placed_at + r; i++) {
+    sparsemap_set(map, i, true);
+  }
+  return placed_at;
 }
 
 void
@@ -304,4 +323,16 @@ whats_set_uint64(uint64_t number, int pos[64])
     }
 
     return length;
+}
+
+void
+whats_set(sparsemap_t *map, int m)
+{
+  logf("what's set in the range [0, %d): ", m);
+  for (int i = 0; i < m; i++) {
+    if (sparsemap_is_set(map, i)) {
+      logf("%d ", i);
+    }
+  }
+  logf("\n");
 }

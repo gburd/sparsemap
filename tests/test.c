@@ -31,7 +31,7 @@ populate_map(sparsemap_t *map, int size, int max_value)
   int array[size];
 
   setup_test_array(array, size, max_value);
-  ensure_sequential_set(array, size, 10);
+  //TODO ensure_sequential_set(array, size, 10);
   shuffle(array, size);
   for (int i = 0; i < size; i++) {
     sparsemap_set(map, array[i], true);
@@ -574,7 +574,6 @@ test_api_span_setup(const MunitParameter params[], void *user_data)
   sparsemap_t *map = (sparsemap_t *)test_api_setup(params, user_data);
 
   sparsemap_init(map, buf, 1024, 0);
-  populate_map(map, 1024, 3 * 1024);
 
   return (void *)map;
 }
@@ -593,7 +592,18 @@ test_api_span(const MunitParameter params[], void *data)
 
   assert_ptr_not_null(map);
 
-  sparsemap_span(map, 0, 1);
+  int located_at, placed_at, amt = 5000;
+  for (int i = 1; i < amt; i++) {
+    for (int j = 1; j < amt / 10; j++) {
+      sparsemap_clear(map);
+      placed_at = create_sequential_set_in_empty_map(map, amt, j);
+//      whats_set(map, amt);
+      located_at = sparsemap_span(map, 0, j);
+      assert_true(located_at == placed_at);
+      located_at = sparsemap_span(map, (placed_at < j ? 0 : placed_at / 2), i);
+      assert_true(placed_at == located_at);
+    }
+  }
 
   return MUNIT_OK;
 }

@@ -467,44 +467,39 @@ __sm_chunk_map_rank(__sm_chunk_t *map, size_t first, size_t last, size_t *after)
           return (ret + last);
         }
       } else if (flags == SM_PAYLOAD_MIXED) {
+        sm_bitvec_t w = map->m_data[1 + __sm_chunk_map_get_position(map, i * SM_FLAGS_PER_INDEX_BYTE + j)];
         if (last > SM_BITS_PER_VECTOR) {
           last -= SM_BITS_PER_VECTOR;
+          /* Create a mask for the range of bits except those we don't want to consider. */
+          uint64_t mask = ~(UINT64_MAX >> (SM_BITS_PER_VECTOR - *after));
+          uint64_t mw = w & mask;
+          ret += popcountll(mw);
           if (*after > SM_BITS_PER_VECTOR) {
-            *after = *after - SM_BITS_PER_VECTOR;
+            *after -= SM_BITS_PER_VECTOR;
           } else {
-            sm_bitvec_t w = map->m_data[1 + __sm_chunk_map_get_position(map, i * SM_FLAGS_PER_INDEX_BYTE + j)];
-            uint64_t mask = UINT64_MAX;
-            if (*after > 0) {
-              mask = ~(mask >> (SM_BITS_PER_VECTOR - *after));
-              size_t amt = popcountll(w & mask);
-              if (amt <= *after) {
-                *after = *after - amt;
-              } else {
-                *after = 0;
-                ret += popcountll(w & ~mask);
-              }
-            } else {
-              ret += popcountll(w);
-            }
+            *after = 0;
           }
         } else {
-          sm_bitvec_t w = map->m_data[1 + __sm_chunk_map_get_position(map, i * SM_FLAGS_PER_INDEX_BYTE + j)];
-          size_t ks = 0;
+          uint64_t mask_l, mask_r, mask;
           if (*after > 0) {
             if (*after > last) {
-              ks = last;
               *after = *after - last;
+              /* This gives us 'last' number of ones on the right. */
+              mask_r = ((uint64_t)1 << last) - 1;
             } else {
-              ks += *after;
+              /* This gives us '*after' number of ones on the right. */
+              mask_r = (((uint64_t)1 << *after) - 1);
               *after = 0;
             }
+            /* Used to shift the mask_r block to the left 'last' times. */
+            mask_l = ((uint64_t)1 << (last + 1));
+            mask = mask_l - 1 - mask_r;
+          } else {
+            mask = UINT64_MAX >> (SM_BITS_PER_VECTOR - last - 1);
           }
-          uint64_t mask = ((uint64_t)1 << (last + 1)) - 1 - (((uint64_t)1 << ks) - 1);
-          uint64_t masked = w & mask;
-          while (masked) {
-            ret += masked & 1;
-            masked >>= 1;
-          }
+          /* Create a mask for the range between *after and last. */
+          uint64_t mw = w & mask;
+          ret += popcountll(mw);
           return (ret);
         }
       }
@@ -1198,7 +1193,7 @@ size_t
 sparsemap_rank(sparsemap_t *map, size_t first, size_t last)
 {
   assert(sparsemap_get_size(map) >= SM_SIZEOF_OVERHEAD);
-  size_t result = 0, after = first, count = __sm_get_chunk_map_count(map);
+  size_t result = 0, after = first, prev = 0, count = __sm_get_chunk_map_count(map);
   uint8_t *p = __sm_get_chunk_map_data(map, 0);
 
   for (size_t i = 0; i < count; i++) {
@@ -1206,6 +1201,8 @@ sparsemap_rank(sparsemap_t *map, size_t first, size_t last)
     if (start > last) {
       return (result);
     }
+    after -= start - prev;
+    prev = start;
     p += sizeof(sm_idx_t);
     __sm_chunk_t chunk;
     __sm_chunk_map_init(&chunk, p);
