@@ -499,10 +499,11 @@ __sm_chunk_map_rank(__sm_chunk_t *map, size_t first, size_t last, size_t *after)
               *after = 0;
             }
           }
-          for (size_t k = ks; k < last && k < sizeof(sm_bitvec_t); k++) {
-            if (w & ((sm_bitvec_t)1 << k)) {
-              ret++;
-            }
+          uint64_t mask = ((uint64_t)1 << (last + 1)) - 1 - (((uint64_t)1 << ks) - 1);
+          uint64_t masked = w & mask;
+          while (masked) {
+            ret += masked & 1;
+            masked >>= 1;
           }
           return (ret);
         }

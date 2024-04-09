@@ -44,6 +44,7 @@
                 pkg-config
                 python3
                 ripgrep
+                valgrind
               ];
               buildInputs = with pkgs; [
                 libbacktrace

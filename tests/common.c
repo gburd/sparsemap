@@ -264,3 +264,30 @@ bitmap_from_uint64(sparsemap_t *map, uint64_t number) {
         sparsemap_set(map, i, bit);
     }
 }
+
+uint32_t
+rank_uint64(uint64_t number, int n, int p)
+{
+    if (p < n || p > 63) {
+        return 0;
+    }
+
+    /* Create a mask for the range between n and p.
+       This works by shifting 1 to the left (p+1) times, subtracting 1 to have
+       a sequence of p 1's, then shifting n times to the left to position it
+       starting at n. Finally, subtracting (1 << n) - 1 removes the bits below
+       n from the mask. */
+    uint64_t mask = ((uint64_t)1 << (p + 1)) - 1 - (((uint64_t)1 << n) - 1);
+
+    /* Apply the mask and count the set bits in the result. */
+    uint64_t maskedNumber = number & mask;
+
+    /* Count the bits set in maskedNumber. */
+    uint32_t count = 0;
+    while (maskedNumber) {
+      count += maskedNumber & 1;
+      maskedNumber >>= 1;
+    }
+
+    return count;
+}

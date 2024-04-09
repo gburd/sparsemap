@@ -439,7 +439,7 @@ test_api_select_setup(const MunitParameter params[], void *user_data)
   sparsemap_t *map = (sparsemap_t *)test_api_setup(params, user_data);
 
   sparsemap_init(map, buf, 1024, 0);
-  populate_map(map, 1024, 3 * 1024);
+  bitmap_from_uint64(map, ((uint64_t)0xfeedface << 32) | 0xbadc0ffee);
 
   return (void *)map;
 }
@@ -458,7 +458,11 @@ test_api_select(const MunitParameter params[], void *data)
 
   assert_ptr_not_null(map);
 
-  size_t size = sparsemap_select(map, 1);
+  /* NOTE: select() is 0-based, to get the bit position of the 1st logical bit set
+     call select(map, 0), to get the 18th, select(map, 17), etc. */
+  assert_true(sparsemap_select(map, 0) == 1);
+  assert_true(sparsemap_select(map, 4) == 6);
+  assert_true(sparsemap_select(map, 17) == 26);
 
   return MUNIT_OK;
 }
@@ -470,7 +474,6 @@ test_api_rank_setup(const MunitParameter params[], void *user_data)
   sparsemap_t *map = (sparsemap_t *)test_api_setup(params, user_data);
 
   sparsemap_init(map, buf, 1024, 0);
-  populate_map(map, 1024, 3 * 1024);
 
   return (void *)map;
 }
@@ -484,12 +487,42 @@ test_api_rank_tear_down(void *fixture)
 static MunitResult
 test_api_rank(const MunitParameter params[], void *data)
 {
+  int rank;
   sparsemap_t *map = (sparsemap_t *)data;
   (void)params;
 
   assert_ptr_not_null(map);
 
-  size_t size = sparsemap_rank(map, 0, 1);
+  for (int i = 0; i < 10; i++) {
+    sparsemap_set(map, i, true);
+  }
+  for (int i = 0; i < 10; i++) {
+    assert_true(sparsemap_is_set(map, i));
+  }
+  for (int i = 10; i < 1000; i++) {
+    assert_true(!sparsemap_is_set(map, i));
+  }
+  /* rank() is also 0-based, for consistency (and confusion sake); consider the
+     range as [start, end] of [0, 9] counts the bits set in the first 10
+     positions (starting from the LSB) in the index. */
+  int r1 = sparsemap_rank(map, 0, 9);
+  int r2 = rank_uint64((uint64_t)-1, 0, 9);
+  assert_true(r1 == r2);
+  assert_true(sparsemap_rank(map, 0, 9) == 10);
+
+  for (int i = 0; i < 10; i++) {
+    for (int j = i; j < 10; j++) {
+      r1 = sparsemap_rank(map, i, j);
+      r2 = rank_uint64((uint64_t)-1, i, j);
+      assert_true(r1 == r2);
+    }
+  }
+
+  sparsemap_clear(map);
+  uint64_t bits = ((uint64_t)0xfeedface << 32) | 0xbadc0ffee;
+  bitmap_from_uint64(map, bits);
+  rank = sparsemap_rank(map, 3, 18);
+  assert_true(rank == rank_uint64(bits, 3, 18));
 
   return MUNIT_OK;
 }
