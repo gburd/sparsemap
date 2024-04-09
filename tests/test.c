@@ -550,16 +550,16 @@ test_api_rank(const MunitParameter params[], void *data)
   /* rank() is also 0-based, for consistency (and confusion sake); consider the
      range as [start, end] of [0, 9] counts the bits set in the first 10
      positions (starting from the LSB) in the index. */
-  r1 = sparsemap_rank(map, 0, 9);
-  r2 = rank_uint64((uint64_t)-1, 0, 9);
+  r1 = rank_uint64((uint64_t)-1, 0, 9);
+  r2 = sparsemap_rank(map, 0, 9);
   assert_true(r1 == r2);
   assert_true(sparsemap_rank(map, 0, 9) == 10);
   assert_true(sparsemap_rank(map, 1000, 1050) == 0);
 
   for (int i = 0; i < 10; i++) {
     for (int j = i; j < 10; j++) {
-      r1 = sparsemap_rank(map, i, j);
-      r2 = rank_uint64((uint64_t)-1, i, j);
+      r1 = rank_uint64((uint64_t)-1, i, j);
+      r2 = sparsemap_rank(map, i, j);
       assert_true(r1 == r2);
     }
   }
@@ -592,20 +592,29 @@ test_api_span(const MunitParameter params[], void *data)
 
   assert_ptr_not_null(map);
 
-  int located_at, placed_at, amt = 5000;
-  for (int i = 1; i < amt; i++) {
-    for (int j = 1; j < amt / 10; j++) {
-      sparsemap_clear(map);
-      placed_at = create_sequential_set_in_empty_map(map, amt, j);
-//      whats_set(map, amt);
-      located_at = sparsemap_span(map, 0, j);
-      assert_true(located_at == placed_at);
-//TODO      located_at = sparsemap_span(map, (placed_at < j ? 0 : placed_at / 2), i);
-//      assert_true(placed_at == located_at);
+    int located_at, placed_at, amt = 5000;
+    for (int i = 1; i < amt; i++) {
+      for (int j = 1; j < amt / 10; j++) {
+        sparsemap_clear(map);
+        placed_at = create_sequential_set_in_empty_map(map, amt, j);
+        located_at = sparsemap_span(map, 0, j);
+        assert_true(located_at == placed_at);
+      }
     }
-  }
 
-  return MUNIT_OK;
+    for (int i = 1; i < amt; i++) {
+      for (int j = 1; j < amt / 10; j++) {
+        sparsemap_clear(map);
+        populate_map(map, 1024, 3 * 1024);
+        placed_at = create_sequential_set_in_empty_map(map, amt, j);
+        located_at = sparsemap_span(map, 0, j);
+        assert_true(located_at <= placed_at);
+        //TODO      located_at = sparsemap_span(map, (placed_at < j ? 0 : placed_at / 2), i);
+        //      assert_true(placed_at == located_at);
+      }
+    }
+
+    return MUNIT_OK;
 }
 
 static MunitTest api_test_suite[] = { { (char *)"/api/static_init", test_api_static_init, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },

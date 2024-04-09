@@ -429,10 +429,9 @@ __sm_chunk_map_select(__sm_chunk_t *map, size_t n, ssize_t *pnew_n)
  * Counts the set bits in the range [first, last] inclusive.
  */
 static size_t
-__sm_chunk_map_rank(__sm_chunk_t *map, size_t first, size_t last, size_t *after)
+__sm_chunk_map_rank(__sm_chunk_t *map, size_t last, size_t *after)
 {
   size_t ret = 0;
-  (void)first; // TODO
 
   register uint8_t *p = (uint8_t *)map->m_data;
   for (size_t i = 0; i < sizeof(sm_bitvec_t); i++, p++) {
@@ -480,24 +479,10 @@ __sm_chunk_map_rank(__sm_chunk_t *map, size_t first, size_t last, size_t *after)
             *after = 0;
           }
         } else {
-          uint64_t mask_l, mask_r, mask;
-          if (*after > 0) {
-            if (*after > last) {
-              *after = *after - last;
-              /* This gives us 'last' number of ones on the right. */
-              mask_r = ((uint64_t)1 << last) - 1;
-            } else {
-              /* This gives us '*after' number of ones on the right. */
-              mask_r = (((uint64_t)1 << *after) - 1);
-              *after = 0;
-            }
-            /* Used to shift the mask_r block to the left 'last' times. */
-            mask_l = ((uint64_t)1 << (last + 1));
-            mask = mask_l - 1 - mask_r;
-          } else {
-            mask = UINT64_MAX >> (SM_BITS_PER_VECTOR - last - 1);
-          }
-          /* Create a mask for the range between *after and last. */
+          uint64_t mask;
+          /* Create a mask for the range between after and last inclusive [*after, last]. */
+          mask = ((uint64_t)1 << (last + 1)) - 1 - (((uint64_t)1 << *after) - 1);
+          *after -= (*after > last) ? last : *after;
           uint64_t mw = w & mask;
           ret += popcountll(mw);
           return (ret);
@@ -1207,7 +1192,7 @@ sparsemap_rank(sparsemap_t *map, size_t first, size_t last)
     __sm_chunk_t chunk;
     __sm_chunk_map_init(&chunk, p);
 
-    result += __sm_chunk_map_rank(&chunk, first - start, last - start, &after);
+    result += __sm_chunk_map_rank(&chunk, last - start, &after);
     p += __sm_chunk_map_get_size(&chunk);
   }
   return (result);
