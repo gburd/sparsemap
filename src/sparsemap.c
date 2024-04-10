@@ -1,26 +1,32 @@
 /*
- * Copyright (c) 2024
- *	Gregory Burd <greg@burd.me>.  All rights reserved.
+ * Copyright (c) 2024 Gregory Burd <greg@burd.me>.  All rights reserved.
  *
- * ISC License Permission to use, copy, modify, and/or distribute this software
- * for any purpose with or without fee is hereby granted, provided that the
- * above copyright notice and this permission notice appear in all copies.
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
  *
- * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH
- * REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY
- * AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT,
- * INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM
- * LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR
- * OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
- * PERFORMANCE OF THIS SOFTWARE.
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
  */
 
-#include <assert.h>
-#include <popcount.h>
-#include <sparsemap.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <assert.h>
+
+#include <popcount.h>
+#include <sparsemap.h>
 
 #ifdef SPARSEMAP_DIAGNOSTIC
 #pragma GCC diagnostic push
@@ -91,9 +97,19 @@ enum __SM_CHUNK_INFO {
   SM_NEEDS_TO_SHRINK = 2
 };
 
+#define SM_CHUNK_GET_FLAGS(from, at) (((from)) & ((sm_bitvec_t)SM_FLAG_MASK << ((at) * 2))) >> ((at) * 2)
+
+
 typedef struct {
   sm_bitvec_t *m_data;
 } __sm_chunk_t;
+
+struct sparsemap {
+  uint8_t *m_data;         /* The serialized bitmap data */
+  size_t m_capacity;       /* The total size of m_data */
+  size_t m_data_used;      /* The used size of m_data */
+};
+
 
 /**
  * Calculates the number of sm_bitvec_ts required by a single byte with flags
@@ -142,7 +158,7 @@ __sm_chunk_map_get_position(__sm_chunk_t *map, size_t bv)
 
   bv -= num_bytes * SM_FLAGS_PER_INDEX_BYTE;
   for (size_t i = 0; i < bv; i++) {
-    size_t flags = ((*map->m_data) & ((sm_bitvec_t)SM_FLAG_MASK << (i * 2))) >> (i * 2);
+    size_t flags = SM_CHUNK_GET_FLAGS(*map->m_data, i);
     if (flags == SM_PAYLOAD_MIXED) {
       position++;
     }
@@ -174,7 +190,7 @@ __sm_chunk_map_get_capacity(__sm_chunk_t *map)
       continue;
     }
     for (int j = 0; j < SM_FLAGS_PER_INDEX_BYTE; j++) {
-      size_t flags = ((*p) & ((sm_bitvec_t)SM_FLAG_MASK << (j * 2))) >> (j * 2);
+      size_t flags = SM_CHUNK_GET_FLAGS(*p, j);
       if (flags == SM_PAYLOAD_NONE) {
         capacity -= SM_BITS_PER_VECTOR;
       }
@@ -199,8 +215,8 @@ __sm_chunk_map_set_capacity(__sm_chunk_t *map, size_t capacity)
   register uint8_t *p = (uint8_t *)map->m_data;
   for (ssize_t i = sizeof(sm_bitvec_t) - 1; i >= 0; i--) { // TODO:
     for (int j = SM_FLAGS_PER_INDEX_BYTE - 1; j >= 0; j--) {
-      p[i] &= ~((sm_bitvec_t)0x03 << (j * 2));
-      p[i] |= ((sm_bitvec_t)0x01 << (j * 2));
+      p[i] &= ~((sm_bitvec_t)SM_PAYLOAD_ONES << (j * 2));
+      p[i] |= ((sm_bitvec_t)SM_PAYLOAD_NONE << (j * 2));
       reduced += SM_BITS_PER_VECTOR;
       if (capacity + reduced == SM_CHUNK_MAX_CAPACITY) {
         __sm_assert(__sm_chunk_map_get_capacity(map) == capacity);
@@ -227,7 +243,7 @@ __sm_chunk_map_is_empty(__sm_chunk_t *map)
   for (size_t i = 0; i < sizeof(sm_bitvec_t); i++, p++) {
     if (*p) {
       for (int j = 0; j < SM_FLAGS_PER_INDEX_BYTE; j++) {
-        size_t flags = ((*p) & ((sm_bitvec_t)SM_FLAG_MASK << (j * 2))) >> (j * 2);
+        size_t flags = SM_CHUNK_GET_FLAGS(*p, j);
         if (flags != SM_PAYLOAD_NONE && flags != SM_PAYLOAD_ZEROS) {
           return (false);
         }
@@ -265,7 +281,7 @@ __sm_chunk_map_is_set(__sm_chunk_t *map, size_t idx)
   __sm_assert(bv < SM_FLAGS_PER_INDEX);
 
   /* now retrieve the flags of that sm_bitvec_t */
-  size_t flags = ((*map->m_data) & ((sm_bitvec_t)SM_FLAG_MASK << (bv * 2))) >> (bv * 2);
+  size_t flags = SM_CHUNK_GET_FLAGS(*map->m_data, bv);
   switch (flags) {
   case SM_PAYLOAD_ZEROS:
   case SM_PAYLOAD_NONE:
@@ -300,7 +316,7 @@ __sm_chunk_map_set(__sm_chunk_t *map, size_t idx, bool value, size_t *pos, sm_bi
   __sm_assert(bv < SM_FLAGS_PER_INDEX);
 
   /* Now retrieve the flags of that sm_bitvec_t. */
-  size_t flags = ((*map->m_data) & ((sm_bitvec_t)SM_FLAG_MASK << (bv * 2))) >> (bv * 2);
+  size_t flags = SM_CHUNK_GET_FLAGS(*map->m_data, bv);
   assert(flags != SM_PAYLOAD_NONE);
   if (flags == SM_PAYLOAD_ZEROS) {
     /* Easy - set bit to 0 in a sm_bitvec_t of zeroes. */
@@ -316,31 +332,31 @@ __sm_chunk_map_set(__sm_chunk_t *map, size_t idx, bool value, size_t *pos, sm_bi
       *fill = 0;
       return SM_NEEDS_TO_GROW;
     }
-    /* new flags are 2#10 (currently, flags are set to 2#00
-       2#00 | 2#10 = 2#10) */
-    map->m_data[0] |= ((sm_bitvec_t)0x2 << (bv * 2));
+    /* New flags are 2#10 meaning SM_PAYLOAD_MIXED. Currently, flags are set
+       to 2#00, so 2#00 | 2#10 = 2#10. */
+    *map->m_data |= ((sm_bitvec_t)SM_PAYLOAD_MIXED << (bv * 2));
     /* FALLTHROUGH */
   } else if (flags == SM_PAYLOAD_ONES) {
-    /* easy - set bit to 1 in a sm_bitvec_t of ones */
+    /* Easy - set bit to 1 in a sm_bitvec_t of ones. */
     if (value == true) {
       *pos = 0;
       *fill = 0;
       return SM_OK;
     }
-    /* the sparsemap must grow this __sm_chunk_t by one additional sm_bitvec_t,
-       then try again */
+    /* The sparsemap must grow this __sm_chunk_t by one additional sm_bitvec_t,
+       then try again. */
     if (!retried) {
       *pos = 1 + __sm_chunk_map_get_position(map, bv);
       *fill = (sm_bitvec_t)-1;
       return SM_NEEDS_TO_GROW;
     }
-    /* new flags are 2#10 (currently, flags are set to 2#11;
-       2#11 ^ 2#01 = 2#10) */
-    map->m_data[0] ^= ((sm_bitvec_t)0x1 << (bv * 2));
+    /* New flags are 2#10 meaning SM_PAYLOAD_MIXED. Currently, flags are
+       set to 2#11, so 2#11 ^ 2#01 = 2#10. */
+    map->m_data[0] ^= ((sm_bitvec_t)SM_PAYLOAD_NONE << (bv * 2));
     /* FALLTHROUGH */
   }
 
-  /* now flip the bit */
+  /* Now flip the bit. */
   size_t position = 1 + __sm_chunk_map_get_position(map, bv);
   sm_bitvec_t w = map->m_data[position];
   if (value) {
@@ -349,7 +365,7 @@ __sm_chunk_map_set(__sm_chunk_t *map, size_t idx, bool value, size_t *pos, sm_bi
     w &= ~((sm_bitvec_t)1 << (idx % SM_BITS_PER_VECTOR));
   }
 
-  /* if this sm_bitvec_t is now all zeroes or ones then we can remove it */
+  /* If this sm_bitvec_t is now all zeroes or ones then we can remove it. */
   if (w == 0) {
     map->m_data[0] &= ~((sm_bitvec_t)SM_PAYLOAD_ONES << (bv * 2));
     *pos = position;
@@ -371,7 +387,8 @@ __sm_chunk_map_set(__sm_chunk_t *map, size_t idx, bool value, size_t *pos, sm_bi
 
 /**
  * Returns the index of the n'th set bit; sets |*pnew_n| to 0 if the
- * n'th bit was found in this __sm_chunk_t, or to the new, reduced value of |n|
+ * n'th bit was found in this __sm_chunk_t, or to the new, reduced
+ * value of |n|.
  */
 static size_t
 __sm_chunk_map_select(__sm_chunk_t *map, size_t n, ssize_t *pnew_n)
@@ -387,7 +404,7 @@ __sm_chunk_map_select(__sm_chunk_t *map, size_t n, ssize_t *pnew_n)
     }
 
     for (int j = 0; j < SM_FLAGS_PER_INDEX_BYTE; j++) {
-      size_t flags = ((*p) & ((sm_bitvec_t)SM_FLAG_MASK << (j * 2))) >> (j * 2);
+      size_t flags = SM_CHUNK_GET_FLAGS(*p, j);
       if (flags == SM_PAYLOAD_NONE) {
         continue;
       }
@@ -439,7 +456,7 @@ __sm_chunk_map_rank(__sm_chunk_t *map, size_t *offset, size_t idx)
   register uint8_t *p = (uint8_t *)map->m_data;
   for (size_t i = 0; i < sizeof(sm_bitvec_t); i++, p++) {
     for (int j = 0; j < SM_FLAGS_PER_INDEX_BYTE; j++) {
-      size_t flags = ((*p) & ((sm_bitvec_t)SM_FLAG_MASK << (j * 2))) >> (j * 2);
+      size_t flags = SM_CHUNK_GET_FLAGS(*p, j);
       if (flags == SM_PAYLOAD_NONE) {
         continue;
       }
@@ -471,14 +488,16 @@ __sm_chunk_map_rank(__sm_chunk_t *map, size_t *offset, size_t idx)
       } else if (flags == SM_PAYLOAD_MIXED) {
         sm_bitvec_t w = map->m_data[1 + __sm_chunk_map_get_position(map, i * SM_FLAGS_PER_INDEX_BYTE + j)];
         if (idx > SM_BITS_PER_VECTOR) {
-          uint64_t mask_offset = *offset > 64 ? 0 : ~(UINT64_MAX >> (SM_BITS_PER_VECTOR - *offset));
+          //uint64_t mask_offset = ~(UINT64_MAX >> (SM_BITS_PER_VECTOR - (*offset > 63 ? 63 : *offset)));
+          uint64_t mask_offset = ~(UINT64_MAX >> (SM_BITS_PER_VECTOR - *offset));
           idx -= SM_BITS_PER_VECTOR;
           ret += popcountll(w & mask_offset);
           *offset = (*offset > SM_BITS_PER_VECTOR) ? *offset - SM_BITS_PER_VECTOR : 0;
         } else {
           /* Create a mask for the range between offset and idx inclusive [*offset, idx]. */
-          uint64_t offset_mask = *offset > 64 ? 0 : (((uint64_t)1 << *offset) - 1);
-          uint64_t idx_mask = ((uint64_t)1 << (idx + 1)) - 1;
+          //uint64_t offset_mask = *offset > 63 ? 63 : (((uint64_t)1 << *offset) - 1);
+          uint64_t offset_mask = (((uint64_t)1 << *offset) - 1);
+          uint64_t idx_mask = idx >= 63 ? UINT64_MAX : ((uint64_t)1 << (idx + 1)) - 1;
           ret += popcountll(w & (idx_mask - offset_mask));
           *offset = *offset > idx ? *offset - idx : 0;
           return (ret);
@@ -506,7 +525,7 @@ __sm_chunk_map_scan(__sm_chunk_t *map, sm_idx_t start, void (*scanner)(sm_idx_t[
     }
 
     for (int j = 0; j < SM_FLAGS_PER_INDEX_BYTE; j++) {
-      size_t flags = ((*p) & ((sm_bitvec_t)SM_FLAG_MASK << (j * 2))) >> (j * 2);
+      size_t flags = SM_CHUNK_GET_FLAGS(*p, j);
       if (flags == SM_PAYLOAD_NONE || flags == SM_PAYLOAD_ZEROS) {
         /* ignore the zeroes */
       } else if (flags == SM_PAYLOAD_ONES) {
@@ -576,10 +595,10 @@ __sm_get_chunk_map_count(sparsemap_t *map)
 /**
  * Returns the data at the specified |offset|.
  */
-static uint8_t *
+static inline uint8_t *
 __sm_get_chunk_map_data(sparsemap_t *map, size_t offset)
 {
-  return (&map->m_data[SM_SIZEOF_OVERHEAD + offset]);
+  return (uint8_t *)(&map->m_data[SM_SIZEOF_OVERHEAD + offset]);
 }
 
 /**
@@ -694,7 +713,7 @@ __sm_append_data(sparsemap_t *map, uint8_t *buffer, size_t buffer_size)
 static int
 __sm_insert_data(sparsemap_t *map, size_t offset, uint8_t *buffer, size_t buffer_size)
 {
-  if (map->m_data_used + buffer_size > map->m_data_size) {
+  if (map->m_data_used + buffer_size > map->m_capacity) {
     __sm_assert(!"buffer overflow");
     abort();
   }
@@ -724,7 +743,7 @@ __sm_remove_data(sparsemap_t *map, size_t offset, size_t gap_size)
 void
 sparsemap_clear(sparsemap_t *map)
 {
-  memset(map->m_data, 0, map->m_data_size);
+  memset(map->m_data, 0, map->m_capacity);
   map->m_data_used = SM_SIZEOF_OVERHEAD;
   __sm_set_chunk_map_count(map, 0);
 }
@@ -733,11 +752,11 @@ sparsemap_clear(sparsemap_t *map)
  * Allocate on a sparsemap_t on the heap and initialize it.
  */
 sparsemap_t *
-sparsemap(uint8_t *data, size_t size, size_t used)
+sparsemap(uint8_t *data, size_t size)
 {
   sparsemap_t *map = (sparsemap_t *)calloc(1, sizeof(sparsemap_t));
   if (map) {
-    sparsemap_init(map, data, size, used);
+    sparsemap_init(map, data, size);
   }
   return map;
 }
@@ -746,11 +765,11 @@ sparsemap(uint8_t *data, size_t size, size_t used)
  * Initialize sparsemap_t with data.
  */
 void
-sparsemap_init(sparsemap_t *map, uint8_t *data, size_t size, size_t used)
+sparsemap_init(sparsemap_t *map, uint8_t *data, size_t size)
 {
-  map->m_data = data;
-  map->m_data_used = used;
-  map->m_data_size = size == 0 ? UINT64_MAX : size;
+  map->m_data = (__sm_chunk_t*)data;
+  map->m_data_used = 0;
+  map->m_capacity = size == 0 ? UINT64_MAX : size;
   sparsemap_clear(map);
 }
 
@@ -760,18 +779,21 @@ sparsemap_init(sparsemap_t *map, uint8_t *data, size_t size, size_t used)
 void
 sparsemap_open(sparsemap_t *map, uint8_t *data, size_t data_size)
 {
-  map->m_data = data;
+  map->m_data = (__sm_chunk_t*)data;
   map->m_data_used = 0;
-  map->m_data_size = data_size;
+  map->m_capacity = data_size;
 }
 
 /**
  * Resizes the data range.
+ *
+ * TODO/NOTE: This is a dangerous operation because we cannot verify that
+ *       data_size is not exceeding the size of the underlying buffer.
  */
 void
 sparsemap_set_data_size(sparsemap_t *map, size_t data_size)
 {
-  map->m_data_size = data_size;
+  map->m_capacity = data_size;
 }
 
 /**
@@ -780,22 +802,22 @@ sparsemap_set_data_size(sparsemap_t *map, size_t data_size)
  */
 double
 sparsemap_capacity_remaining(sparsemap_t *map) {
-  if (map->m_data_used > map->m_data_size) {
+  if (map->m_data_used > map->m_capacity) {
     return 0;
   }
-  if (map->m_data_size == 0) {
+  if (map->m_capacity == 0) {
     return 100.0;
   }
-  return 100 - (double)(((double)map->m_data_used / map->m_data_size) * 100);
+  return 100 - (((double)map->m_data_used / (double)map->m_capacity) * 100);
 }
 
 /**
  * Returns the size of the underlying byte array.
  */
 size_t
-sparsemap_get_range_size(sparsemap_t *map)
+sparsemap_get_capacity(sparsemap_t *map)
 {
-  return (map->m_data_size);
+  return (map->m_capacity);
 }
 
 /**

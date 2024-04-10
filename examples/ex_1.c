@@ -12,7 +12,14 @@
   } while (0)
 #pragma GCC diagnostic pop
 
-// NOTE: currently, this code serves as a sample and unittest.
+
+/* !!! Duplicated here for testing purposes. Keep in sync, or suffer. !!! */
+struct sparsemap {
+  uint8_t *m_data;
+  size_t m_capacity;
+  size_t m_data_used;
+};
+
 
 int
 main()
@@ -23,7 +30,7 @@ main()
   sparsemap_t mmap, *map = &mmap;
   uint8_t buffer[1024];
   uint8_t buffer2[1024];
-  sparsemap_init(map, buffer, sizeof(buffer), 0);
+  sparsemap_init(map, buffer, sizeof(buffer));
   assert(sparsemap_get_size(map) == size);
   sparsemap_set(map, 0, true);
   assert(sparsemap_get_size(map) == size + 4 + 8 + 8);
@@ -155,7 +162,7 @@ main()
 
   // split and move, aligned to MiniMap capacity
   sparsemap_t _sm2, *sm2 = &_sm2;
-  sparsemap_init(sm2, buffer2, sizeof(buffer2), 0);
+  sparsemap_init(sm2, buffer2, sizeof(buffer2));
   sparsemap_clear(sm2);
   for (int i = 0; i < 2048 * 2; i++) {
     sparsemap_set(map, i, true);
@@ -172,7 +179,7 @@ main()
   fprintf(stderr, ".");
 
   // split and move, aligned to BitVector capacity
-  sparsemap_init(sm2, buffer2, sizeof(buffer2), 0);
+  sparsemap_init(sm2, buffer2, sizeof(buffer2));
   sparsemap_clear(map);
   for (int i = 0; i < 2048 * 3; i++) {
     sparsemap_set(map, i, true);

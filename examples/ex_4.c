@@ -24,7 +24,7 @@ main(void)
   uint8_t *buf = calloc((size_t)3 * 1024, sizeof(uint8_t));
 
   // create the sparse bitmap
-  sparsemap_t *map = sparsemap(buf, sizeof(uint8_t) * 3 * 1024, 0);
+  sparsemap_t *map = sparsemap(buf, sizeof(uint8_t) * 3 * 1024);
 
   // create an array of ints
   setup_test_array(array, TEST_ARRAY_SIZE, 1024 * 3);
