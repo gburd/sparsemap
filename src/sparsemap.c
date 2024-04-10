@@ -426,10 +426,13 @@ __sm_chunk_map_select(__sm_chunk_t *map, size_t n, ssize_t *pnew_n)
 }
 
 /**
- * Counts the set bits in the range [first, idx] inclusive.
+ * Counts the set bits in the range [0, 'idx'] inclusive ignoring the first
+ * '*offset' bits.  Modifies '*offset' decreasing it by the number of bits
+ * ignored during the search.  The ranking (counting) will start after the
+ * '*offset' has been reached 0.
  */
 static size_t
-__sm_chunk_map_rank(__sm_chunk_t *map, size_t idx, size_t *after)
+__sm_chunk_map_rank(__sm_chunk_t *map, size_t *offset, size_t idx)
 {
   size_t ret = 0;
 
@@ -442,41 +445,42 @@ __sm_chunk_map_rank(__sm_chunk_t *map, size_t idx, size_t *after)
       }
       if (flags == SM_PAYLOAD_ZEROS) {
         if (idx > SM_BITS_PER_VECTOR) {
-          if (*after > SM_BITS_PER_VECTOR) {
-            *after = *after - SM_BITS_PER_VECTOR;
+          if (*offset > SM_BITS_PER_VECTOR) {
+            *offset = *offset - SM_BITS_PER_VECTOR;
           } else {
-            idx -= SM_BITS_PER_VECTOR - *after;
-            *after = 0;
+            idx -= SM_BITS_PER_VECTOR - *offset;
+            *offset = 0;
           }
         } else {
           return (ret);
         }
       } else if (flags == SM_PAYLOAD_ONES) {
         if (idx > SM_BITS_PER_VECTOR) {
-          if (*after > SM_BITS_PER_VECTOR) {
-            *after = *after - SM_BITS_PER_VECTOR;
+          if (*offset > SM_BITS_PER_VECTOR) {
+            *offset = *offset - SM_BITS_PER_VECTOR;
           } else {
-            idx -= SM_BITS_PER_VECTOR - *after;
-            if (*after == 0) {
+            idx -= SM_BITS_PER_VECTOR - *offset;
+            if (*offset == 0) {
               ret += SM_BITS_PER_VECTOR;
             }
-            *after = 0;
+            *offset = 0;
           }
         } else {
           return (ret + idx);
         }
       } else if (flags == SM_PAYLOAD_MIXED) {
         sm_bitvec_t w = map->m_data[1 + __sm_chunk_map_get_position(map, i * SM_FLAGS_PER_INDEX_BYTE + j)];
-        uint64_t after_mask = *after > 63 ? 0 : (((uint64_t)1 << *after) - 1);
         if (idx > SM_BITS_PER_VECTOR) {
+          uint64_t mask_offset = *offset > 64 ? 0 : ~(UINT64_MAX >> (SM_BITS_PER_VECTOR - *offset));
           idx -= SM_BITS_PER_VECTOR;
-          ret += popcountll(w & after_mask);
-          *after = (*after > SM_BITS_PER_VECTOR) ? *after - SM_BITS_PER_VECTOR : 0;
+          ret += popcountll(w & mask_offset);
+          *offset = (*offset > SM_BITS_PER_VECTOR) ? *offset - SM_BITS_PER_VECTOR : 0;
         } else {
-          /* Create a mask for the range between after and idx inclusive [*after, idx]. */
+          /* Create a mask for the range between offset and idx inclusive [*offset, idx]. */
+          uint64_t offset_mask = *offset > 64 ? 0 : (((uint64_t)1 << *offset) - 1);
           uint64_t idx_mask = ((uint64_t)1 << (idx + 1)) - 1;
-          ret += popcountll(w & (idx_mask - after_mask));
-          *after = *after > idx ? *after - idx : 0;
+          ret += popcountll(w & (idx_mask - offset_mask));
+          *offset = *offset > idx ? *offset - idx : 0;
           return (ret);
         }
       }
@@ -1164,27 +1168,28 @@ sparsemap_select(sparsemap_t *map, size_t n)
 }
 
 /**
- * Counts the set bits in the range [first, last] inclusive.
+ * Counts the set bits starting at 'offset' until and including 'idx', meaning
+ * [offset, idx] inclusive.
  */
 size_t
-sparsemap_rank(sparsemap_t *map, size_t first, size_t last)
+sparsemap_rank(sparsemap_t *map, size_t offset, size_t idx)
 {
   assert(sparsemap_get_size(map) >= SM_SIZEOF_OVERHEAD);
-  size_t result = 0, after = first, prev = 0, count = __sm_get_chunk_map_count(map);
+  size_t result = 0, prev = 0, count = __sm_get_chunk_map_count(map);
   uint8_t *p = __sm_get_chunk_map_data(map, 0);
 
   for (size_t i = 0; i < count; i++) {
     sm_idx_t start = *(sm_idx_t *)p;
-    if (start > last) {
+    if (start > idx) {
       return (result);
     }
-    after -= start - prev;
+    offset -= start - prev;
     prev = start;
     p += sizeof(sm_idx_t);
     __sm_chunk_t chunk;
     __sm_chunk_map_init(&chunk, p);
 
-    result += __sm_chunk_map_rank(&chunk, last - start, &after);
+    result += __sm_chunk_map_rank(&chunk, &offset, idx - start);
     p += __sm_chunk_map_get_size(&chunk);
   }
   return (result);
