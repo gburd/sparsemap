@@ -597,6 +597,8 @@ test_api_span(const MunitParameter params[], void *data)
       for (int j = 1; j < amt / 10; j++) {
         sparsemap_clear(map);
         placed_at = create_sequential_set_in_empty_map(map, amt, j);
+        //logf("i = %d, j = %d\tplaced_at %d\n", i, j, placed_at);
+        //whats_set(map, 5000);
         located_at = sparsemap_span(map, 0, j);
         assert_true(located_at == placed_at);
       }

@@ -426,10 +426,10 @@ __sm_chunk_map_select(__sm_chunk_t *map, size_t n, ssize_t *pnew_n)
 }
 
 /**
- * Counts the set bits in the range [first, last] inclusive.
+ * Counts the set bits in the range [first, idx] inclusive.
  */
 static size_t
-__sm_chunk_map_rank(__sm_chunk_t *map, size_t last, size_t *after)
+__sm_chunk_map_rank(__sm_chunk_t *map, size_t idx, size_t *after)
 {
   size_t ret = 0;
 
@@ -441,50 +441,42 @@ __sm_chunk_map_rank(__sm_chunk_t *map, size_t last, size_t *after)
         continue;
       }
       if (flags == SM_PAYLOAD_ZEROS) {
-        if (last > SM_BITS_PER_VECTOR) {
+        if (idx > SM_BITS_PER_VECTOR) {
           if (*after > SM_BITS_PER_VECTOR) {
             *after = *after - SM_BITS_PER_VECTOR;
           } else {
-            last -= SM_BITS_PER_VECTOR - *after;
+            idx -= SM_BITS_PER_VECTOR - *after;
             *after = 0;
           }
         } else {
           return (ret);
         }
       } else if (flags == SM_PAYLOAD_ONES) {
-        if (last > SM_BITS_PER_VECTOR) {
+        if (idx > SM_BITS_PER_VECTOR) {
           if (*after > SM_BITS_PER_VECTOR) {
             *after = *after - SM_BITS_PER_VECTOR;
           } else {
-            last -= SM_BITS_PER_VECTOR - *after;
+            idx -= SM_BITS_PER_VECTOR - *after;
             if (*after == 0) {
               ret += SM_BITS_PER_VECTOR;
             }
             *after = 0;
           }
         } else {
-          return (ret + last);
+          return (ret + idx);
         }
       } else if (flags == SM_PAYLOAD_MIXED) {
         sm_bitvec_t w = map->m_data[1 + __sm_chunk_map_get_position(map, i * SM_FLAGS_PER_INDEX_BYTE + j)];
-        if (last > SM_BITS_PER_VECTOR) {
-          last -= SM_BITS_PER_VECTOR;
-          /* Create a mask for the range of bits except those we don't want to consider. */
-          uint64_t mask = ~(UINT64_MAX >> (SM_BITS_PER_VECTOR - *after));
-          uint64_t mw = w & mask;
-          ret += popcountll(mw);
-          if (*after > SM_BITS_PER_VECTOR) {
-            *after -= SM_BITS_PER_VECTOR;
-          } else {
-            *after = 0;
-          }
+        uint64_t after_mask = *after > 63 ? 0 : (((uint64_t)1 << *after) - 1);
+        if (idx > SM_BITS_PER_VECTOR) {
+          idx -= SM_BITS_PER_VECTOR;
+          ret += popcountll(w & after_mask);
+          *after = (*after > SM_BITS_PER_VECTOR) ? *after - SM_BITS_PER_VECTOR : 0;
         } else {
-          uint64_t mask;
-          /* Create a mask for the range between after and last inclusive [*after, last]. */
-          mask = ((uint64_t)1 << (last + 1)) - 1 - (((uint64_t)1 << *after) - 1);
-          *after -= (*after > last) ? last : *after;
-          uint64_t mw = w & mask;
-          ret += popcountll(mw);
+          /* Create a mask for the range between after and idx inclusive [*after, idx]. */
+          uint64_t idx_mask = ((uint64_t)1 << (idx + 1)) - 1;
+          ret += popcountll(w & (idx_mask - after_mask));
+          *after = *after > idx ? *after - idx : 0;
           return (ret);
         }
       }
