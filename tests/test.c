@@ -609,7 +609,7 @@ test_api_span(const MunitParameter params[], void *data)
         //whats_set(map, 5000);
         located_at = sparsemap_span(map, 0, j);
         if (placed_at != located_at)
-          logf("i = %d, j = %d\tplaced_at %d\n", i, j, placed_at);
+          logf("a: i = %d, j = %d\tplaced_at %d located_at %d\n", i, j, placed_at, located_at);
         assert_true(located_at == placed_at);
       }
     }
@@ -620,14 +620,15 @@ test_api_span(const MunitParameter params[], void *data)
         populate_map(map, 1024, 3 * 1024);
         placed_at = create_sequential_set_in_empty_map(map, amt, j);
         located_at = sparsemap_span(map, 0, j);
-        if (placed_at != located_at)
-          logf("i = %d, j = %d\tplaced_at %d\n", i, j, placed_at);
-        assert_true(located_at <= placed_at);
-        //TODO      located_at = sparsemap_span(map, (placed_at < j ? 0 : placed_at / 2), i);
-        //      assert_true(placed_at == located_at);
+        if (located_at >= placed_at)
+          logf("b: i = %d, j = %d\tplaced_at %d located_at %d\n", i, j, placed_at, located_at);
+        //assert_true(located_at >= placed_at);
+        located_at = sparsemap_span(map, (placed_at < j ? 0 : placed_at / 2), i);
+        assert_true(placed_at == located_at);
       }
     }
-*/
+    */
+
     return MUNIT_OK;
 }
 

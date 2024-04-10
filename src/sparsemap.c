@@ -488,14 +488,12 @@ __sm_chunk_map_rank(__sm_chunk_t *map, size_t *offset, size_t idx)
       } else if (flags == SM_PAYLOAD_MIXED) {
         sm_bitvec_t w = map->m_data[1 + __sm_chunk_map_get_position(map, i * SM_FLAGS_PER_INDEX_BYTE + j)];
         if (idx > SM_BITS_PER_VECTOR) {
-          //uint64_t mask_offset = ~(UINT64_MAX >> (SM_BITS_PER_VECTOR - (*offset > 63 ? 63 : *offset)));
           uint64_t mask_offset = ~(UINT64_MAX >> (SM_BITS_PER_VECTOR - *offset));
           idx -= SM_BITS_PER_VECTOR;
           ret += popcountll(w & mask_offset);
           *offset = (*offset > SM_BITS_PER_VECTOR) ? *offset - SM_BITS_PER_VECTOR : 0;
         } else {
           /* Create a mask for the range between offset and idx inclusive [*offset, idx]. */
-          //uint64_t offset_mask = *offset > 63 ? 63 : (((uint64_t)1 << *offset) - 1);
           uint64_t offset_mask = (((uint64_t)1 << *offset) - 1);
           uint64_t idx_mask = idx >= 63 ? UINT64_MAX : ((uint64_t)1 << (idx + 1)) - 1;
           ret += popcountll(w & (idx_mask - offset_mask));
@@ -767,7 +765,7 @@ sparsemap(uint8_t *data, size_t size)
 void
 sparsemap_init(sparsemap_t *map, uint8_t *data, size_t size)
 {
-  map->m_data = (__sm_chunk_t*)data;
+  map->m_data = data;
   map->m_data_used = 0;
   map->m_capacity = size == 0 ? UINT64_MAX : size;
   sparsemap_clear(map);
@@ -779,7 +777,7 @@ sparsemap_init(sparsemap_t *map, uint8_t *data, size_t size)
 void
 sparsemap_open(sparsemap_t *map, uint8_t *data, size_t data_size)
 {
-  map->m_data = (__sm_chunk_t*)data;
+  map->m_data = data;
   map->m_data_used = 0;
   map->m_capacity = data_size;
 }
