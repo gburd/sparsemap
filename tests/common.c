@@ -27,21 +27,23 @@ tsc(void)
   return ((uint64_t)high << 32) | low;
 }
 
-static
-uint64_t get_tsc_frequency() {
-    uint32_t high, low;
-    __asm__ volatile("rdtsc" : "=a" (low), "=d" (high));
-    __asm__ volatile("rdtsc");
-    return ((uint64_t)high << 32) | low;
+static uint64_t
+get_tsc_frequency()
+{
+  uint32_t high, low;
+  __asm__ volatile("rdtsc" : "=a"(low), "=d"(high));
+  __asm__ volatile("rdtsc");
+  return ((uint64_t)high << 32) | low;
 }
 
 double
-tsc_ticks_to_ns(uint64_t tsc_ticks) {
-    static uint64_t tsc_freq = 0;
-    if (tsc_freq == 0) {
-        tsc_freq = get_tsc_frequency();
-    }
-    return (double)tsc_ticks / (double)tsc_freq * 1e9;
+tsc_ticks_to_ns(uint64_t tsc_ticks)
+{
+  static uint64_t tsc_freq = 0;
+  if (tsc_freq == 0) {
+    tsc_freq = get_tsc_frequency();
+  }
+  return (double)tsc_ticks / (double)tsc_freq * 1e9;
 }
 
 void

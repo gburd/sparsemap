@@ -696,8 +696,8 @@ test_perf_span_solo(const MunitParameter params[], void *data)
     }
   }
   uint64_t est = EST_MEDIAN_GET(solo);
-  fprintf(stdout, "median time %zu or %f ns\n", est, tsc_ticks_to_ns(est)); // measured 228
-  assert_true(EST_MEDIAN_GET(solo) < 500);
+  // fprintf(stdout, "median time %zu or %f ns\n", est, tsc_ticks_to_ns(est)); // measured 228
+  assert_true(est < 500);
   fflush(stdout);
 
   return MUNIT_OK;
@@ -743,15 +743,16 @@ test_perf_span_tainted(const MunitParameter params[], void *data)
       if (located_at >= placed_at)
         logf("b: i = %d, j = %d\tplaced_at %d located_at %d\n", i, j, placed_at, located_at);
       // assert_true(located_at >= placed_at);
-      //start = tsc();
-      //located_at = sparsemap_span(map, (placed_at < j ? 0 : placed_at / 2), i);
-      //stop = tsc();
-      //EST_MEDIAN_ADD(solo, stop - start);
+      // start = tsc();
+      // located_at = sparsemap_span(map, (placed_at < j ? 0 : placed_at / 2), i);
+      // stop = tsc();
+      // EST_MEDIAN_ADD(solo, stop - start);
       // assert_true(placed_at == located_at);
     }
   }
   uint64_t est = EST_MEDIAN_GET(tainted);
-  fprintf(stdout, "median time %zu or %f ns\n", est, tsc_ticks_to_ns(est)); // measured 228
+  // fprintf(stdout, "median time %zu or %f ns\n", est, tsc_ticks_to_ns(est)); // measured 228
+  assert_true(est < 500);
 
   return MUNIT_OK;
 }
