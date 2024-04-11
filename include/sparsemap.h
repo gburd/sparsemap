@@ -87,11 +87,9 @@
  * Usually this is an uint64_t.
  */
 
-
 typedef struct sparsemap sparsemap_t;
 typedef uint32_t sm_idx_t;
 typedef uint64_t sm_bitvec_t;
-
 
 /* Allocate on a sparsemap_t on the heap and initialize it. */
 sparsemap_t *sparsemap(uint8_t *data, size_t size);

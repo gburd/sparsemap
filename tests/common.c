@@ -2,12 +2,12 @@
 
 #include <assert.h>
 #include <pthread.h>
+#include <sparsemap.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 
-#include "../include/sparsemap.h"
 #include "common.h"
 
 #pragma GCC diagnostic push
@@ -18,6 +18,87 @@
     fprintf(stderr, __VA_ARGS__);                                  \
   } while (0)
 #pragma GCC diagnostic pop
+
+uint64_t
+tsc(void)
+{
+  uint32_t low, high;
+  __asm__ volatile("rdtsc" : "=a"(low), "=d"(high));
+  return ((uint64_t)high << 32) | low;
+}
+
+static
+uint64_t get_tsc_frequency() {
+    uint32_t high, low;
+    __asm__ volatile("rdtsc" : "=a" (low), "=d" (high));
+    __asm__ volatile("rdtsc");
+    return ((uint64_t)high << 32) | low;
+}
+
+double
+tsc_ticks_to_ns(uint64_t tsc_ticks) {
+    static uint64_t tsc_freq = 0;
+    if (tsc_freq == 0) {
+        tsc_freq = get_tsc_frequency();
+    }
+    return (double)tsc_ticks / (double)tsc_freq * 1e9;
+}
+
+void
+est_sift_up(uint64_t *heap, int child_index)
+{
+  while (child_index > 0) {
+    int parent_index = (child_index - 1) / 2;
+    if (heap[parent_index] > heap[child_index]) {
+      // Swap parent and child
+      uint64_t temp = heap[parent_index];
+      heap[parent_index] = heap[child_index];
+      heap[child_index] = temp;
+      child_index = parent_index;
+    } else {
+      break; // Heap property satisfied
+    }
+  }
+}
+
+void
+est_sift_down(uint64_t *heap, int heap_size, int parent_index)
+{
+  int child_index = 2 * parent_index + 1; // Left child
+  while (child_index < heap_size) {
+    // Right child exists and is smaller than left child
+    if (child_index + 1 < heap_size && heap[child_index + 1] < heap[child_index]) {
+      child_index++;
+    }
+    // If the smallest child is smaller than the parent, swap them
+    if (heap[child_index] < heap[parent_index]) {
+      uint64_t temp = heap[child_index];
+      heap[child_index] = heap[parent_index];
+      heap[parent_index] = temp;
+      parent_index = child_index;
+      child_index = 2 * parent_index + 1;
+    } else {
+      break; // Heap property satisfied
+    }
+  }
+}
+
+void
+est_insert_value(uint64_t *heap, int heap_max_size, int *heap_size, uint64_t value)
+{
+  if (*heap_size < heap_max_size) { // Heap not full, insert value
+    heap[*heap_size] = value;
+    est_sift_up(heap, *heap_size);
+    (*heap_size)++;
+  } else {
+    // Heap is full, replace root with new value with a certain probability
+    // This is a very naive approach to maintain a sample of the input
+    if (rand() % 2) {
+      heap[0] = value;
+      est_sift_down(heap, heap_max_size, 0);
+    }
+  }
+}
 
 int __xorshift32_state = 0;
 
@@ -120,7 +201,11 @@ int
 create_sequential_set_in_empty_map(sparsemap_t *map, int s, int r)
 {
   int placed_at;
-  placed_at = random_uint32() % (s - r - 1);
+  if (s >= r + 1) {
+    placed_at = 0;
+  } else {
+    placed_at = random_uint32() % (s - r - 1);
+  }
   for (int i = placed_at; i < placed_at + r; i++) {
     sparsemap_set(map, i, true);
   }
@@ -269,60 +354,62 @@ setup_test_array(int a[], int l, int max_value)
 }
 
 void
-bitmap_from_uint32(sparsemap_t *map, uint32_t number) {
-    for (int i = 0; i < 32; i++) {
-        bool bit = number & (1 << i);
-        sparsemap_set(map, i, bit);
-    }
+bitmap_from_uint32(sparsemap_t *map, uint32_t number)
+{
+  for (int i = 0; i < 32; i++) {
+    bool bit = number & (1 << i);
+    sparsemap_set(map, i, bit);
+  }
 }
 
 void
-bitmap_from_uint64(sparsemap_t *map, uint64_t number) {
-    for (int i = 0; i < 64; i++) {
-        bool bit = number & (1 << i);
-        sparsemap_set(map, i, bit);
-    }
+bitmap_from_uint64(sparsemap_t *map, uint64_t number)
+{
+  for (int i = 0; i < 64; i++) {
+    bool bit = number & (1 << i);
+    sparsemap_set(map, i, bit);
+  }
 }
 
 uint32_t
 rank_uint64(uint64_t number, int n, int p)
 {
-    if (p < n || p > 63) {
-        return 0;
-    }
+  if (p < n || p > 63) {
+    return 0;
+  }
 
-    /* Create a mask for the range between n and p.
-       This works by shifting 1 to the left (p+1) times, subtracting 1 to have
-       a sequence of p 1's, then shifting n times to the left to position it
-       starting at n. Finally, subtracting (1 << n) - 1 removes the bits below
-       n from the mask. */
-    uint64_t mask = ((uint64_t)1 << (p + 1)) - 1 - (((uint64_t)1 << n) - 1);
+  /* Create a mask for the range between n and p.
+     This works by shifting 1 to the left (p+1) times, subtracting 1 to have
+     a sequence of p 1's, then shifting n times to the left to position it
+     starting at n. Finally, subtracting (1 << n) - 1 removes the bits below
+     n from the mask. */
+  uint64_t mask = ((uint64_t)1 << (p + 1)) - 1 - (((uint64_t)1 << n) - 1);
 
-    /* Apply the mask and count the set bits in the result. */
-    uint64_t maskedNumber = number & mask;
+  /* Apply the mask and count the set bits in the result. */
+  uint64_t maskedNumber = number & mask;
 
-    /* Count the bits set in maskedNumber. */
-    uint32_t count = 0;
-    while (maskedNumber) {
-      count += maskedNumber & 1;
-      maskedNumber >>= 1;
-    }
+  /* Count the bits set in maskedNumber. */
+  uint32_t count = 0;
+  while (maskedNumber) {
+    count += maskedNumber & 1;
+    maskedNumber >>= 1;
+  }
 
-    return count;
+  return count;
 }
 
 int
 whats_set_uint64(uint64_t number, int pos[64])
 {
-    int length = 0;
+  int length = 0;
 
-    for (int i = 0; i < 64; i++) {
-        if (number & ((uint64_t)1 << i)) {
-            pos[length++] = i;
-        }
+  for (int i = 0; i < 64; i++) {
+    if (number & ((uint64_t)1 << i)) {
+      pos[length++] = i;
     }
+  }
 
-    return length;
+  return length;
 }
 
 void

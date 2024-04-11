@@ -6,10 +6,10 @@ SHARED_LIB = libsparsemap.so
 #CFLAGS = -Wall -Wextra -Wpedantic -Of -std=c11 -Iinclude/ -fPIC
 #CFLAGS = -Wall -Wextra -Wpedantic -Og -g -std=c11 -Iinclude/ -fPIC
 CFLAGS = -DSPARSEMAP_DIAGNOSTIC -DSPARSEMAP_ASSERT -Wall -Wextra -Wpedantic -Og -g -std=c11 -Iinclude/ -fPIC
-#CFLAGS = -Wall -Wextra -Wpedantic -Og -g -fsanitize=address,leak,object-size,pointer-compare,pointer-subtract,null,return,bounds,pointer-overflow,undefined -fsanitize-address-use-after-scope -std=c99 -Iinclude/ -fPIC
-#CFLAGS = -Wall -Wextra -Wpedantic -Og -g -fsanitize=all -fhardened -std=c99 -Iinclude/ -fPIC
+#CFLAGS = -Wall -Wextra -Wpedantic -Og -g -fsanitize=address,leak,object-size,pointer-compare,pointer-subtract,null,return,bounds,pointer-overflow,undefined -fsanitize-address-use-after-scope -std=c11 -Iinclude/ -fPIC
+#CFLAGS = -Wall -Wextra -Wpedantic -Og -g -fsanitize=all -fhardened -std=c11 -Iinclude/ -fPIC
 
-TEST_FLAGS = -Wall -Wextra -Wpedantic -Og -g -std=c99 -Iinclude/ -Itests/ -fPIC
+TEST_FLAGS = -Wall -Wextra -Wpedantic -Og -g -std=c11 -Iinclude/ -Itests/ -fPIC
 
 TESTS = tests/test
 TEST_OBJS = tests/test.o tests/munit.o tests/common.o
@@ -49,7 +49,7 @@ clean:
 	rm -f $(EXAMPLES) examples/*.o
 
 format:
-	clang-format -i src/sparsemap.c include/sparsemap.h examples/ex_*.c tests/test.c tests/common.c
+	clang-format -i src/sparsemap.c include/sparsemap.h examples/ex_*.c tests/test.c tests/common.c tests/common.h
 #	clang-format -i include/*.h src/*.c tests/*.c tests/*.h examples/*.c
 
 %.o: src/%.c
@@ -76,4 +76,4 @@ examples/ex_3: examples/common.o examples/ex_3.o $(STATIC_LIB)
 examples/ex_4: examples/common.o examples/ex_4.o $(STATIC_LIB)
 	$(CC) $^ -o $@ $(CFLAGS) $(TEST_FLAGS)
 
-# cp src/sparsemap.c /tmp && clang-tidy src/sparsemap.c -fix -fix-errors -checks="readability-braces-around-statements" -- -DDEBUG -DSPARSEMAP_DIAGNOSTIC -DSPARSEMAP_ASSERT -Wall -Wextra -Wpedantic -Og -g -std=c99 -Iinclude/ -fPIC
+# cp src/sparsemap.c /tmp && clang-tidy src/sparsemap.c -fix -fix-errors -checks="readability-braces-around-statements" -- -DDEBUG -DSPARSEMAP_DIAGNOSTIC -DSPARSEMAP_ASSERT -Wall -Wextra -Wpedantic -Og -g -std=c11 -Iinclude/ -fPIC

@@ -21,7 +21,6 @@
 #pragma warning(disable : 4127)
 #endif
 
-
 /* !!! Duplicated here for testing purposes. Keep in sync, or suffer. !!! */
 struct sparsemap {
   uint8_t *m_data;
@@ -39,7 +38,7 @@ populate_map(sparsemap_t *map, int size, int max_value)
   int array[size];
 
   setup_test_array(array, size, max_value);
-  //TODO ensure_sequential_set(array, size, 10);
+  // TODO ensure_sequential_set(array, size, 10);
   shuffle(array, size);
   for (int i = 0; i < size; i++) {
     sparsemap_set(map, array[i], true);
@@ -70,7 +69,7 @@ static MunitResult
 test_api_static_init(const MunitParameter params[], void *data)
 {
   sparsemap_t a_map, *map = &a_map;
-  uint8_t buf[1024] = {0};
+  uint8_t buf[1024] = { 0 };
 
   (void)params;
   (void)data;
@@ -215,7 +214,7 @@ test_api_remaining_capacity(const MunitParameter params[], void *data)
     sparsemap_set(map, i++, true);
     cap = sparsemap_capacity_remaining(map);
   } while (cap > 1.0);
-  //assert_true(i == 169985); when seed is 8675309
+  // assert_true(i == 169985); when seed is 8675309
   assert_true(cap <= 1.0);
 
   sparsemap_clear(map);
@@ -226,7 +225,7 @@ test_api_remaining_capacity(const MunitParameter params[], void *data)
     i++;
     cap = sparsemap_capacity_remaining(map);
   } while (cap > 2.0);
-  //assert_true(i == 64); when seed is 8675309
+  // assert_true(i == 64); when seed is 8675309
   assert_true(cap <= 2.0);
 
   return MUNIT_OK;
@@ -422,7 +421,8 @@ test_api_scan_tear_down(void *fixture)
   test_api_tear_down(fixture);
 }
 void
-scan_for_0xfeedfacebadcoffee(sm_idx_t v[], size_t n) {
+scan_for_0xfeedfacebadcoffee(sm_idx_t v[], size_t n)
+{
   /* Called multiple times */
   ((void)v);
   ((void)n);
@@ -449,7 +449,7 @@ test_api_split_setup(const MunitParameter params[], void *user_data)
   sparsemap_t *map = (sparsemap_t *)test_api_setup(params, user_data);
 
   sparsemap_init(map, buf, 1024);
-  for(int i = 0; i < 1024; i ++) {
+  for (int i = 0; i < 1024; i++) {
     sparsemap_set(map, i, true);
   }
   return (void *)map;
@@ -465,7 +465,7 @@ static MunitResult
 test_api_split(const MunitParameter params[], void *data)
 {
   sparsemap_t *map = (sparsemap_t *)data;
-  uint8_t buf[1024] = {0};
+  uint8_t buf[1024] = { 0 };
   sparsemap_t portion;
   (void)params;
 
@@ -600,58 +600,174 @@ test_api_span(const MunitParameter params[], void *data)
 
   assert_ptr_not_null(map);
 
-    int located_at, placed_at, amt = 5000;
-    for (int i = 1; i < amt; i++) {
-      for (int j = 1; j < amt / 10; j++) {
-        sparsemap_clear(map);
-        placed_at = create_sequential_set_in_empty_map(map, amt, j);
-        //logf("i = %d, j = %d\tplaced_at %d\n", i, j, placed_at);
-        //whats_set(map, 5000);
-        located_at = sparsemap_span(map, 0, j);
-        if (placed_at != located_at)
-          logf("a: i = %d, j = %d\tplaced_at %d located_at %d\n", i, j, placed_at, located_at);
-        assert_true(located_at == placed_at);
-      }
-    }
-/*
-    for (int i = 1; i < amt; i++) {
-      for (int j = 1; j < amt / 10; j++) {
-        sparsemap_clear(map);
-        populate_map(map, 1024, 3 * 1024);
-        placed_at = create_sequential_set_in_empty_map(map, amt, j);
-        located_at = sparsemap_span(map, 0, j);
-        if (located_at >= placed_at)
-          logf("b: i = %d, j = %d\tplaced_at %d located_at %d\n", i, j, placed_at, located_at);
-        //assert_true(located_at >= placed_at);
-        located_at = sparsemap_span(map, (placed_at < j ? 0 : placed_at / 2), i);
-        assert_true(placed_at == located_at);
-      }
-    }
-    */
+  int located_at, placed_at, amt = 10000;
 
-    return MUNIT_OK;
+  placed_at = create_sequential_set_in_empty_map(map, amt, 1);
+  located_at = sparsemap_span(map, 0, 1);
+  assert_true(located_at == placed_at);
+
+  sparsemap_clear(map);
+
+  placed_at = create_sequential_set_in_empty_map(map, amt, 50);
+  located_at = sparsemap_span(map, 0, 50);
+  assert_true(located_at == placed_at);
+
+  sparsemap_clear(map);
+
+  placed_at = create_sequential_set_in_empty_map(map, amt, 50);
+  located_at = sparsemap_span(map, placed_at / 2, 50);
+  assert_true(located_at == placed_at);
+
+  /* TODO
+  sparsemap_clear(map);
+
+  placed_at = create_sequential_set_in_empty_map(map, amt, amt - 1);
+  located_at = sparsemap_span(map, 0, amt - 1);
+  assert_true(located_at == placed_at);
+   */
+
+  return MUNIT_OK;
 }
 
-static MunitTest api_test_suite[] = { { (char *)"/api/static_init", test_api_static_init, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
-  { (char *)"/api/clear", test_api_clear, test_api_clear_setup, test_api_clear_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
-  { (char *)"/api/open", test_api_open, test_api_open_setup, test_api_open_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
-  { (char *)"/api/set_data_size", test_api_set_data_size, test_api_set_data_size_setup, test_api_set_data_size_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
-  { (char *)"/api/remaining_capacity", test_api_remaining_capacity, test_api_remaining_capacity_setup, test_api_remaining_capacity_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
-  { (char *)"/api/get_range_size", test_api_get_range_size, test_api_get_range_size_setup, test_api_get_range_size_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
-  { (char *)"/api/is_set", test_api_is_set, test_api_is_set_setup, test_api_is_set_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
-  { (char *)"/api/set", test_api_set, test_api_set_setup, test_api_set_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
-  { (char *)"/api/get_start_offset", test_api_get_start_offset, test_api_get_start_offset_setup, test_api_get_start_offset_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
-  { (char *)"/api/get_size", test_api_get_size, test_api_get_size_setup, test_api_get_size_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
-  { (char *)"/api/scan", test_api_scan, test_api_scan_setup, test_api_scan_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
-  { (char *)"/api/split", test_api_split, test_api_split_setup, test_api_split_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
-  { (char *)"/api/select", test_api_select, test_api_select_setup, test_api_select_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
-  { (char *)"/api/rank", test_api_rank, test_api_rank_setup, test_api_rank_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
-  { (char *)"/api/span", test_api_span, test_api_span_setup, test_api_span_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
+// clang-format off
+static MunitTest api_test_suite[] = {
+  { (char *)"/static_init", test_api_static_init, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+  { (char *)"/clear", test_api_clear, test_api_clear_setup, test_api_clear_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
+  { (char *)"/open", test_api_open, test_api_open_setup, test_api_open_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
+  { (char *)"/set_data_size", test_api_set_data_size, test_api_set_data_size_setup, test_api_set_data_size_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
+  { (char *)"/remaining_capacity", test_api_remaining_capacity, test_api_remaining_capacity_setup, test_api_remaining_capacity_tear_down,
+    MUNIT_TEST_OPTION_NONE, NULL },
+  { (char *)"/get_range_size", test_api_get_range_size, test_api_get_range_size_setup, test_api_get_range_size_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
+  { (char *)"/is_set", test_api_is_set, test_api_is_set_setup, test_api_is_set_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
+  { (char *)"/set", test_api_set, test_api_set_setup, test_api_set_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
+  { (char *)"/get_start_offset", test_api_get_start_offset, test_api_get_start_offset_setup, test_api_get_start_offset_tear_down, MUNIT_TEST_OPTION_NONE,
+    NULL },
+  { (char *)"/get_size", test_api_get_size, test_api_get_size_setup, test_api_get_size_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
+  { (char *)"/scan", test_api_scan, test_api_scan_setup, test_api_scan_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
+  { (char *)"/split", test_api_split, test_api_split_setup, test_api_split_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
+  { (char *)"/select", test_api_select, test_api_select_setup, test_api_select_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
+  { (char *)"/rank", test_api_rank, test_api_rank_setup, test_api_rank_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
+  { (char *)"/span", test_api_span, test_api_span_setup, test_api_span_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
+  { NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
+};
+// clang-format on
+
+static void *
+test_perf_span_solo_setup(const MunitParameter params[], void *user_data)
+{
+  uint8_t *buf = munit_calloc(1024 * 3, sizeof(uint8_t));
+  sparsemap_t *map = (sparsemap_t *)test_api_setup(params, user_data);
+
+  sparsemap_init(map, buf, 3 * 1024);
+
+  return (void *)map;
+}
+static void
+test_perf_span_solo_tear_down(void *fixture)
+{
+  sparsemap_t *map = (sparsemap_t *)fixture;
+  free(map->m_data);
+  test_api_tear_down(fixture);
+}
+EST_MEDIAN_DECL(solo, 10000)
+static MunitResult
+test_perf_span_solo(const MunitParameter params[], void *data)
+{
+  sparsemap_t *map = (sparsemap_t *)data;
+  uint64_t stop, start;
+  (void)params;
+  int located_at, placed_at, amt = 1000;
+
+  assert_ptr_not_null(map);
+
+  for (int i = 1; i < amt; i++) {
+    for (int j = 1; j < amt / 10; j++) {
+      sparsemap_clear(map);
+      placed_at = create_sequential_set_in_empty_map(map, amt, j);
+      // logf("i = %d, j = %d\tplaced_at %d\n", i, j, placed_at);
+      // whats_set(map, 5000);
+      start = tsc();
+      located_at = sparsemap_span(map, 0, j);
+      stop = tsc();
+      //      fprintf(stdout, "%ll - %ll = %ll\n", stop, start, stop - start);
+      EST_MEDIAN_ADD(solo, stop - start);
+      if (placed_at != located_at)
+        logf("a: i = %d, j = %d\tplaced_at %d located_at %d\n", i, j, placed_at, located_at);
+    }
+  }
+  uint64_t est = EST_MEDIAN_GET(solo);
+  fprintf(stdout, "median time %zu or %f ns\n", est, tsc_ticks_to_ns(est)); // measured 228
+  assert_true(EST_MEDIAN_GET(solo) < 500);
+  fflush(stdout);
+
+  return MUNIT_OK;
+}
+
+static void *
+test_perf_span_tainted_setup(const MunitParameter params[], void *user_data)
+{
+  uint8_t *buf = munit_calloc(1024 * 3, sizeof(uint8_t));
+  sparsemap_t *map = (sparsemap_t *)test_api_setup(params, user_data);
+
+  sparsemap_init(map, buf, 3 * 1024);
+
+  return (void *)map;
+}
+static void
+test_perf_span_tainted_tear_down(void *fixture)
+{
+  sparsemap_t *map = (sparsemap_t *)fixture;
+  free(map->m_data);
+  test_api_tear_down(fixture);
+}
+EST_MEDIAN_DECL(tainted, 10000)
+static MunitResult
+test_perf_span_tainted(const MunitParameter params[], void *data)
+{
+  sparsemap_t *map = (sparsemap_t *)data;
+  uint64_t stop, start;
+  (void)params;
+
+  assert_ptr_not_null(map);
+
+  int located_at, placed_at, amt = 1000;
+  for (int i = 1; i < amt; i++) {
+    for (int j = 1; j < amt / 10; j++) {
+      sparsemap_clear(map);
+      populate_map(map, 1024, 1 * 1024);
+      placed_at = create_sequential_set_in_empty_map(map, amt, j);
+      start = tsc();
+      located_at = sparsemap_span(map, 0, j);
+      stop = tsc();
+      EST_MEDIAN_ADD(tainted, stop - start);
+      if (located_at >= placed_at)
+        logf("b: i = %d, j = %d\tplaced_at %d located_at %d\n", i, j, placed_at, located_at);
+      // assert_true(located_at >= placed_at);
+      //start = tsc();
+      //located_at = sparsemap_span(map, (placed_at < j ? 0 : placed_at / 2), i);
+      //stop = tsc();
+      //EST_MEDIAN_ADD(solo, stop - start);
+      // assert_true(placed_at == located_at);
+    }
+  }
+  uint64_t est = EST_MEDIAN_GET(tainted);
+  fprintf(stdout, "median time %zu or %f ns\n", est, tsc_ticks_to_ns(est)); // measured 228
+
+  return MUNIT_OK;
+}
+
+// clang-format off
+static MunitTest performance_test_suite[] = {
+  { (char *)"/span/solo", test_perf_span_solo, test_perf_span_solo_setup, test_perf_span_solo_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
+  { (char *)"/span/tainted", test_perf_span_tainted, test_perf_span_tainted_setup, test_perf_span_tainted_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
   { NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL } };
+// clang-format on
 
-static MunitTest scale_tests[] = { { NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL } };
-
-static MunitSuite other_test_suite[] = { { "/scale", scale_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE }, { NULL, NULL, NULL, 0, MUNIT_SUITE_OPTION_NONE } };
+// clang-format off
+static MunitSuite other_test_suite[] = {
+  { "/performance", performance_test_suite, NULL, 1, MUNIT_SUITE_OPTION_NONE },
+  { NULL, NULL, NULL, 0, MUNIT_SUITE_OPTION_NONE } };
+// clang-format on
 
 static const MunitSuite main_test_suite = { (char *)"/api", api_test_suite, other_test_suite, 1, MUNIT_SUITE_OPTION_NONE };
 

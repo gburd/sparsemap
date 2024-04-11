@@ -20,13 +20,12 @@
  * SOFTWARE.
  */
 
+#include <assert.h>
+#include <popcount.h>
+#include <sparsemap.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
-#include <assert.h>
-
-#include <popcount.h>
-#include <sparsemap.h>
 
 #ifdef SPARSEMAP_DIAGNOSTIC
 #pragma GCC diagnostic push
@@ -99,17 +98,15 @@ enum __SM_CHUNK_INFO {
 
 #define SM_CHUNK_GET_FLAGS(from, at) (((from)) & ((sm_bitvec_t)SM_FLAG_MASK << ((at) * 2))) >> ((at) * 2)
 
-
 typedef struct {
   sm_bitvec_t *m_data;
 } __sm_chunk_t;
 
 struct sparsemap {
-  uint8_t *m_data;         /* The serialized bitmap data */
-  size_t m_capacity;       /* The total size of m_data */
-  size_t m_data_used;      /* The used size of m_data */
+  uint8_t *m_data;    /* The serialized bitmap data */
+  size_t m_capacity;  /* The total size of m_data */
+  size_t m_data_used; /* The used size of m_data */
 };
-
 
 /**
  * Calculates the number of sm_bitvec_ts required by a single byte with flags
@@ -799,7 +796,8 @@ sparsemap_set_data_size(sparsemap_t *map, size_t data_size)
  * indicate full.
  */
 double
-sparsemap_capacity_remaining(sparsemap_t *map) {
+sparsemap_capacity_remaining(sparsemap_t *map)
+{
   if (map->m_data_used > map->m_capacity) {
     return 0;
   }

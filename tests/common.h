@@ -23,6 +23,21 @@
 #define XORSHIFT_SEED_VALUE ((unsigned int)time(NULL) ^ getpid())
 #endif
 
+#define EST_MEDIAN_DECL(decl, size)   \
+  uint64_t heap_##decl[size] = { 0 }; \
+  int heap_##decl##_max_size = size;  \
+  int heap_##decl##_size = 0;
+
+#define EST_MEDIAN_ADD(decl, value) est_insert_value(heap_##decl, heap_##decl##_max_size, &heap_##decl##_size, (value));
+
+#define EST_MEDIAN_GET(decl) heap_##decl[0]
+
+uint64_t tsc(void);
+double tsc_ticks_to_ns(uint64_t tsc_ticks);
+void est_sift_up(uint64_t *heap, int child_index);
+void est_sift_down(uint64_t *heap, int heap_size, int parent_index);
+void est_insert_value(uint64_t *heap, int heap_max_size, int *heap_size, uint64_t value);
+
 void xorshift32_seed();
 uint32_t xorshift32();
 
