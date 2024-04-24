@@ -24,7 +24,7 @@ main(void)
   uint8_t *buf = calloc((size_t)3 * 1024, sizeof(uint8_t));
 
   // create the sparse bitmap
-  sparsemap_t *map = sparsemap(buf, sizeof(uint8_t) * 3 * 1024);
+  sparsemap_t *map = sparsemap_wrap(buf, sizeof(uint8_t) * 3 * 1024);
 
   // create an array of ints
   setup_test_array(array, TEST_ARRAY_SIZE, 1024 * 3);
@@ -60,7 +60,7 @@ main(void)
       assert(sparsemap_is_set(map, array[i]) == true);
     }
     has_span(map, array, TEST_ARRAY_SIZE, (int)len);
-    size_t l = sparsemap_span(map, 0, len);
+    size_t l = sparsemap_span(map, 0, len, true);
     if (l != (size_t)-1) {
       __diag("Found span in map starting at %lu of length %lu\n", l, len);
       __diag("is_span(%lu, %lu) == %s\n", l, len, is_span(array, TEST_ARRAY_SIZE, l, len) ? "yes" : "no");

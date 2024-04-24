@@ -69,14 +69,14 @@
 #ifndef SPARSEMAP_H
 #define SPARSEMAP_H
 
-#include <sys/types.h>
-
-#include <assert.h>
 #include <limits.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
-#include <stdio.h>
-#include <string.h>
+
+#if defined(__cplusplus)
+extern "C" {
+#endif
 
 /*
  * The public interface for a sparse bit-mapped index, a "sparse map".
@@ -88,55 +88,119 @@
  */
 
 typedef struct sparsemap sparsemap_t;
+typedef long int sparsemap_idx_t;
+#define SPARSEMAP_IDX_MAX ((1UL << (sizeof(long) * CHAR_BIT - 1)) - 1)
+#define SPARSEMAP_IDX_MIN (-(SPARSEMAP_IDX_MAX)-1)
+#define SPARSEMAP_NOT_FOUND(_x) ((_x) == SPARSEMAP_IDX_MAX || (_x) == SPARSEMAP_IDX_MIN)
 typedef uint32_t sm_idx_t;
 typedef uint64_t sm_bitvec_t;
 
-/* Allocate on a sparsemap_t on the heap and initialize it. */
-sparsemap_t *sparsemap(uint8_t *data, size_t size);
+/**
+ * Create a new, empty sparsemap_t with a buffer of |size|.
+ * Default when set to 0 is 1024.
+ */
+sparsemap_t *sparsemap(size_t size);
 
-/* Initialize sparsemap_t with data. */
+/**
+ * Allocate on a sparsemap_t on the heap to wrap the provided fixed-size
+ * buffer (heap or stack allocated).
+ */
+sparsemap_t *sparsemap_wrap(uint8_t *data, size_t size);
+
+/**
+ * Initialize a (possibly stack allocated) sparsemap_t with data (potentially
+ * also on the stack).
+ */
 void sparsemap_init(sparsemap_t *map, uint8_t *data, size_t size);
 
-/* Clears the whole buffer. */
-void sparsemap_clear(sparsemap_t *map);
-
-/* Opens an existing sparsemap at the specified buffer. */
+/**
+ * Opens an existing sparsemap contained within the specified buffer.
+ */
 void sparsemap_open(sparsemap_t *, uint8_t *data, size_t data_size);
 
-/* Resizes the data range. */
-void sparsemap_set_data_size(sparsemap_t *map, size_t data_size);
+/**
+ * Resets values and empties the buffer making it ready to accept new data.
+ */
+void sparsemap_clear(sparsemap_t *map);
 
-/* Calculate remaining capacity, full when 0. */
+/**
+ * Resizes the data range within the limits of the provided buffer, the map may
+ * move to a new address returned iff the map was created with the sparsemap() API.
+ * Take care to use the new reference (think: realloc()).  NOTE: If the returned
+ * value equals NULL then the map was not resized.
+ */
+sparsemap_t *sparsemap_set_data_size(sparsemap_t *map, size_t data_size);
+
+/**
+ * Calculate remaining capacity, approaches 0 when full.
+ */
 double sparsemap_capacity_remaining(sparsemap_t *map);
 
-/* Returns the size of the underlying byte array. */
+/**
+ * Returns the capacity of the underlying byte array.
+ */
 size_t sparsemap_get_capacity(sparsemap_t *map);
 
-/* Returns the value of a bit at index |idx|. */
-bool sparsemap_is_set(sparsemap_t *map, size_t idx);
+/**
+ * Returns the value of a bit at index |idx|, either on/true/1 or off/false/0.
+ * When |idx| is negative it is an error.
+ */
+bool sparsemap_is_set(sparsemap_t *map, sparsemap_idx_t idx);
 
-/* Sets the bit at index |idx| to true or false, depending on |value|. */
-void sparsemap_set(sparsemap_t *map, size_t idx, bool value);
+/**
+ * Sets the bit at index |idx| to true or false, depending on |value|.
+ * When |idx| is negative is it an error.  Returns the |idx| supplied or
+ * SPARSEMAP_IDX_MAX on error with |errno| set to ENOSP when the map is full.
+ */
+sparsemap_idx_t sparsemap_set(sparsemap_t *map, sparsemap_idx_t idx, bool value);
 
-/* Returns the offset of the very first bit. */
-sm_idx_t sparsemap_get_start_offset(sparsemap_t *map);
+/**
+ * Returns the offset of the very first/last bit in the map.
+ */
+sm_idx_t sparsemap_get_starting_offset(sparsemap_t *map);
 
-/* Returns the used size in the data buffer. */
+/**
+ * Returns the used size in the data buffer in bytes.
+ */
 size_t sparsemap_get_size(sparsemap_t *map);
 
-/* Decompresses the whole bitmap; calls scanner for all bits. */
-void sparsemap_scan(sparsemap_t *map, void (*scanner)(sm_idx_t[], size_t), size_t skip);
+/**
+ * Decompresses the whole bitmap; calls scanner for all bits with a set of
+ * |n| vectors |vec| each a sm_bitmap_t which can be masked and read using
+ * bit operators to read the values for each position in the bitmap index.
+ * Setting |skip| will start the scan after "skip" bits.
+ */
+void sparsemap_scan(sparsemap_t *map, void (*scanner)(sm_idx_t vec[], size_t n), size_t skip);
 
-/* Appends all chunk maps from |map| starting at |sstart| to |other|, then
-   reduces the chunk map-count appropriately. */
-void sparsemap_split(sparsemap_t *map, size_t sstart, sparsemap_t *other);
+/**
+ * Appends all chunk maps from |map| starting at |offset| to |other|, then
+ * reduces the chunk map-count appropriately.
+ */
+void sparsemap_split(sparsemap_t *map, sparsemap_idx_t offset, sparsemap_t *other);
 
-/* Returns the index of the n'th set bit; uses a 0-based index. */
-size_t sparsemap_select(sparsemap_t *map, size_t n);
+/**
+ * Finds the offset of the n'th bit either set (|value| is true) or unset
+ * (|value| is false) from the start (positive |n|), or end (negative |n|),
+ * of the bitmap and returns that (uses a 0-based index).  Returns -inf or +inf
+ * if not found (where "inf" is SPARSEMAP_IDX_MAX and "-inf" is SPARSEMAP_IDX_MIN).
+ */
+sparsemap_idx_t sparsemap_select(sparsemap_t *map, sparsemap_idx_t n, bool value);
 
-/* Counts the set bits in the range [offset, idx]. */
-size_t sparsemap_rank(sparsemap_t *map, size_t offset, size_t idx);
+/**
+ * Counts the set (|value| is true) or unset (|value| is false) bits starting
+ * at |x| bits (0-based) in the range [x, y] (inclusive on either end).
+ */
+size_t sparsemap_rank(sparsemap_t *map, size_t x, size_t y, bool value);
 
-size_t sparsemap_span(sparsemap_t *map, size_t loc, size_t len);
+/**
+ * Finds the first span (i.e. a contiguous set of bits), in the bitmap that
+ * are set (|value| is true) or unset (|value| is false) and returns the
+ * starting offset for the span (0-based).
+ */
+size_t sparsemap_span(sparsemap_t *map, sparsemap_idx_t idx, size_t len, bool value);
 
+#if defined(__cplusplus)
+}
 #endif
+
+#endif /* !defined(SPARSEMAP_H) */

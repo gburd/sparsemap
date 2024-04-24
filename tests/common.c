@@ -1,13 +1,20 @@
-#include <sys/types.h>
+#define _POSIX_C_SOURCE 199309L
+#define X86_INTRIN
 
 #include <assert.h>
-#include <pthread.h>
-#include <sparsemap.h>
+#include <pthread.h> // If using threads
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <time.h>
 #include <unistd.h>
+#ifdef X86_INTRIN
+#include <errno.h>
+#include <x86intrin.h>
+#endif
 
+#include "../include/sparsemap.h"
 #include "common.h"
 
 #pragma GCC diagnostic push
@@ -22,84 +29,25 @@
 uint64_t
 tsc(void)
 {
+#ifdef X86_INTRIN
+  return __rdtsc();
+#else
   uint32_t low, high;
   __asm__ volatile("rdtsc" : "=a"(low), "=d"(high));
   return ((uint64_t)high << 32) | low;
-}
-
-static uint64_t
-get_tsc_frequency()
-{
-  uint32_t high, low;
-  __asm__ volatile("rdtsc" : "=a"(low), "=d"(high));
-  __asm__ volatile("rdtsc");
-  return ((uint64_t)high << 32) | low;
+#endif
 }
 
 double
-tsc_ticks_to_ns(uint64_t tsc_ticks)
+nsts()
 {
-  static uint64_t tsc_freq = 0;
-  if (tsc_freq == 0) {
-    tsc_freq = get_tsc_frequency();
-  }
-  return (double)tsc_ticks / (double)tsc_freq * 1e9;
-}
+  struct timespec ts;
 
-void
-est_sift_up(uint64_t *heap, int child_index)
-{
-  while (child_index > 0) {
-    int parent_index = (child_index - 1) / 2;
-    if (heap[parent_index] > heap[child_index]) {
-      // Swap parent and child
-      uint64_t temp = heap[parent_index];
-      heap[parent_index] = heap[child_index];
-      heap[child_index] = temp;
-      child_index = parent_index;
-    } else {
-      break; // Heap property satisfied
-    }
+  if (clock_gettime(CLOCK_REALTIME, &ts) == -1) {
+    perror("clock_gettime");
+    return -1.0; // Return -1.0 on error
   }
-}
-
-void
-est_sift_down(uint64_t *heap, int heap_size, int parent_index)
-{
-  int child_index = 2 * parent_index + 1; // Left child
-  while (child_index < heap_size) {
-    // Right child exists and is smaller than left child
-    if (child_index + 1 < heap_size && heap[child_index + 1] < heap[child_index]) {
-      child_index++;
-    }
-    // If the smallest child is smaller than the parent, swap them
-    if (heap[child_index] < heap[parent_index]) {
-      uint64_t temp = heap[child_index];
-      heap[child_index] = heap[parent_index];
-      heap[parent_index] = temp;
-      parent_index = child_index;
-      child_index = 2 * parent_index + 1;
-    } else {
-      break; // Heap property satisfied
-    }
-  }
-}
-
-void
-est_insert_value(uint64_t *heap, int heap_max_size, int *heap_size, uint64_t value)
-{
-  if (*heap_size < heap_max_size) { // Heap not full, insert value
-    heap[*heap_size] = value;
-    est_sift_up(heap, *heap_size);
-    (*heap_size)++;
-  } else {
-    // Heap is full, replace root with new value with a certain probability
-    // This is a very naive approach to maintain a sample of the input
-    if (rand() % 2) {
-      heap[0] = value;
-      est_sift_down(heap, heap_max_size, 0);
-    }
-  }
+  return ts.tv_sec + ts.tv_nsec / 1e9;
 }
 
 int __xorshift32_state = 0;
@@ -170,7 +118,7 @@ has_sequential_set(int a[], int l, int r)
 int
 ensure_sequential_set(int a[], int l, int r)
 {
-  if (!a || l == 0 || r < 1 || r > l) {
+  if (!a || l == 0 || r < 1 || r > l - 1) {
     return 0;
   }
 
@@ -197,21 +145,6 @@ ensure_sequential_set(int a[], int l, int r)
     a[i + offset] = value + i;
   }
   return value;
-}
-
-int
-create_sequential_set_in_empty_map(sparsemap_t *map, int s, int r)
-{
-  int placed_at;
-  if (s >= r + 1) {
-    placed_at = 0;
-  } else {
-    placed_at = random_uint32() % (s - r - 1);
-  }
-  for (int i = placed_at; i < placed_at + r; i++) {
-    sparsemap_set(map, i, true);
-  }
-  return placed_at;
 }
 
 void
@@ -340,6 +273,20 @@ is_unique(int a[], int l, int value)
   return 1; // Unique
 }
 
+int
+whats_set_uint64(uint64_t number, int pos[64])
+{
+  int length = 0;
+
+  for (int i = 0; i < 64; i++) {
+    if (number & ((uint64_t)1 << i)) {
+      pos[length++] = i;
+    }
+  }
+
+  return length;
+}
+
 void
 setup_test_array(int a[], int l, int max_value)
 {
@@ -359,15 +306,6 @@ void
 bitmap_from_uint32(sparsemap_t *map, uint32_t number)
 {
   for (int i = 0; i < 32; i++) {
-    bool bit = number & (1 << i);
-    sparsemap_set(map, i, bit);
-  }
-}
-
-void
-bitmap_from_uint64(sparsemap_t *map, uint64_t number)
-{
-  for (int i = 0; i < 64; i++) {
     bool bit = number & (1 << i);
     sparsemap_set(map, i, bit);
   }
@@ -400,22 +338,53 @@ rank_uint64(uint64_t number, int n, int p)
   return count;
 }
 
-int
-whats_set_uint64(uint64_t number, int pos[64])
+void
+print_bits(char *name, uint64_t value)
 {
-  int length = 0;
-
-  for (int i = 0; i < 64; i++) {
-    if (number & ((uint64_t)1 << i)) {
-      pos[length++] = i;
+  if (name) {
+    printf("%s\t", name);
+  }
+  for (int i = 63; i >= 0; i--) {
+    printf("%ld", (value >> i) & 1);
+    if (i % 8 == 0) {
+      printf(" "); // Add space for better readability
     }
   }
-
-  return length;
+  printf("\n");
 }
 
 void
-whats_set(sparsemap_t *map, int m)
+sm_bitmap_from_uint64(sparsemap_t *map, uint64_t number)
+{
+  for (int i = 0; i < 64; i++) {
+    bool bit = number & ((uint64_t)1 << i);
+    sparsemap_set(map, i, bit);
+  }
+}
+
+sparsemap_idx_t
+sm_add_span(sparsemap_t *map, int map_size, int span_length)
+{
+  int attempts = map_size / span_length;
+  sparsemap_idx_t placed_at;
+  do {
+    placed_at = random_uint32() % (map_size - span_length - 1);
+    if (sm_occupied(map, placed_at, span_length, true)) {
+      attempts--;
+    } else {
+      break;
+    }
+  } while (attempts);
+  for (int i = placed_at; i < placed_at + span_length; i++) {
+    if (sparsemap_set(map, i, true) != i) {
+      return placed_at; // TODO error?
+    }
+  }
+  return placed_at;
+}
+
+void
+sm_whats_set(sparsemap_t *map, int m)
 {
   logf("what's set in the range [0, %d): ", m);
   for (int i = 0; i < m; i++) {
@@ -424,4 +393,26 @@ whats_set(sparsemap_t *map, int m)
     }
   }
   logf("\n");
+}
+
+bool
+sm_is_span(sparsemap_t *map, sparsemap_idx_t m, int len, bool value)
+{
+  for (sparsemap_idx_t i = m; i < m + len; i++) {
+    if (sparsemap_is_set(map, i) != value) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool
+sm_occupied(sparsemap_t *map, sparsemap_idx_t m, int len, bool value)
+{
+  for (sparsemap_idx_t i = m; i < (sparsemap_idx_t)len; i++) {
+    if (sparsemap_is_set(map, i) == value) {
+      return true;
+    }
+  }
+  return false;
 }

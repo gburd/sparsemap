@@ -60,5 +60,6 @@ to an uncompressed bit vector (sometimes higher due to the bytes required for
 metadata). In such cases, other compression schemes are more efficient (i.e.
 http://lemire.me/blog/archives/2008/08/20/the-mythical-bitmap-index/).
 
-This library was originally created for hamsterdb [http://hamsterdb.com] in
-C++ and then translated to C99 code by Greg Burd <greg@burd.me>.
+This library was originally created for [hamsterdb](http://hamsterdb.com) in
+C++ and then translated to C and further improved by Greg Burd <greg@burd.me>
+for use in LMDB and OpenLDAP.

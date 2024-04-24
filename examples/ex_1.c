@@ -1,4 +1,7 @@
 #include <assert.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 
 #include "../include/sparsemap.h"
@@ -14,16 +17,18 @@
 
 /* !!! Duplicated here for testing purposes. Keep in sync, or suffer. !!! */
 struct sparsemap {
-  uint8_t *m_data;
   size_t m_capacity;
   size_t m_data_used;
+  uint8_t *m_data;
 };
 
 int
 main()
 {
   size_t size = 4;
-  setbuf(stderr, 0); // disable buffering
+  setvbuf(stdout, NULL, _IONBF, 0); // Disable buffering for stdout
+  setvbuf(stderr, NULL, _IONBF, 0); // Disable buffering for stdout
+
   __diag("Please wait a moment...");
   sparsemap_t mmap, *map = &mmap;
   uint8_t buffer[1024];
@@ -135,7 +140,7 @@ main()
     sparsemap_set(map, i, true);
   }
   for (int i = 0; i < 100000; i++) {
-    assert(sparsemap_select(map, i) == (unsigned)i);
+    assert(sparsemap_select(map, i, true) == (unsigned)i);
   }
 
   sparsemap_clear(map);
@@ -145,7 +150,7 @@ main()
     sparsemap_set(map, i, true);
   }
   for (int i = 1; i < 513; i++) {
-    assert(sparsemap_select(map, i - 1) == (unsigned)i);
+    assert(sparsemap_select(map, i - 1, true) == (unsigned)i);
   }
 
   sparsemap_clear(map);
@@ -155,7 +160,7 @@ main()
     sparsemap_set(map, i * 10, true);
   }
   for (size_t i = 0; i < 8; i++) {
-    assert(sparsemap_select(map, i) == i * 10);
+    assert(sparsemap_select(map, i, true) == (sparsemap_idx_t)i * 10);
   }
 
   // split and move, aligned to MiniMap capacity

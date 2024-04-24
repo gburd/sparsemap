@@ -23,20 +23,9 @@
 #define XORSHIFT_SEED_VALUE ((unsigned int)time(NULL) ^ getpid())
 #endif
 
-#define EST_MEDIAN_DECL(decl, size)   \
-  uint64_t heap_##decl[size] = { 0 }; \
-  int heap_##decl##_max_size = size;  \
-  int heap_##decl##_size = 0;
-
-#define EST_MEDIAN_ADD(decl, value) est_insert_value(heap_##decl, heap_##decl##_max_size, &heap_##decl##_size, (value));
-
-#define EST_MEDIAN_GET(decl) heap_##decl[0]
-
 uint64_t tsc(void);
 double tsc_ticks_to_ns(uint64_t tsc_ticks);
-void est_sift_up(uint64_t *heap, int child_index);
-void est_sift_down(uint64_t *heap, int heap_size, int parent_index);
-void est_insert_value(uint64_t *heap, int heap_max_size, int *heap_size, uint64_t value);
+double nsts();
 
 void xorshift32_seed();
 uint32_t xorshift32();
@@ -52,11 +41,16 @@ int is_unique(int a[], int l, int value);
 void setup_test_array(int a[], int l, int max_value);
 void shuffle(int *array, size_t n);
 int ensure_sequential_set(int a[], int l, int r);
-int create_sequential_set_in_empty_map(sparsemap_t *map, int s, int r);
+sparsemap_idx_t sm_add_span(sparsemap_t *map, int map_size, int span_length);
+
+void print_bits(char *name, uint64_t value);
 
 void bitmap_from_uint32(sparsemap_t *map, uint32_t number);
-void bitmap_from_uint64(sparsemap_t *map, uint64_t number);
+void sm_bitmap_from_uint64(sparsemap_t *map, uint64_t number);
 uint32_t rank_uint64(uint64_t number, int n, int p);
 int whats_set_uint64(uint64_t number, int bitPositions[64]);
 
-void whats_set(sparsemap_t *map, int m);
+void sm_whats_set(sparsemap_t *map, int m);
+
+bool sm_is_span(sparsemap_t *map, sparsemap_idx_t m, int len, bool value);
+bool sm_occupied(sparsemap_t *map, sparsemap_idx_t m, int len, bool value);

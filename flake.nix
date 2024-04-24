@@ -1,59 +1,55 @@
 {
-  description = "A Concurrent Skip List library for key/value pairs.";
+  description = "A sparse bitmapped index library in C.";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
-    flake-utils.url = "github:numtide/flake-utils";
+    # nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+    nixpkgs.url = "github:NixOS/nixpkgs/23.11";
+    utils.url = "github:numtide/flake-utils";
+    utils.inputs.nixpkgs.follows = "nixpkgs";
   };
 
-  outputs =
-    { self
-    , nixpkgs
-    , flake-utils
-    , ...
-    }:
-    flake-utils.lib.eachDefaultSystem (system:
-      let
-        pkgs = import nixpkgs {
-          inherit system;
-          config = { allowUnfree = true; };
-        };
-        supportedSystems = [ "x86_64-linux" ];
-        forAllSystems = nixpkgs.lib.genAttrs supportedSystems;
-        nixpkgsFor = forAllSystems (system: import nixpkgs {
-          inherit system;
-          overlays = [ self.overlay ];
-        });
-      in {
-        pkgs = import nixpkgs {
-          inherit system;
-          devShell = nixpkgs.legacyPackages.${system} {
-            pkgs.mkShell = {
-              nativeBuildInputs = with pkgs.buildPackages; [
-                act
-                autoconf
-                clang
-                ed
-                gcc
-                gdb
-                gettext
-                graphviz-nox
-                libtool
-                m4
-                perl
-                pkg-config
-                python3
-                ripgrep
-                valgrind
-              ];
-              buildInputs = with pkgs; [
-                libbacktrace
-                glibc.out
-                glibc.static
-              ];
-            };
-            DOCKER_BUILDKIT = 1;
+  outputs = { self, nixpkgs, ... }
+    @inputs: inputs.utils.lib.eachSystem [
+      "x86_64-linux" "i686-linux" "aarch64-linux" "x86_64-darwin"
+    ] (system:
+      let pkgs = import nixpkgs {
+            inherit system;
+            overlays = [];
+            config.allowUnfree = true;
           };
-        };
-      });
+      in {
+      devShell = pkgs.mkShell rec {
+        name = "sparsemap";
+        packages = with pkgs; [
+          act
+          autoconf
+          clang
+          ed
+          gcc
+          gdb
+          gettext
+          graphviz-nox
+          libtool
+          m4
+          perl
+          pkg-config
+          python3
+          ripgrep
+          valgrind
+        ];
+
+        buildInputs = with pkgs; [
+          libbacktrace
+          glibc.out
+          glibc.static
+        ];
+
+        shellHook = let
+          icon = "f121";
+        in ''
+        export PS1="$(echo -e '\u${icon}') {\[$(tput sgr0)\]\[\033[38;5;228m\]\w\[$(tput sgr0)\]\[\033[38;5;15m\]} (${name}) \\$ \[$(tput sgr0)\]"
+        '';
+      };
+      DOCKER_BUILDKIT = 1;
+    });
 }
