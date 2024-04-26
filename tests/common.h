@@ -46,11 +46,11 @@ sparsemap_idx_t sm_add_span(sparsemap_t *map, int map_size, int span_length);
 void print_bits(char *name, uint64_t value);
 
 void bitmap_from_uint32(sparsemap_t *map, uint32_t number);
-void sm_bitmap_from_uint64(sparsemap_t *map, uint64_t number);
+void sm_bitmap_from_uint64(sparsemap_t *map, int offset, uint64_t number);
 uint32_t rank_uint64(uint64_t number, int n, int p);
 int whats_set_uint64(uint64_t number, int bitPositions[64]);
 
-void sm_whats_set(sparsemap_t *map, int m);
+void sm_whats_set(sparsemap_t *map, int off, int len);
 
 bool sm_is_span(sparsemap_t *map, sparsemap_idx_t m, int len, bool value);
 bool sm_occupied(sparsemap_t *map, sparsemap_idx_t m, int len, bool value);

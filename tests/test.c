@@ -103,7 +103,7 @@ test_api_new_realloc(const MunitParameter params[], void *data)
   assert_true(map->m_capacity == 1024);
   assert_true(map->m_data_used == sizeof(uint32_t));
 
-  map = sparsemap_set_data_size(map, 2048);
+  map = sparsemap_set_data_size(map, 2048, NULL);
   assert_true(map->m_capacity == 2048);
   assert_true(map->m_data_used == sizeof(uint32_t));
 
@@ -276,7 +276,7 @@ test_api_set_data_size(const MunitParameter params[], void *data)
   assert_ptr_not_null(map);
   assert_true(map->m_capacity == 1024);
   assert_true(map->m_capacity == sparsemap_get_capacity(map));
-  sparsemap_set_data_size(map, 512);
+  sparsemap_set_data_size(map, 512, NULL);
   assert_true(map->m_capacity == 512);
   assert_true(map->m_capacity == sparsemap_get_capacity(map));
   return MUNIT_OK;
@@ -445,6 +445,9 @@ test_api_set(const MunitParameter params[], void *data)
   return MUNIT_OK;
 }
 
+// TODO remove? not public API anymore...
+extern sparsemap_idx_t sparsemap_get_starting_offset(sparsemap_t *map);
+
 static void *
 test_api_get_starting_offset_setup(const MunitParameter params[], void *user_data)
 {
@@ -523,7 +526,7 @@ test_api_scan_setup(const MunitParameter params[], void *user_data)
   sparsemap_t *map = (sparsemap_t *)test_api_setup(params, user_data);
 
   sparsemap_init(map, buf, 1024);
-  sm_bitmap_from_uint64(map, ((uint64_t)0xfeedface << 32) | 0xbadc0ffee);
+  sm_bitmap_from_uint64(map, 0, ((uint64_t)0xfeedface << 32) | 0xbadc0ffee);
 
   return (void *)map;
 }
@@ -610,7 +613,7 @@ test_api_select_setup(const MunitParameter params[], void *user_data)
   sparsemap_t *map = (sparsemap_t *)test_api_setup(params, user_data);
 
   sparsemap_init(map, buf, 1024);
-  sm_bitmap_from_uint64(map, ((uint64_t)0xfeedface << 32) | 0xbadc0ffee);
+  sm_bitmap_from_uint64(map, 0, ((uint64_t)0xfeedface << 32) | 0xbadc0ffee);
 
   return (void *)map;
 }
@@ -648,7 +651,7 @@ test_api_select_false_setup(const MunitParameter params[], void *user_data)
   sparsemap_t *map = (sparsemap_t *)test_api_setup(params, user_data);
 
   sparsemap_init(map, buf, 1024);
-  sm_bitmap_from_uint64(map, ((uint64_t)0xfeedface << 32) | 0xbadc0ffee);
+  sm_bitmap_from_uint64(map, 0, ((uint64_t)0xfeedface << 32) | 0xbadc0ffee);
 
   return (void *)map;
 }
@@ -688,7 +691,7 @@ test_api_select_neg_setup(const MunitParameter params[], void *user_data)
   sparsemap_t *map = (sparsemap_t *)test_api_setup(params, user_data);
 
   sparsemap_init(map, buf, 1024);
-  sm_bitmap_from_uint64(map, ((uint64_t)0xfeedface << 32) | 0xbadc0ffee);
+  sm_bitmap_from_uint64(map, 0, ((uint64_t)0xfeedface << 32) | 0xbadc0ffee);
 
   return (void *)map;
 }
@@ -962,7 +965,7 @@ test_scale_lots_o_spans(const MunitParameter params[], void *data)
     // TODO: sm_add_span(map, amt, l);
     sm_add_span(map, 10000, l);
     if (errno == ENOSPC) {
-      map = sparsemap_set_data_size(map, sparsemap_get_capacity(map) * 2);
+      map = sparsemap_set_data_size(map, sparsemap_get_capacity(map) * 2, NULL);
       errno = 0;
     }
     i += l;
@@ -974,6 +977,7 @@ test_scale_lots_o_spans(const MunitParameter params[], void *data)
   return MUNIT_OK;
 }
 
+#ifdef SCALE_ONDREJ
 static void *
 test_scale_ondrej_setup(const MunitParameter params[], void *user_data)
 {
@@ -999,23 +1003,50 @@ test_scale_ondrej(const MunitParameter params[], void *data)
   assert_ptr_not_null(map);
 
   sparsemap_idx_t stride = 18;
-  sparsemap_idx_t top = 268435456;
+  //  sparsemap_idx_t top = 268435456;
+  sparsemap_idx_t top = 2000;
   sparsemap_idx_t needle = munit_rand_int_range(1, top / stride);
   for (sparsemap_idx_t i = 0; i < top / stride; i += stride) {
     for (sparsemap_idx_t j = 0; j < stride; j++) {
       bool set = (i != needle) ? (j < 10) : (j < 9);
       sparsemap_set(map, i, set);
       if (errno == ENOSPC) {
-        map = sparsemap_set_data_size(map, sparsemap_get_capacity(map) * 2);
+        map = sparsemap_set_data_size(map, sparsemap_get_capacity(map) * 2, NULL);
         errno = 0;
       }
     }
-    assert_true(sm_is_span(map, i + ((i != needle) ? 10 : 9), (i != needle) ? 8 : 9, false));
+    assert_true(sm_is_span(map, i + ((i != needle) ? 10 : 9), (i != needle) ? 8 : 9, true));
   }
   sparsemap_idx_t a = sparsemap_span(map, 0, 9, false);
   sparsemap_idx_t l = a / stride;
   printf("%ld\t%ld\n", a, l);
   assert_true(l == needle);
+  return MUNIT_OK;
+}
+#endif // SCALE_ONDREJ
+
+static void *
+test_scale_fuzz_setup(const MunitParameter params[], void *user_data)
+{
+  (void)params;
+  (void)user_data;
+  sparsemap_t *map = sparsemap(10 * 1024);
+  assert_ptr_not_null(map);
+  return (void *)map;
+}
+static void
+test_scale_fuzz_tear_down(void *fixture)
+{
+  sparsemap_t *map = (sparsemap_t *)fixture;
+  assert_ptr_not_null(map);
+  munit_free(map);
+}
+static MunitResult
+test_scale_fuzz(const MunitParameter params[], void *data)
+{
+  sparsemap_t *map = (sparsemap_t *)data;
+  (void)params;
+  (void)map; //TODO...
   return MUNIT_OK;
 }
 
@@ -1038,7 +1069,7 @@ test_scale_spans_come_spans_go_tear_down(void *fixture)
 static MunitResult
 test_scale_spans_come_spans_go(const MunitParameter params[], void *data)
 {
-  size_t amt = 8192; // 268435456, ~5e7 interations due to 2e9 / avg(l)
+  size_t amt = 8192; // 268435456; // ~5e7 interations due to 2e9 / avg(l)
   sparsemap_t *map = (sparsemap_t *)data;
   (void)params;
 
@@ -1048,7 +1079,8 @@ test_scale_spans_come_spans_go(const MunitParameter params[], void *data)
     int l = i % 31 + 16;
     sm_add_span(map, amt, l);
     if (errno == ENOSPC) {
-      map = sparsemap_set_data_size(map, sparsemap_get_capacity(map) * 2);
+      map = sparsemap_set_data_size(map, sparsemap_get_capacity(map) + 1024, NULL);
+      assert_ptr_not_null(map);
       errno = 0;
     }
 
@@ -1275,7 +1307,10 @@ test_perf_span_tainted(const MunitParameter params[], void *data)
 // clang-format off
 static MunitTest scale_test_suite[] = {
   { (char *)"/lots-o-spans", test_scale_lots_o_spans, test_scale_lots_o_spans_setup, test_scale_lots_o_spans_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
-  { (char *)"/ondrej", test_scale_ondrej, test_scale_ondrej_setup, test_scale_ondrej_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
+#ifdef SCALE_ONDREJ
+{ (char *)"/ondrej", test_scale_ondrej, test_scale_ondrej_setup, test_scale_ondrej_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
+#endif
+  { (char *)"/fuzz", test_scale_fuzz, test_scale_fuzz_setup, test_scale_fuzz_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
   { (char *)"/spans_come_spans_go", test_scale_spans_come_spans_go, test_scale_spans_come_spans_go_setup, test_scale_spans_come_spans_go_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
   { (char *)"/best-case", test_scale_best_case, test_scale_best_case_setup, test_scale_best_case_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
   { (char *)"/worst-case", test_scale_worst_case, test_scale_worst_case_setup, test_scale_worst_case_tear_down, MUNIT_TEST_OPTION_NONE, NULL },

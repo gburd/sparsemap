@@ -354,9 +354,9 @@ print_bits(char *name, uint64_t value)
 }
 
 void
-sm_bitmap_from_uint64(sparsemap_t *map, uint64_t number)
+sm_bitmap_from_uint64(sparsemap_t *map, int offset, uint64_t number)
 {
-  for (int i = 0; i < 64; i++) {
+  for (int i = offset; i < 64; i++) {
     bool bit = number & ((uint64_t)1 << i);
     sparsemap_set(map, i, bit);
   }
@@ -384,15 +384,15 @@ sm_add_span(sparsemap_t *map, int map_size, int span_length)
 }
 
 void
-sm_whats_set(sparsemap_t *map, int m)
+sm_whats_set(sparsemap_t *map, int off, int len)
 {
-  logf("what's set in the range [0, %d): ", m);
-  for (int i = 0; i < m; i++) {
+  printf("what's set in the range [%d, %d): ", off, off + len);
+  for (int i = off; i < off + len; i++) {
     if (sparsemap_is_set(map, i)) {
-      logf("%d ", i);
+      printf("%d ", i);
     }
   }
-  logf("\n");
+  printf("\n");
 }
 
 bool

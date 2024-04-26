@@ -3,6 +3,7 @@
 **/*.o
 tests/test
 examples/ex_?
+examples/soak
 .cache
 hints.txt
 tmp/

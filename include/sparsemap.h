@@ -89,113 +89,239 @@ extern "C" {
 
 typedef struct sparsemap sparsemap_t;
 typedef long int sparsemap_idx_t;
-#define SPARSEMAP_IDX_MAX ((1UL << (sizeof(long) * CHAR_BIT - 1)) - 1)
-#define SPARSEMAP_IDX_MIN (-(SPARSEMAP_IDX_MAX)-1)
-#define SPARSEMAP_NOT_FOUND(_x) ((_x) == SPARSEMAP_IDX_MAX || (_x) == SPARSEMAP_IDX_MIN)
+#define SPARSEMAP_IDX_MAX LONG_MAX
+#define SPARSEMAP_IDX_MIN LONG_MIN
+#define SPARSEMAP_FOUND(x) ((x) < SPARSEMAP_IDX_MAX || (x) > SPARSEMAP_IDX_MIN)
+#define SPARSEMAP_NOT_FOUND(x) ((x) == SPARSEMAP_IDX_MAX || (x) == SPARSEMAP_IDX_MIN)
 typedef uint32_t sm_idx_t;
 typedef uint64_t sm_bitvec_t;
 
-/**
- * Create a new, empty sparsemap_t with a buffer of |size|.
- * Default when set to 0 is 1024.
+/** @brief Allocate a new, empty sparsemap_t with a buffer of \b size on the
+ * heap to use for storage of bitmap data.
+ *
+ * The buffer used for the bitmap is allocated in the same heap allocation as
+ * the structure, this means that you only need to call free() on the returned
+ * object to free all resources.  Using this method it is allowable to grow the
+ * buffer size by calling #sparsemap_set_data_size().  This function calls
+ * #sparsemap_init().
+ *
+ * @param[in] size The starting size of the buffer used for the bitmap, default
+ * is 1024 bytes.
+ * @returns The newly allocated sparsemap reference.
  */
 sparsemap_t *sparsemap(size_t size);
 
-/**
- * Allocate on a sparsemap_t on the heap to wrap the provided fixed-size
- * buffer (heap or stack allocated).
+/** @brief Allocate a new, empty sparsemap_t that references (wraps) the buffer
+ * \b data of \b size bytes to use for storage of bitmap data.
+ *
+ * This function allocates a new sparsemap_t but not the buffer which is
+ * provided by the caller as \b data which can be allocated on the stack or
+ * heap.  Caller is responsible for calling free() on the returned heap object
+ * and releasing the memory used for \b data.  Resizing the buffer is not
+ * directly supported, you may attempt to resize by calling
+ * #sparsemap_set_data_size() with the potentially relocated address of \b data.
+ * This function calls #sparsemap_init().
+ *
+ * @param[in] data A heap or stack memory buffer of \b size for use storing
+ * bitmap data.
+ * @param[in] size The size of the buffer \b data used for the bitmap.
+ * @returns The newly allocated sparsemap reference.
  */
 sparsemap_t *sparsemap_wrap(uint8_t *data, size_t size);
 
-/**
- * Initialize a (possibly stack allocated) sparsemap_t with data (potentially
- * also on the stack).
+/** @brief Initialize an existing sparsemap_t by assigning \b data of \b size
+ * bytes for storage of bitmap data.
+ *
+ * Given the address of an existing \b map allocated on the stack or heap this
+ * function will initialize the datastructure and use the provided \b data of
+ * \b size for bitmap data.  Caller is responsible for all memory management.
+ * Resizing the buffer is not directly supported, you
+ * may resize it and call #sparsemap_set_data_size() and then ensure that should
+ * the address of the object changed you need to update it by calling #sparsemap_
+ * m_data field.
+ *
+ * @param[in] map The sparsemap reference.
+ * @param[in] data A heap or stack memory buffer of \b size for use storing
+ * bitmap data.
+ * @param[in] size The size of the buffer \b data used for the bitmap.
  */
 void sparsemap_init(sparsemap_t *map, uint8_t *data, size_t size);
 
-/**
- * Opens an existing sparsemap contained within the specified buffer.
+/** @brief Opens, without initializing, an existing sparsemap contained within
+ * the specified buffer.
+ *
+ * Given the address of an existing \b map this function will assign to the
+ * provided datastructure \b data of \b size for bitmap data.  Caller is
+ * responsible for all memory management.  Use this when as a way to
+ * "deserialize" bytes and make them ready for use as a bitmap.
+ *
+ * @param[in] map The sparsemap reference.
+ * @param[in] data A heap or stack memory buffer of \b size for use storing
+ * bitmap data.
+ * @param[in] size The size of the buffer \b data used for the bitmap.
  */
-void sparsemap_open(sparsemap_t *, uint8_t *data, size_t data_size);
+void sparsemap_open(sparsemap_t *map, uint8_t *data, size_t size);
 
-/**
- * Resets values and empties the buffer making it ready to accept new data.
+/** @brief Resets values and empties the buffer making it ready to accept new
+ *  data.
+ *
+ * @param[in] map The sparsemap reference.
  */
 void sparsemap_clear(sparsemap_t *map);
 
-/**
- * Resizes the data range within the limits of the provided buffer, the map may
- * move to a new address returned iff the map was created with the sparsemap() API.
- * Take care to use the new reference (think: realloc()).  NOTE: If the returned
- * value equals NULL then the map was not resized.
+/** @brief Update the size of the buffer \b data used for storing the bitmap.
+ *
+ * When called with \b data NULL on a \b map that was created with #sparsemap()
+ * this function will reallocate the storage for both the map and data possibly
+ * changing the address of the map itself so it is important for the caller to
+ * update all references to this map to the address returned in this scenario.
+ * Access to stale references will result in memory violations and program
+ * termination.  Caller is not required to free() the old address, only the new
+ * one should it have changed.  This uses #realloc() under the covers, all
+ * caveats apply here as well.
+ *
+ * When called referencing a \b map that was allocate by the caller this
+ * function will only update the values within the datastructure.
+ *
+ * @param[in] map The sparsemap reference.
+ * @param[in] size The desired size of the buffer \b data used for the bitmap.
+ * @returns The -- potentially changed -- sparsemap reference, or NULL should a
+ * #realloc() fail (\b ENOMEM)
+ * @note The resizing of caller supplied allocated objects is not yet fully
+ * supported.
  */
-sparsemap_t *sparsemap_set_data_size(sparsemap_t *map, size_t data_size);
+sparsemap_t *sparsemap_set_data_size(sparsemap_t *map, size_t size, uint8_t *data);
 
-/**
- * Calculate remaining capacity, approaches 0 when full.
+/** @brief Calculate remaining capacity, approaches 0 when full.
+ *
+ * Provides an estimate in the range [0.0, 100.0] of the remaining capacity of
+ * the buffer storing bitmap data.  This can change up or down as more data
+ * is added/removed due to the method for compressed representation, do not
+ * expect a smooth progression either direction.  This is a rough estimate only
+ * and may also jump in value after seemingly indiscriminate changes to the map.
+ *
+ * @param[in] map The sparsemap reference.
+ * @returns an estimate for remaining capacity that approaches 0.0 when full or
+ * 100.0 when empty
  */
 double sparsemap_capacity_remaining(sparsemap_t *map);
 
-/**
- * Returns the capacity of the underlying byte array.
+/** @brief Returns the capacity of the underlying byte array in bytes.
+ *
+ * Specifically, this returns the byte \b size provided for the underlying
+ * buffer used to store bitmap data.
+ *
+ * @param[in] map The sparsemap reference.
+ * @returns byte size of the buffer used for storing bitmap data
  */
 size_t sparsemap_get_capacity(sparsemap_t *map);
 
-/**
- * Returns the value of a bit at index |idx|, either on/true/1 or off/false/0.
+/** @brief Returns the value of a bit at index \b idx, either true for "set" (1)
+ * or \b false for "unset" (0).
+ *
  * When |idx| is negative it is an error.
+ *
+ * @param[in] map The sparsemap reference.
+ * @param[in] idx The 0-based offset into the bitmap index to examine.
+ * @returns either true or false; a negative idx is an error and always returns
+ * false
+ * @todo Support for negative relative offset in \idx.
  */
 bool sparsemap_is_set(sparsemap_t *map, sparsemap_idx_t idx);
 
-/**
- * Sets the bit at index |idx| to true or false, depending on |value|.
- * When |idx| is negative is it an error.  Returns the |idx| supplied or
- * SPARSEMAP_IDX_MAX on error with |errno| set to ENOSP when the map is full.
+/** @brief Sets the bit at index \b idx to \b value.
+ *
+ * A sparsemap has a fixed size buffer with a capacity that can be exhausted by
+ * when calling this function.  In such cases the return value is not equal to
+ * the provided \b idx and errno is set to ENOSPC.  In such situations it is
+ * possible to grow the data size and retry the set() operation under certain
+ * circumstances (see #sparsemap() and #sparsemap_set_data_size()).
+ *
+ * @param[in] map The sparsemap reference.
+ * @param[in] idx The 0-based offset into the bitmap index to modify.
+ * @returns the \b idx supplied on success or SPARSEMAP_IDX_MIN/MAX on error
+ * with \b errno set to ENOSPC when the map is full; a negative idx is an error
+ * and always returns SPARSEMAP_IDX_MIN.
  */
 sparsemap_idx_t sparsemap_set(sparsemap_t *map, sparsemap_idx_t idx, bool value);
 
-/**
- * Returns the offset of the very first/last bit in the map.
- */
-sm_idx_t sparsemap_get_starting_offset(sparsemap_t *map);
-
-/**
- * Returns the used size in the data buffer in bytes.
+/** @brief Returns the byte size of the data buffer that has been used thus far.
+ *
+ * @param[in] map The sparsemap reference.
+ * @returns the byte size of the data buffer that has been used thus far
  */
 size_t sparsemap_get_size(sparsemap_t *map);
 
-/**
- * Decompresses the whole bitmap; calls scanner for all bits with a set of
- * |n| vectors |vec| each a sm_bitmap_t which can be masked and read using
- * bit operators to read the values for each position in the bitmap index.
- * Setting |skip| will start the scan after "skip" bits.
+/** @brief Provides a method for a callback function to examine every bit set in
+ * the index.
+ *
+ * This decompresses the whole bitmap and invokes #scanner() passing a 64bit
+ * "vector" of bits in order from 0 index to the end of the map.  Using standard
+ * bit masking techniques it is possible to read each bit from LSB to MSB in
+ * these vectors to read the entire content of the bitmap index (see
+ * examples/ex_4.c).
+ *
+ * @param[in] map The sparsemap reference.
+ * @param[in] skip Start the scan after "skip" bits.
  */
 void sparsemap_scan(sparsemap_t *map, void (*scanner)(sm_idx_t vec[], size_t n), size_t skip);
 
-/**
- * Appends all chunk maps from |map| starting at |offset| to |other|, then
- * reduces the chunk map-count appropriately.
+/** @brief Splits the bitmap by assigning all bits starting at \b offset to the
+ * \b other bitmap while removing them from \b map.
+ *
+ * @param[in] map The sparsemap reference.
+ * @param[in] skip Start the scan after "skip" bits.
  */
 void sparsemap_split(sparsemap_t *map, sparsemap_idx_t offset, sparsemap_t *other);
 
-/**
- * Finds the offset of the n'th bit either set (|value| is true) or unset
- * (|value| is false) from the start (positive |n|), or end (negative |n|),
- * of the bitmap and returns that (uses a 0-based index).  Returns -inf or +inf
- * if not found (where "inf" is SPARSEMAP_IDX_MAX and "-inf" is SPARSEMAP_IDX_MIN).
+/** @brief Finds the index of the \b n'th bit set to \b value.
+ *
+ * Locates the \b n'th bit either set, \b value is true, or unset, \b value is
+ * false, from the start, positive \b n, or end, negative \b n, of the bitmap.
+ * So, if your bit pattern is: ```1101 1110 1010 1101 1011 1110 1110 1111``` and
+ * you request the first set bit the result is `0` (meaning the 1st bit in the
+ * map which is index 0 because this is 0-based indexing).  The first unset bit
+ * is `2` (or the third bit in the pattern).  When n is 3 and value is true the
+ * result would be `3` (the fourth bit, or the third set bit which is at index
+ * 3 when 0-based).
+ *
+ * @param[in] map The sparsemap reference.
+ * @param[in] n Specifies how many bits to ignore (when n=3 return the position
+ * of the third matching bit).
+ * @param[in] value Determines if the search is to examine set (true) or unset
+ * (false) bits in the bitmap index.
+ * @returns the 0-based index of the located bit position within the map; when
+ * not found either SPARSEMAP_IDX_MAX or SPARSEMAP_IDX_MIN.
  */
 sparsemap_idx_t sparsemap_select(sparsemap_t *map, sparsemap_idx_t n, bool value);
 
-/**
- * Counts the set (|value| is true) or unset (|value| is false) bits starting
- * at |x| bits (0-based) in the range [x, y] (inclusive on either end).
+/** @brief Counts the bits matching \b value in the provided range, [\b x, \b
+ * y].
+ *
+ * Counts the set, \b value is true, or unset, \b value is false, bits starting
+ * at the \b idx'th bit (0-based) in the range [\b x, \b y] (inclusive on either
+ * end).  If range is [0, 0] this examines 1 bit, the first one in the map, and
+ * returns 1 if value is true and the bit was set.
+ *
+ * @param[in] map The sparsemap reference.
+ * @param[in] x 0-based start of the inclusive range to examine.
+ * @param[in] y 0-based end of the inclusive range to examine.
+ * @param[in] value Determines if the scan is to count the set (true) or unset
+ * (false) bits in the range.
+ * @returns the count of bits found within the range that match the \b value
  */
 size_t sparsemap_rank(sparsemap_t *map, size_t x, size_t y, bool value);
 
-/**
- * Finds the first span (i.e. a contiguous set of bits), in the bitmap that
- * are set (|value| is true) or unset (|value| is false) and returns the
- * starting offset for the span (0-based).
+/** @brief Locates the first contiguous set of bits of \b len starting at \b idx
+ * matching \b value in the bitmap.
+ *
+ * @param[in] map The sparsemap reference.
+ * @param[in] idx 0-based start of search within the bitmap.
+ * @param[in] len The length of contiguous bits we're seeking.
+ * @param[in] value Determines if the scan is to find all set (true) or unset
+ * (false) bits of \b len.
+ * @returns the index of the first bit matching the criteria; when not found not
+ * found either SPARSEMAP_IDX_MAX or SPARSEMAP_IDX_MIN.
  */
 size_t sparsemap_span(sparsemap_t *map, sparsemap_idx_t idx, size_t len, bool value);
 
