@@ -1,5 +1,6 @@
 #include <assert.h>
 #include <errno.h>
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -7,6 +8,7 @@
 
 #include "../include/sparsemap.h"
 #include "../tests/common.h"
+#include "../tests/tdigest.h"
 
 /* midl.h ------------------------------------------------------------------ */
 /** @defgroup idls	ID List Management
@@ -164,37 +166,60 @@ mdb_midl_search(MDB_IDL ids, MDB_ID id)
   return cursor;
 }
 
-int mdb_midl_insert( MDB_IDL ids, MDB_ID id )
+int
+mdb_midl_insert(MDB_IDL ids, MDB_ID id)
 {
-	unsigned x, i;
+  unsigned x, i;
 
-	x = mdb_midl_search( ids, id );
-	assert( x > 0 );
+  x = mdb_midl_search(ids, id);
+  assert(x > 0);
 
-	if( x < 1 ) {
-		/* internal error */
-		return -2;
-	}
+  if (x < 1) {
+    /* internal error */
+    return -2;
+  }
 
-	if ( x <= ids[0] && ids[x] == id ) {
-		/* duplicate */
-		assert(0);
-		return -1;
-	}
+  if (x <= ids[0] && ids[x] == id) {
+    /* duplicate */
+    assert(0);
+    return -1;
+  }
 
-	if ( ++ids[0] >= MDB_IDL_DB_MAX ) {
-		/* no room */
-		--ids[0];
-		return -2;
+  if (++ids[0] >= MDB_IDL_DB_MAX) {
+    /* no room */
+    --ids[0];
+    return -2;
 
-	} else {
-		/* insert id */
-		for (i=ids[0]; i>x; i--)
-			ids[i] = ids[i-1];
-		ids[x] = id;
-	}
+  } else {
+    /* insert id */
+    for (i = ids[0]; i > x; i--)
+      ids[i] = ids[i - 1];
+    ids[x] = id;
+  }
 
-	return 0;
+  return 0;
+}
+
+inline void
+mdb_midl_popn(MDB_IDL ids, unsigned n)
+{
+  ids[0] = ids[0] - n;
+}
+
+void
+mdb_midl_remove_at(MDB_IDL ids, unsigned idx)
+{
+  for (int i = idx - 1; idx < ids[0] - 1;)
+    ids[++i] = ids[++idx];
+  ids[0] = ids[0] - 1;
+}
+
+void
+mdb_midl_remove(MDB_IDL ids, MDB_ID id)
+{
+  unsigned idx = mdb_midl_search(ids, id);
+  if (idx <= ids[0] && ids[idx] == id)
+    mdb_midl_remove_at(ids, idx);
 }
 
 MDB_IDL
@@ -500,8 +525,8 @@ verify_span_sparsemap(sparsemap_t *map, pgno_t pg, unsigned len)
 bool
 verify_empty_sparsemap(sparsemap_t *map, pgno_t pg, unsigned len)
 {
-  for (pgno_t i = pg; i < pg + len; i++) {
-    if (sparsemap_is_set(map, i) != false) {
+  for (pgno_t i = 0; i < len; i++) {
+    if (sparsemap_is_set(map, pg + i) != false) {
       return false;
     }
   }
@@ -511,24 +536,23 @@ verify_empty_sparsemap(sparsemap_t *map, pgno_t pg, unsigned len)
 bool
 verify_sm_eq_ml(sparsemap_t *map, MDB_IDL list)
 {
-  for (int i = 1; i <= list[0]; i++) {
+  for (MDB_ID i = 1; i <= list[0]; i++) {
     pgno_t pg = list[i];
-    unsigned skipped = i == 1 ? 0 : list[i-1] - list[i] - 1;
-    for (int j = 0; j < skipped; j++) {
-      if (sparsemap_is_set(map, pg - j) != false)
-        return false;
+    unsigned skipped = i == 1 ? 0 : list[i - 1] - list[i] - 1;
+    if (skipped) {
+      for (MDB_ID j = list[i - 1]; j > list[i]; j--) {
+        if (sparsemap_is_set(map, pg - j) != false) {
+          __diag("%zu\n", pg - j);
+          return false;
+        }
+      }
     }
-    if (sparsemap_is_set(map, pg) != true)
+    if (sparsemap_is_set(map, pg) != true) {
+      __diag("%zu\n", pg);
       return false;
+    }
   }
   return true;
-}
-
-void
-stats(size_t iterations, sparsemap_t *map, MDB_IDL list)
-{
-  char m[1024], l[1024];
-  __diag("%zu\tidl[%zu/%zu]: %s\tsm: %s\n", iterations, list[-1], list[0], bytes_as(MDB_IDL_SIZEOF(list), m, 1024), bytes_as(sparsemap_get_capacity(map), l, 1024));
 }
 
 sparsemap_idx_t
@@ -543,6 +567,47 @@ _sparsemap_set(sparsemap_t **map, sparsemap_idx_t idx, bool value)
   return l;
 }
 
+td_histogram_t *l_span_loc;
+td_histogram_t *b_span_loc;
+td_histogram_t *l_span_take;
+td_histogram_t *b_span_take;
+
+void
+stats_header()
+{
+  printf(
+    "iterations,idl_cap,idl_used,idl_bytes,sm_cap,sm_used,idl_loc_p50,idl_loc_p75,idl_loc_p90,idl_loc_p99,idl_loc_p999,sm_loc_p50,sm_loc_p75,sm_loc_p90,sm_loc_p99,sm_loc_p999,idl_take_p50,idl_take_p75,idl_take_p90,idl_take_p99,idl_take_p999,sm_take_p50,sm_take_p75,sm_take_p90,sm_take_p99,sm_take_p999\n");
+}
+
+void
+stats(size_t iterations, sparsemap_t *map, MDB_IDL list)
+{
+  if (iterations < 10)
+    return;
+
+  td_compress(l_span_loc);
+  td_compress(b_span_loc);
+  td_compress(l_span_take);
+  td_compress(b_span_take);
+
+  printf("%f,%zu,%zu,%zu,%zu,%zu,%zu,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f\n",
+    nsts(), iterations, list[-1], list[0], MDB_IDL_SIZEOF(list), sparsemap_get_capacity(map), sparsemap_get_size(map), td_quantile(l_span_loc, .5),
+    td_quantile(l_span_loc, .75), td_quantile(l_span_loc, .90), td_quantile(l_span_loc, .99), td_quantile(l_span_loc, .999), td_quantile(b_span_loc, .5),
+    td_quantile(b_span_loc, .75), td_quantile(b_span_loc, .90), td_quantile(b_span_loc, .99), td_quantile(b_span_loc, .999), td_quantile(l_span_take, .5),
+    td_quantile(l_span_take, .75), td_quantile(l_span_take, .90), td_quantile(l_span_take, .99), td_quantile(l_span_take, .999), td_quantile(b_span_take, .5),
+    td_quantile(b_span_take, .75), td_quantile(b_span_take, .90), td_quantile(b_span_take, .99), td_quantile(b_span_take, .999));
+
+#if 0
+  static double pct[] = { .5, .75, .90, .99, .999 };
+  bytes_as(MDB_IDL_SIZEOF(list), m, 1024);
+  bytes_as(sparsemap_get_capacity(map), l, 1024);
+
+  for (int i = 0; i < 5; i++)
+    printf("%.10f,%.10f,%.10f,%.10f,%.10f", iterations, pct[i] * 100, td_quantile(l_span_loc, pct[i]), td_quantile(b_span_loc, pct[i]));
+  for (int i = 0; i < 5; i++)
+    __diag("%lu\tspan_take:\t%f l: %.10f\tb: %.10f\n", iterations, pct[i] * 100, td_quantile(l_span_take, pct[i]), td_quantile(b_span_take, pct[i]));
+#endif
+}
 
 #define INITIAL_AMOUNT 1024 * 2
 
@@ -552,24 +617,29 @@ _sparsemap_set(sparsemap_t **map, sparsemap_idx_t idx, bool value)
 int
 main()
 {
-  size_t iterations = 0;
+  size_t replenish = 0, iterations = 0;
   bool prefer_mdb_idl_location = (bool)xorshift32() % 2;
 
   // disable buffering
   setvbuf(stdout, NULL, _IONBF, 0);
   setvbuf(stderr, NULL, _IONBF, 0);
 
-  __diag("starting...\n");
+  l_span_loc = td_new(100);
+  b_span_loc = td_new(100);
+  l_span_take = td_new(100);
+  b_span_take = td_new(100);
 
-  size_t amt = INITIAL_AMOUNT;
+  stats_header();
+
+  sparsemap_idx_t amt = INITIAL_AMOUNT;
   MDB_IDL list = mdb_midl_alloc(amt);
-  sparsemap_t *map = sparsemap(3 * 1024);
+  sparsemap_t *map = sparsemap(INITIAL_AMOUNT);
 
   // start with 2GiB of 4KiB free pages to track:
   //  - MDB_IDL requires one int for each free page
   //  - Sparsemap will compress the set bits using less memory
   mdb_midl_need(&list, amt);
-  for (size_t pg = 0; pg < amt; pg++) {
+  for (sparsemap_idx_t pg = 0; pg < amt; pg++) {
     // We list every free (unallocated) page in the IDL, while...
     mdb_midl_xappend(list, pg);
     // ... true (unset in the bitmap) indicates free in the bitmap.
@@ -579,20 +649,22 @@ main()
   stats(0, map, list);
   assert(verify_sm_eq_ml(map, list));
 
+  double b, e;
   while (1) {
     unsigned mi;
-    pgno_t ml = 0, sl = 0;
+    pgno_t ml, sl;
 
     // get an amount [1, 16] of pages to find preferring smaller sizes
     unsigned n = toss(15) + 1;
 
     // find a set of pages using the MDB_IDL
     {
+      b = nsts();
       /* Seek a big enough contiguous page range. Prefer
        * pages at the tail, just truncating the list.
        */
       int retry = 1;
-      unsigned i;
+      unsigned i = 0;
       pgno_t pgno = 0, *mop = list;
       unsigned n2 = n, mop_len = mop[0];
       if (mop_len > n2) {
@@ -608,21 +680,27 @@ main()
     search_done:;
       ml = pgno;
       mi = i;
+      e = nsts();
+      td_add(l_span_loc, e - b, 1);
     }
     assert(verify_span_midl(list, ml, n));
     assert(verify_span_sparsemap(map, ml, n));
 
     // find a set of pages using the Sparsemap
     {
+      b = nsts();
       pgno_t pgno = sparsemap_span(map, 0, n, true);
       assert(SPARSEMAP_NOT_FOUND(pgno) == false);
       sl = pgno;
+      e = nsts();
+      td_add(b_span_loc, e - b, 1);
     }
     assert(verify_span_midl(list, sl, n));
     assert(verify_span_sparsemap(map, sl, n));
 
     // acquire the set of pages within the list
     if (prefer_mdb_idl_location) {
+      b = nsts();
       unsigned j, num = n;
       int i = mi;
       pgno_t *mop = list;
@@ -632,9 +710,12 @@ main()
       /* Move any stragglers down */
       for (j = i - num; j < mop_len;)
         mop[++j] = mop[++i];
+      e = nsts();
       for (j = mop_len + 1; j <= mop[-1]; j++)
         mop[j] = 0;
+      td_add(l_span_take, e - b, 1);
     } else {
+      b = nsts();
       unsigned j, num = n;
       int i = mdb_midl_search(list, sl) + num;
       pgno_t *mop = list;
@@ -644,17 +725,27 @@ main()
       /* Move any stragglers down */
       for (j = i - num; j < mop_len;)
         mop[++j] = mop[++i];
+      e = nsts();
+      for (j = mop_len + 1; j <= mop[-1]; j++)
+        mop[j] = 0;
+      td_add(l_span_take, e - b, 1);
     }
 
     // acquire the set of pages within the sparsemap
     if (prefer_mdb_idl_location) {
+      b = nsts();
       for (pgno_t i = ml; i < ml + n; i++) {
         assert(_sparsemap_set(&map, i, false) == i);
       }
+      e = nsts();
+      td_add(b_span_take, e - b, 1);
     } else {
+      b = nsts();
       for (pgno_t i = sl; i <= sl + n; i++) {
         assert(_sparsemap_set(&map, i, false) == i);
       }
+      e = nsts();
+      td_add(b_span_take, e - b, 1);
     }
 
     assert(verify_sm_eq_ml(map, list));
@@ -667,37 +758,50 @@ main()
         do {
           len = toss(15) + 1;
           pg = sparsemap_span(map, 0, len, false);
+          //__diag("%zu\t%zu,%zu\n", iterations, replenish, retries);
         } while (SPARSEMAP_NOT_FOUND(pg) && --retries);
+        if (retries == 0) {
+          goto larger_please;
+        }
         if (SPARSEMAP_FOUND(pg)) {
           assert(verify_empty_midl(list, pg, len));
           assert(verify_empty_sparsemap(map, pg, len));
-          if (list[-1] - list[0] < len)
+          assert(verify_sm_eq_ml(map, list));
+          if (list[-1] - list[0] < len) {
             mdb_midl_need(&list, list[-1] + len);
-          for (int i = pg; i < pg + len; i++) {
+          }
+          for (size_t i = pg; i < pg + len; i++) {
             assert(verify_midl_contains(list, i) == false);
+            assert(sparsemap_is_set(map, i) == false);
             mdb_midl_insert(list, i);
+            assert(verify_midl_contains(list, i) == true);
             assert(_sparsemap_set(&map, i, true) == i);
+            assert(sparsemap_is_set(map, i) == true);
           }
           mdb_midl_sort(list);
           assert(verify_midl_nodups(list));
           assert(verify_span_midl(list, pg, len));
           assert(verify_span_sparsemap(map, pg, len));
         }
+        assert(verify_sm_eq_ml(map, list));
+        replenish++;
       } while (list[0] < amt - 32);
     }
-    stats(iterations, map, list);
+    replenish = 0;
 
-    // every 100 iterations, either ...
-    if (iterations % 100 == 0) {
+    // every so often, either ...
+    if (iterations % 1000 == 0) {
+    larger_please:;
       const int COUNT = 1024;
       if (toss(6) + 1 < 7) {
-        // ... add a MiB of 4KiB pages, or
+        // ... add COUNT 4KiB pages, or
         int len = COUNT;
         // The largest page is at list[1] because this is a reverse sorted list.
-        int pg = list[1] + 1;
-        if (list[0] + COUNT > list[-1])
+        pgno_t pg = list[1] + 1;
+        if (list[0] + COUNT > list[-1]) {
           mdb_midl_grow(&list, list[0] + len);
-        for (int i = pg; i < pg + len; i++) {
+        }
+        for (size_t i = pg; i < pg + len; i++) {
           assert(verify_midl_contains(list, i) == false);
           assert(sparsemap_is_set(map, i) == false);
           mdb_midl_insert(list, i);
@@ -706,21 +810,25 @@ main()
         mdb_midl_sort(list);
         assert(verify_midl_nodups(list));
         verify_sm_eq_ml(map, list);
+        amt += COUNT;
       } else {
         if (list[-1] > INITIAL_AMOUNT) {
-          // ... a fraction of the time, remove a MiB of 4KiB pages.
+          // ... a fraction of the time, remove COUNT / 2 of 4KiB pages.
+          pgno_t pg;
           for (int i = 0; i < COUNT; i++) {
-            pgno_t pg = list[list[0] - i];
+            pg = list[list[0] - i];
             assert(sparsemap_is_set(map, pg) == true);
-            assert(_sparsemap_set(&map, pg, false) == pg) ;
+            assert(_sparsemap_set(&map, pg, false) == pg);
           }
           mdb_midl_shrink_to(&list, list[0] - COUNT);
+          assert(list[list[0]] != pg);
           assert(verify_midl_nodups(list));
           verify_sm_eq_ml(map, list);
         }
       }
     }
     iterations++;
+    stats(iterations, map, list);
   }
 
   return 0;

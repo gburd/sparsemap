@@ -88,11 +88,10 @@ extern "C" {
  */
 
 typedef struct sparsemap sparsemap_t;
-typedef long int sparsemap_idx_t;
-#define SPARSEMAP_IDX_MAX LONG_MAX
-#define SPARSEMAP_IDX_MIN LONG_MIN
-#define SPARSEMAP_FOUND(x) ((x) < SPARSEMAP_IDX_MAX || (x) > SPARSEMAP_IDX_MIN)
-#define SPARSEMAP_NOT_FOUND(x) ((x) == SPARSEMAP_IDX_MAX || (x) == SPARSEMAP_IDX_MIN)
+typedef size_t sparsemap_idx_t;
+#define SPARSEMAP_IDX_MAX SIZE_MAX
+#define SPARSEMAP_FOUND(x) ((x) != SPARSEMAP_IDX_MAX)
+#define SPARSEMAP_NOT_FOUND(x) ((x) == SPARSEMAP_IDX_MAX)
 typedef uint32_t sm_idx_t;
 typedef uint64_t sm_bitvec_t;
 
@@ -219,13 +218,9 @@ size_t sparsemap_get_capacity(sparsemap_t *map);
 /** @brief Returns the value of a bit at index \b idx, either true for "set" (1)
  * or \b false for "unset" (0).
  *
- * When |idx| is negative it is an error.
- *
  * @param[in] map The sparsemap reference.
  * @param[in] idx The 0-based offset into the bitmap index to examine.
- * @returns either true or false; a negative idx is an error and always returns
- * false
- * @todo Support for negative relative offset in \idx.
+ * @returns either true or false
  */
 bool sparsemap_is_set(sparsemap_t *map, sparsemap_idx_t idx);
 
@@ -239,9 +234,8 @@ bool sparsemap_is_set(sparsemap_t *map, sparsemap_idx_t idx);
  *
  * @param[in] map The sparsemap reference.
  * @param[in] idx The 0-based offset into the bitmap index to modify.
- * @returns the \b idx supplied on success or SPARSEMAP_IDX_MIN/MAX on error
- * with \b errno set to ENOSPC when the map is full; a negative idx is an error
- * and always returns SPARSEMAP_IDX_MIN.
+ * @returns the \b idx supplied on success or SPARSEMAP_IDX_MAX on error
+ * with \b errno set to ENOSPC when the map is full.
  */
 sparsemap_idx_t sparsemap_set(sparsemap_t *map, sparsemap_idx_t idx, bool value);
 
@@ -277,7 +271,7 @@ void sparsemap_split(sparsemap_t *map, sparsemap_idx_t offset, sparsemap_t *othe
 /** @brief Finds the index of the \b n'th bit set to \b value.
  *
  * Locates the \b n'th bit either set, \b value is true, or unset, \b value is
- * false, from the start, positive \b n, or end, negative \b n, of the bitmap.
+ * false, from the start of the bitmap.
  * So, if your bit pattern is: ```1101 1110 1010 1101 1011 1110 1110 1111``` and
  * you request the first set bit the result is `0` (meaning the 1st bit in the
  * map which is index 0 because this is 0-based indexing).  The first unset bit
@@ -291,7 +285,7 @@ void sparsemap_split(sparsemap_t *map, sparsemap_idx_t offset, sparsemap_t *othe
  * @param[in] value Determines if the search is to examine set (true) or unset
  * (false) bits in the bitmap index.
  * @returns the 0-based index of the located bit position within the map; when
- * not found either SPARSEMAP_IDX_MAX or SPARSEMAP_IDX_MIN.
+ * not found either SPARSEMAP_IDX_MAX.
  */
 sparsemap_idx_t sparsemap_select(sparsemap_t *map, sparsemap_idx_t n, bool value);
 
@@ -320,8 +314,8 @@ size_t sparsemap_rank(sparsemap_t *map, size_t x, size_t y, bool value);
  * @param[in] len The length of contiguous bits we're seeking.
  * @param[in] value Determines if the scan is to find all set (true) or unset
  * (false) bits of \b len.
- * @returns the index of the first bit matching the criteria; when not found not
- * found either SPARSEMAP_IDX_MAX or SPARSEMAP_IDX_MIN.
+ * @returns the index of the first bit matching the criteria; when not found
+ * found SPARSEMAP_IDX_MAX
  */
 size_t sparsemap_span(sparsemap_t *map, sparsemap_idx_t idx, size_t len, bool value);
 

@@ -671,8 +671,8 @@ test_api_select_false(const MunitParameter params[], void *data)
   assert_ptr_not_null(map);
 
   /* First few 0/off/unset-bits in ((uint64_t)0xfeedface << 32) | 0xbadc0ffee) expressed as an array of offsets. */
-  int off[] = { 0, 4, 16, 17, 18, 19, 20, 21, 25, 28, 30, 36, 37, 40, 42, 49, 52, 56, 64, 65 };
-  for (int i = 0; i < 20; i++) {
+  size_t off[] = { 0, 4, 16, 17, 18, 19, 20, 21, 25, 28, 30, 36, 37, 40, 42, 49, 52, 56, 64, 65 };
+  for (size_t i = 0; i < 20; i++) {
     sparsemap_idx_t f = sparsemap_select(map, i, false);
     assert_true(f == off[i]);
     assert_true(sparsemap_is_set(map, f) == false);
@@ -776,10 +776,10 @@ test_api_rank_true(const MunitParameter params[], void *data)
   }
   sparsemap_idx_t hole = 4999;
   sparsemap_set(map, hole, false);
-  for (int i = 0; i < 10000; i++) {
-    for (int j = i; j < 10000; j++) {
-      int amt = (i > j) ? 0 : j - i + 1 - ((hole >= i && j >= hole) ? 1 : 0);
-      int r = sparsemap_rank(map, i, j, true);
+  for (size_t i = 0; i < 10000; i++) {
+    for (size_t j = i; j < 10000; j++) {
+      size_t amt = (i > j) ? 0 : j - i + 1 - ((hole >= i && j >= hole) ? 1 : 0);
+      size_t r = sparsemap_rank(map, i, j, true);
       assert_true(r == amt);
     }
   }
@@ -826,8 +826,8 @@ test_api_rank_false(const MunitParameter params[], void *data)
   // One chunk means not so empty now!
   sparsemap_idx_t hole = 4999;
   sparsemap_set(map, hole, true);
-  for (int i = 0; i < 10000; i++) {
-    for (int j = i; j < 10000; j++) {
+  for (size_t i = 0; i < 10000; i++) {
+    for (size_t j = i; j < 10000; j++) {
       int amt = (i > j) ? 0 : j - i + 1 - ((hole >= i && j >= hole) ? 1 : 0);
       r = sparsemap_rank(map, i, j, false);
       assert_true(r == amt);
@@ -1046,7 +1046,7 @@ test_scale_fuzz(const MunitParameter params[], void *data)
 {
   sparsemap_t *map = (sparsemap_t *)data;
   (void)params;
-  (void)map; //TODO...
+  (void)map; // TODO...
   return MUNIT_OK;
 }
 

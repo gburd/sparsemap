@@ -5,11 +5,13 @@ SHARED_LIB = libsparsemap.so
 
 #CFLAGS = -Wall -Wextra -Wpedantic -Of -std=c11 -Iinclude/ -fPIC
 #CFLAGS = -Wall -Wextra -Wpedantic -Og -g -std=c11 -Iinclude/ -fPIC
-CFLAGS = -DSPARSEMAP_DIAGNOSTIC -DDEBUG -Wall -Wextra -Wpedantic -O0 -g -std=c11 -Iinclude/ -fPIC
+#CFLAGS = -DSPARSEMAP_DIAGNOSTIC -DDEBUG -Wall -Wextra -Wpedantic -O0 -g -std=c11 -Iinclude/ -fPIC
+CFLAGS = -Wall -Wextra -Wpedantic -Og -g -std=c11 -Iinclude/ -fPIC
 #CFLAGS = -DSPARSEMAP_DIAGNOSTIC -DDEBUG -Wall -Wextra -Wpedantic -Og -g -fsanitize=address,leak,object-size,pointer-compare,pointer-subtract,null,return,bounds,pointer-overflow,undefined -fsanitize-address-use-after-scope -std=c11 -Iinclude/ -fPIC
 #CFLAGS = -Wall -Wextra -Wpedantic -Og -g -fsanitize=all -fhardened -std=c11 -Iinclude/ -fPIC
 
-TEST_FLAGS = -DDEBUG -Wall -Wextra -Wpedantic -O0 -g -std=c11 -Iinclude/ -Itests/ -fPIC
+#TEST_FLAGS = -DDEBUG -Wall -Wextra -Wpedantic -O0 -g -std=c11 -Iinclude/ -Itests/ -fPIC
+TEST_FLAGS = -Wall -Wextra -Wpedantic -Og -g -std=c11 -Iinclude/ -Itests/ -fPIC
 #TEST_FLAGS = -DDEBUG -Wall -Wextra -Wpedantic -Og -g -fsanitize=address,leak,object-size,pointer-compare,pointer-subtract,null,return,bounds,pointer-overflow,undefined -fsanitize-address-use-after-scope -std=c11 -Iinclude/ -fPIC
 
 TESTS = tests/test
@@ -77,11 +79,14 @@ examples/ex_3: examples/common.o examples/ex_3.o $(STATIC_LIB)
 examples/ex_4: examples/common.o examples/ex_4.o $(STATIC_LIB)
 	$(CC) $^ -o $@ $(CFLAGS) $(TEST_FLAGS)
 
-examples/soak: examples/common.o examples/soak.o $(STATIC_LIB)
-	$(CC) $^ -o $@ $(CFLAGS) $(TEST_FLAGS)
+examples/soak: examples/common.o tests/tdigest.o examples/soak.o $(STATIC_LIB)
+	$(CC) $^ -lm -o $@ $(CFLAGS) $(TEST_FLAGS)
 
 todo:
 	rg -i 'todo|gsb|abort'
 
 # cp src/sparsemap.c /tmp && clang-tidy src/sparsemap.c -fix -fix-errors -checks="readability-braces-around-statements" -- -DDEBUG -DSPARSEMAP_DIAGNOSTIC -DSPARSEMAP_ASSERT -Wall -Wextra -Wpedantic -Og -g -std=c11 -Iinclude/ -fPIC
+
 # clear; make clean examples test && env ASAN_OPTIONS=detect_leaks=1 LSAN_OPTIONS=verbosity=1:log_threads=1 ./tests/test
+
+# clear; make clean examples test && env ASAN_OPTIONS=detect_leaks=1 LSAN_OPTIONS=verbosity=1:log_threads=1 ./examples/soak

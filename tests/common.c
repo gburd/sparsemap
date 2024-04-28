@@ -4,6 +4,8 @@
 #include <assert.h>
 #include <pthread.h> // If using threads
 #include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -57,8 +59,9 @@ uint32_t
 xorshift32()
 {
   uint32_t x = __xorshift32_state;
-  if (x == 0)
+  if (x == 0) {
     x = 123456789;
+  }
   x ^= x << 13;
   x ^= x >> 17;
   x ^= x << 5;
@@ -138,7 +141,8 @@ ensure_sequential_set(int a[], int l, int r)
   // Generate a random value between min_value and max_value
   int value = random_uint32() % (max_value - min_value - r + 1);
   // Generate a random location between 0 and l - r
-  offset = random_uint32() % (l - r - 1);
+  int d = l - r - 1;
+  offset = d == 0 ? 0 : random_uint32() % d;
 
   // Adjust the array to include a sequential set of 'r' integers at the random offset
   for (int i = 0; i < r; ++i) {
@@ -255,7 +259,7 @@ bool
 is_set(const int array[], int bit)
 {
   for (int i = 0; i < 1024; i++) {
-    if (array[i] == (int)bit) {
+    if (array[i] == bit) {
       return true;
     }
   }
@@ -290,8 +294,9 @@ whats_set_uint64(uint64_t number, int pos[64])
 void
 setup_test_array(int a[], int l, int max_value)
 {
-  if (a == NULL || max_value < 0)
+  if (a == NULL || max_value < 0) {
     return; // Basic error handling and validation
+  }
 
   for (int i = 0; i < l; ++i) {
     int candidate;
