@@ -621,8 +621,10 @@ main()
   bool prefer_mdb_idl_location = (bool)xorshift32() % 2;
 
   // disable buffering
+#ifdef DEBUG
   setvbuf(stdout, NULL, _IONBF, 0);
   setvbuf(stderr, NULL, _IONBF, 0);
+#endif
 
   l_span_loc = td_new(100);
   b_span_loc = td_new(100);
