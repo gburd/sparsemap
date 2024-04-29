@@ -150,13 +150,20 @@ __sm_chunk_map_calc_vector_size(uint8_t b)
   return (size_t)lookup[b];
 }
 
-/**
- * Returns the position of a sm_bitvec_t in m_data.
+/** @brief Returns the position of a sm_bitvec_t in m_data.
+ *
+ * Each chunk has a set of bitvec that are sometimes abbreviated due to
+ * compression (e.g. when a bitvec is all zeros or ones there is no need
+ * to store anything, so no wasted space).
+ *
+ * @param[in] map The chunk in question.
+ * @param[in] bv The index of the vector to find in the chunk.
+ * @returns the position of a sm_bitvec_t in m_data
  */
 static size_t
 __sm_chunk_map_get_position(__sm_chunk_t *map, size_t bv)
 {
-  // handle 4 indices (1 byte) at a time
+  /* Handle 4 indices (1 byte) at a time. */
   size_t num_bytes = bv / ((size_t)SM_FLAGS_PER_INDEX_BYTE * SM_BITS_PER_VECTOR);
 
   size_t position = 0;
@@ -176,8 +183,10 @@ __sm_chunk_map_get_position(__sm_chunk_t *map, size_t bv)
   return position;
 }
 
-/**
- * Initialize __sm_chunk_t with provided data.
+/** @brief Initialize __sm_chunk_t with provided data.
+ *
+ * @param[in] map The chunk in question.
+ * @param[in] data The memory to use within this chunk.
  */
 static inline void
 __sm_chunk_map_init(__sm_chunk_t *map, uint8_t *data)
@@ -185,8 +194,10 @@ __sm_chunk_map_init(__sm_chunk_t *map, uint8_t *data)
   map->m_data = (sm_bitvec_t *)data;
 }
 
-/**
- * Returns the maximum capacity of this __sm_chunk_t.
+/** @brief Examines the chunk to determine its current capacity.
+ *
+ * @param[in] map The chunk in question.
+ * @returns the maximum capacity in bytes of this __sm_chunk_t
  */
 static size_t
 __sm_chunk_map_get_capacity(__sm_chunk_t *map)
@@ -208,8 +219,11 @@ __sm_chunk_map_get_capacity(__sm_chunk_t *map)
   return capacity;
 }
 
-/**
- * Sets the capacity.
+/** @brief Sets the capacity of this chunk.
+ *
+ * @param[in] map The chunk in question.
+ * @param[in] capacity The new capacity in bytes to assign to the chunk,
+ * must be less than SM_CHUNK_MAX_CAPACITY.
  */
 static void
 __sm_chunk_map_set_capacity(__sm_chunk_t *map, size_t capacity)
@@ -236,8 +250,10 @@ __sm_chunk_map_set_capacity(__sm_chunk_t *map, size_t capacity)
   __sm_assert(__sm_chunk_map_get_capacity(map) == capacity);
 }
 
-/**
- * Returns true if this __sm_chunk_t is empty.
+/** @brief Examines the chunk to determine if it is empty.
+ *
+ * @param[in] map The chunk in question.
+ * @returns true if this __sm_chunk_t is empty
  */
 static bool
 __sm_chunk_map_is_empty(__sm_chunk_t *map)
@@ -262,8 +278,10 @@ __sm_chunk_map_is_empty(__sm_chunk_t *map)
   return true;
 }
 
-/**
- * Returns the size of the data buffer, in bytes.
+/** @brief Examines the chunk to determine its size.
+ *
+ * @param[in] map The chunk in question.
+ * @returns the size of the data buffer, in bytes.
  */
 static size_t
 __sm_chunk_map_get_size(__sm_chunk_t *map)
@@ -279,8 +297,12 @@ __sm_chunk_map_get_size(__sm_chunk_t *map)
   return size;
 }
 
-/**
- * Returns the value of a bit at index |idx|.
+/** @brief Examines the chunk at \b idx to determine that bit's state (set,
+ * or unset).
+ *
+ * @param[in] map The chunk in question.
+ * @param[in] idx The 0-based index into this chunk to examine.
+ * @returns the value of a bit at index \b idx
  */
 static bool
 __sm_chunk_map_is_set(__sm_chunk_t *map, size_t idx)
@@ -308,14 +330,21 @@ __sm_chunk_map_is_set(__sm_chunk_t *map, size_t idx)
   return (w & ((sm_bitvec_t)1 << (idx % SM_BITS_PER_VECTOR))) > 0;
 }
 
-/**
- * Sets the value of a bit at index |idx|. Returns SM_NEEDS_TO_GROW,
- * SM_NEEDS_TO_SHRINK, or SM_OK. Sets |position| to the position of the
- * sm_bitvec_t which is inserted/deleted and |fill| - the value of the fill
- * word (used when growing).
+/** @brief Assigns a state to a bit in the chunk (set or unset).
  *
- * Note, the caller MUST to perform the relevant actions and call set() again,
- * this time with |retried| = true.
+ * Sets the value of a bit at index \b idx. Then updates position \b pos to the
+ * position of the sm_bitvec_t which is inserted/deleted and \b fill - the value
+ * of the fill word (used when growing).
+ *
+ * @param[in] map The chunk in question.
+ * @param[in] idx The 0-based index into this chunk to mutate.
+ * @param[in] value The new state for the \b idx'th bit.
+ * @param[in,out] pos The position of the sm_bitvec_t inserted/deleted within the chunk.
+ * @param[in,out] fill The value of the fill word (when growing).
+ * @param[in] retired When not retried, grow the map by a bitvec.
+ * @returns \b SM_NEEDS_TO_GROW, \b SM_NEEDS_TO_SHRINK, or \b SM_OK
+ * @note, the caller MUST to perform the relevant actions and call set() again,
+ * this time with \b retried = true.
  */
 static int
 __sm_chunk_map_set(__sm_chunk_t *map, size_t idx, bool value, size_t *pos, sm_bitvec_t *fill, bool retried)
@@ -394,13 +423,22 @@ __sm_chunk_map_set(__sm_chunk_t *map, size_t idx, bool value, size_t *pos, sm_bi
   return SM_OK;
 }
 
-/**
- * Returns the index of the offset'th set bit; sets |*pnew_n| to 0 if the
- * offset'th bit was found in this __sm_chunk_t, or to the new, reduced
- * value of |offset|.
+/** @brief Finds the index of the \b n'th bit after \b offset bits with \b value.
+ *
+ * Scans the chunk \b map until after \b offset bits (of any value) have
+ * passed and then begins counting the bits that match \b value looking
+ * for the \b n'th bit.  It may not be in this chunk, when it is offset is
+ *
+ * @param[in] map The chunk in question.
+ * @param[in] value Informs what we're seeking, a set or unset bit's position.
+ * @param offset[in,out] Sets \b offset to 0 if the n'th bit was found
+ * in this __sm_chunk_t, or reduced value of \b n bits observed the search up
+ * to a maximum of SM_BITS_PER_VECTOR.
+ * @returns the 0-based index of the n'th set bit when found, otherwise
+ * SM_BITS_PER_VECTOR
  */
 static size_t
-__sm_chunk_map_select(__sm_chunk_t *map, size_t offset, ssize_t *pnew_n, bool value)
+__sm_chunk_map_select(__sm_chunk_t *map, size_t n, ssize_t *offset, bool value)
 {
   size_t ret = 0;
   register uint8_t *p;
@@ -422,24 +460,24 @@ __sm_chunk_map_select(__sm_chunk_t *map, size_t offset, ssize_t *pnew_n, bool va
           ret += SM_BITS_PER_VECTOR;
           continue;
         } else {
-          if (offset > SM_BITS_PER_VECTOR) {
-            offset -= SM_BITS_PER_VECTOR;
+          if (n > SM_BITS_PER_VECTOR) {
+            n -= SM_BITS_PER_VECTOR;
             ret += SM_BITS_PER_VECTOR;
             continue;
           }
-          *pnew_n = -1;
-          return ret + offset;
+          *offset = -1;
+          return ret + n;
         }
       }
       if (flags == SM_PAYLOAD_ONES) {
         if (value == true) {
-          if (offset > SM_BITS_PER_VECTOR) {
-            offset -= SM_BITS_PER_VECTOR;
+          if (n > SM_BITS_PER_VECTOR) {
+            n -= SM_BITS_PER_VECTOR;
             ret += SM_BITS_PER_VECTOR;
             continue;
           }
-          *pnew_n = -1;
-          return ret + offset;
+          *offset = -1;
+          return ret + n;
         } else {
           ret += SM_BITS_PER_VECTOR;
           continue;
@@ -450,20 +488,20 @@ __sm_chunk_map_select(__sm_chunk_t *map, size_t offset, ssize_t *pnew_n, bool va
         for (int k = 0; k < SM_BITS_PER_VECTOR; k++) {
           if (value) {
             if (w & ((sm_bitvec_t)1 << k)) {
-              if (offset == 0) {
-                *pnew_n = -1;
+              if (n == 0) {
+                *offset = -1;
                 return ret;
               }
-              offset--;
+              n--;
             }
             ret++;
           } else {
             if (!(w & ((sm_bitvec_t)1 << k))) {
-              if (offset == 0) {
-                *pnew_n = -1;
+              if (n == 0) {
+                *offset = -1;
                 return ret;
               }
-              offset--;
+              n--;
             }
             ret++;
           }
@@ -471,17 +509,35 @@ __sm_chunk_map_select(__sm_chunk_t *map, size_t offset, ssize_t *pnew_n, bool va
       }
     }
   }
-  *pnew_n = (ssize_t)offset;
+  *offset = (ssize_t)n;
   return ret;
 }
 
 extern void print_bits(char *name, uint64_t value); // GSB
 
-/**
- * Counts the set bits in the range [0, 'idx'] inclusive ignoring the first
- * '*offset' bits in this chunk.  Modifies '*offset' decreasing it by the number
- * of bits ignored during the search.  The ranking (counting) will start after
- * the '*offset' has been reached 0.
+/** @brief Counts the bits matching \b value in the range [0, \b idx]
+ * inclusive after ignoring the first \b offset bits in the chunk.
+ *
+ * Scans the chunk \b map until after \b offset bits (of any value) have
+ * passed and then begins counting the bits that match \b value. The
+ * result should never be greater than \b idx + 1 maxing out at
+ * SM_BITS_PER_VECTOR.  A range of [0, 0] will count 1 bit at \b offset
+ * + 1 in this chunk.  A range of [0, 9] will count 10 bits, starting
+ * with the 0th and ending with the 9th and return at most a count of
+ * 10.
+ *
+ * @param[in] map The chunk in question.
+ * @param offset[in,out] Decreases \b offset by the number of bits ignored,
+ * at most by SM_BITS_PER_VECTOR.
+ * @param[in] idx The ending value of the range (inclusive) to count.
+ * @param[out] pos The position of the last bit examined in this chunk, always
+ * <= SM_BITS_PER_VECTOR, used when counting unset bits that fall within this
+ * chunk's range but after the last set bit.
+ * @param[out] vec The last sm_bitvec_t, masked and shifted, so as to be able
+ * to examine the bits used in the last portion of the ranking as a way to
+ * skip forward during a #span() operation.
+ * @param[in] value Informs what we're seeking, set or unset bits.
+ * @returns the count of the bits matching \b value within the range.
  */
 static size_t
 __sm_chunk_map_rank(__sm_chunk_t *map, size_t *offset, size_t idx, size_t *pos, sm_bitvec_t *vec, bool value)
@@ -591,7 +647,7 @@ __sm_chunk_map_rank(__sm_chunk_t *map, size_t *offset, size_t idx, size_t *pos, 
           }
           int pc = popcountll(mw);
           ret += pc;
-          *vec = mw >> *offset;
+          *vec = mw >> ((*offset > 63) ? 63 : *offset);
           *offset = *offset > idx ? *offset - idx + 1 : 0;
           return ret;
         }
@@ -601,9 +657,15 @@ __sm_chunk_map_rank(__sm_chunk_t *map, size_t *offset, size_t idx, size_t *pos, 
   return ret;
 }
 
-/**
- * Decompresses the whole bitmap; calls visitor's operator() for all bits
- * Returns the number of (set) bits that were passed to the scanner
+/** @brief Calls \b scanner with sm_bitmap_t for each vector in this chunk.
+ *
+ * Decompresses the whole chunk into separate bitmaps then calls visitor's
+ * \b #operator() function for all bits.
+ *
+ * @param[in] map The chunk in question.
+ * @param[in] start
+ * @param[in] scanner
+ * @returns the number of (set) bits that were passed to the scanner
  */
 static size_t
 __sm_chunk_map_scan(__sm_chunk_t *map, sm_idx_t start, void (*scanner)(sm_idx_t[], size_t), size_t skip)
@@ -672,12 +734,10 @@ __sm_chunk_map_scan(__sm_chunk_t *map, sm_idx_t start, void (*scanner)(sm_idx_t[
   return ret;
 }
 
-/*
- * The following is the "Sparsemap" implementation, it uses Chunk Maps (above).
- */
-
-/**
- * Returns the number of chunk maps.
+/** @brief Provides the number of chunks currently in the map.
+ *
+ * @param[in] map  The sparsemap_t in question.
+ * @returns the number of chunk maps in the sparsemap
  */
 static size_t
 __sm_get_chunk_map_count(sparsemap_t *map)
@@ -685,8 +745,12 @@ __sm_get_chunk_map_count(sparsemap_t *map)
   return *(uint32_t *)&map->m_data[0];
 }
 
-/**
- * Returns the data at the specified |offset|.
+/** @brief Encapsulates the method to find the starting address of a chunk's
+ * data.
+ *
+ * @param[in] map The sparsemap_t in question.
+ * @param[in] offset The offset in bytes for the desired chunk map.
+ * @returns the data for the specified \b offset
  */
 static inline uint8_t *
 __sm_get_chunk_map_data(sparsemap_t *map, size_t offset)
@@ -694,13 +758,16 @@ __sm_get_chunk_map_data(sparsemap_t *map, size_t offset)
   return &map->m_data[SM_SIZEOF_OVERHEAD + offset];
 }
 
-/**
- * Returns a pointer after the end of the used data.
+/** @brief Encapsulates the method to find the address of the first unused byte
+ * in \b m_data.
+ *
+ * @param[in] map The sparsemap_t in question.
+ * @returns a pointer after the end of the used data
+ * @todo could this simply use m_data_used?
  */
 static uint8_t *
 __sm_get_chunk_map_end(sparsemap_t *map)
 {
-  // TODO: could this simply use m_data_used?
   uint8_t *p = __sm_get_chunk_map_data(map, 0);
   size_t count = __sm_get_chunk_map_count(map);
   for (size_t i = 0; i < count; i++) {
@@ -712,8 +779,10 @@ __sm_get_chunk_map_end(sparsemap_t *map)
   return p;
 }
 
-/**
- * Returns the used size in the data buffer.
+/** @brief Provides the byte size amount of \b m_data consumed.
+ *
+ * @param[in] map The sparsemap_t in question.
+ * @returns the used size in the data buffer
  */
 static size_t
 __sm_get_size_impl(sparsemap_t *map)
@@ -731,8 +800,10 @@ __sm_get_size_impl(sparsemap_t *map)
   return SM_SIZEOF_OVERHEAD + p - start;
 }
 
-/**
- * Returns the aligned offset (aligned to sm_bitvec_t capacity).
+/** @brief Aligns to SM_BITS_PER_VECTOR a given index \b idx.
+ *
+ * @param[in] idx The index to align.
+ * @returns the aligned offset (aligned to sm_bitvec_t capacity).
  */
 static sm_idx_t
 __sm_get_aligned_offset(size_t idx)
@@ -741,10 +812,25 @@ __sm_get_aligned_offset(size_t idx)
   return (idx / capacity) * capacity;
 }
 
-/**
- * Returns the byte offset of a __sm_chunk_t in m_data.
+/** @brief Aligns to SM_CHUNK_MAP_CAPACITY a given index \b idx.
+ *
+ * @param[in] idx The index to align.
+ * @returns the aligned offset (aligned to __sm_chunk_t capacity)
  */
-static ssize_t
+static sm_idx_t
+__sm_get_fully_aligned_offset(size_t idx)
+{
+  const size_t capacity = SM_CHUNK_MAX_CAPACITY;
+  return (idx / capacity) * capacity;
+}
+
+/** @brief Provides the byte offset of a chunk map at index \b idx.
+ *
+ * @param[in] map The sparsemap_t in question.
+ * @param[in] idx The index of the chunk map to locate.
+ * @returns the byte offset of a __sm_chunk_t in m_data.
+ */
+static size_t
 __sm_get_chunk_map_offset(sparsemap_t *map, sparsemap_idx_t idx)
 {
   size_t count = __sm_get_chunk_map_count(map);
@@ -769,18 +855,10 @@ __sm_get_chunk_map_offset(sparsemap_t *map, sparsemap_idx_t idx)
   return (ssize_t)(p - start);
 }
 
-/**
- * Returns the aligned offset (aligned to __sm_chunk_t capacity).
- */
-static sm_idx_t
-__sm_get_fully_aligned_offset(size_t idx)
-{
-  const size_t capacity = SM_CHUNK_MAX_CAPACITY;
-  return (idx / capacity) * capacity;
-}
-
-/**
- * Sets the number of __sm_chunk_t's.
+/** @brief Sets the number of __sm_chunk_t's.
+ *
+ * @param[in] map The sparsemap_t in question.
+ * @param[in] new_count The new number of chunks in the map.
  */
 static void
 __sm_set_chunk_map_count(sparsemap_t *map, size_t new_count)
@@ -788,8 +866,11 @@ __sm_set_chunk_map_count(sparsemap_t *map, size_t new_count)
   *(uint32_t *)&map->m_data[0] = (uint32_t)new_count;
 }
 
-/**
- * Appends more data.
+/** @brief Appends raw data at the end of used portion of \b m_data.
+ *
+ * @param[in] map The sparsemap_t in question.
+ * @param[in] buffer The bytes to copy into \b m_data.
+ * @param[in] buffer_size The size of the byte array \b buffer to copy.
  */
 static void
 __sm_append_data(sparsemap_t *map, uint8_t *buffer, size_t buffer_size)
@@ -798,8 +879,12 @@ __sm_append_data(sparsemap_t *map, uint8_t *buffer, size_t buffer_size)
   map->m_data_used += buffer_size;
 }
 
-/**
- * Inserts data somewhere in the middle of m_data.
+/** @brief Inserts data at \b offset in the middle of \b m_data.
+ *
+ * @param[in] map The sparsemap_t in question.
+ * @param[in] offset The offset in bytes into \b m_data to place the buffer.
+ * @param[in] buffer The bytes to copy into \b m_data.
+ * @param[in] buffer_size The size of the byte array \b buffer to copy.
  */
 void
 __sm_insert_data(sparsemap_t *map, size_t offset, uint8_t *buffer, size_t buffer_size)
@@ -810,8 +895,11 @@ __sm_insert_data(sparsemap_t *map, size_t offset, uint8_t *buffer, size_t buffer
   map->m_data_used += buffer_size;
 }
 
-/**
- * Removes data from m_data.
+/** @brief Removes data from \b m_data.
+ *
+ * @param[in] map The sparsemap_t in question.
+ * @param[in] offset The offset in bytes into \b m_data at which to excise data.
+ * @param[in] gap_size The size of the excision.
  */
 static void
 __sm_remove_data(sparsemap_t *map, size_t offset, size_t gap_size)
@@ -822,9 +910,11 @@ __sm_remove_data(sparsemap_t *map, size_t offset, size_t gap_size)
   map->m_data_used -= gap_size;
 }
 
-/**
- *  Clears the whole buffer
+/*
+ * The following is the "Sparsemap" implementation, it uses chunk maps (code above)
+ * and is the public API for this compressed bitmap representation.
  */
+
 void
 sparsemap_clear(sparsemap_t *map)
 {
@@ -1127,8 +1217,7 @@ sparsemap_get_size(sparsemap_t *map)
 {
   if (map->m_data_used) {
     __sm_when_diag({
-      size_t used = __sm_get_size_impl(map);
-      __sm_assert(map->m_data_used == used);
+      __sm_assert(map->m_data_used == __sm_get_size_impl(map));
     });
     return map->m_data_used;
   }

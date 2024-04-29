@@ -380,7 +380,7 @@ sm_add_span(sparsemap_t *map, int map_size, int span_length)
       break;
     }
   } while (attempts);
-  for (int i = placed_at; i < placed_at + span_length; i++) {
+  for (sparsemap_idx_t i = placed_at; i < placed_at + span_length; i++) {
     if (sparsemap_set(map, i, true) != i) {
       return placed_at; // TODO error?
     }
