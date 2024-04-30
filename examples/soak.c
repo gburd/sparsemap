@@ -201,7 +201,7 @@ mdb_midl_insert(MDB_IDL ids, MDB_ID id)
 }
 
 inline void
-mdb_midl_popn(MDB_IDL ids, unsigned n)
+mdb_midl_pop_n(MDB_IDL ids, unsigned n)
 {
   ids[0] = ids[0] - n;
 }
@@ -558,25 +558,34 @@ verify_sm_eq_ml(sparsemap_t *map, MDB_IDL list)
 sparsemap_idx_t
 _sparsemap_set(sparsemap_t **map, sparsemap_idx_t idx, bool value)
 {
-  sparsemap_idx_t l = sparsemap_set(*map, idx, value);
-  if (errno == ENOSPC) {
-    *map = sparsemap_set_data_size(*map, sparsemap_get_capacity(*map) + 64, NULL);
-    assert(*map != NULL);
-    errno = 0;
-  }
-  return l;
+  do {
+    sparsemap_idx_t l = sparsemap_set(*map, idx, value);
+    if (l != idx) {
+      if (errno == ENOSPC) {
+        *map = sparsemap_set_data_size(*map, sparsemap_get_capacity(*map) + 64, NULL);
+        assert(*map != NULL);
+        errno = 0;
+      } else {
+        assert(false);
+      }
+    } else {
+      return l;
+    }
+  } while (true);
 }
 
 td_histogram_t *l_span_loc;
 td_histogram_t *b_span_loc;
 td_histogram_t *l_span_take;
 td_histogram_t *b_span_take;
+td_histogram_t *l_span_merge;
+td_histogram_t *b_span_merge;
 
 void
 stats_header()
 {
   printf(
-    "timestamp,iterations,idl_cap,idl_used,idl_bytes,sm_cap,sm_used,idl_loc_p50,idl_loc_p75,idl_loc_p90,idl_loc_p99,idl_loc_p999,sm_loc_p50,sm_loc_p75,sm_loc_p90,sm_loc_p99,sm_loc_p999,idl_take_p50,idl_take_p75,idl_take_p90,idl_take_p99,idl_take_p999,sm_take_p50,sm_take_p75,sm_take_p90,sm_take_p99,sm_take_p999\n");
+    "timestamp,iterations,idl_cap,idl_used,idl_bytes,sm_cap,sm_used,idl_loc_p50,idl_loc_p75,idl_loc_p90,idl_loc_p99,idl_loc_p999,sm_loc_p50,sm_loc_p75,sm_loc_p90,sm_loc_p99,sm_loc_p999,idl_take_p50,idl_take_p75,idl_take_p90,idl_take_p99,idl_take_p999,sm_take_p50,sm_take_p75,sm_take_p90,sm_take_p99,sm_take_p999,idl_merge_p50,idl_merge_p75,idl_merge_p90,idl_merge_p99,idl_merge_p999,sm_merge_p50,sm_merge_p75,sm_merge_p90,sm_merge_p99,sm_merge_p999\n");
 }
 
 void
@@ -589,24 +598,19 @@ stats(size_t iterations, sparsemap_t *map, MDB_IDL list)
   td_compress(b_span_loc);
   td_compress(l_span_take);
   td_compress(b_span_take);
+  td_compress(l_span_merge);
+  td_compress(b_span_merge);
 
-  printf("%f,%zu,%zu,%zu,%zu,%zu,%zu,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f\n",
+  printf(
+    "%f,%zu,%zu,%zu,%zu,%zu,%zu,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f\n",
     nsts(), iterations, list[-1], list[0], MDB_IDL_SIZEOF(list), sparsemap_get_capacity(map), sparsemap_get_size(map), td_quantile(l_span_loc, .5),
     td_quantile(l_span_loc, .75), td_quantile(l_span_loc, .90), td_quantile(l_span_loc, .99), td_quantile(l_span_loc, .999), td_quantile(b_span_loc, .5),
     td_quantile(b_span_loc, .75), td_quantile(b_span_loc, .90), td_quantile(b_span_loc, .99), td_quantile(b_span_loc, .999), td_quantile(l_span_take, .5),
     td_quantile(l_span_take, .75), td_quantile(l_span_take, .90), td_quantile(l_span_take, .99), td_quantile(l_span_take, .999), td_quantile(b_span_take, .5),
-    td_quantile(b_span_take, .75), td_quantile(b_span_take, .90), td_quantile(b_span_take, .99), td_quantile(b_span_take, .999));
-
-#if 0
-  static double pct[] = { .5, .75, .90, .99, .999 };
-  bytes_as(MDB_IDL_SIZEOF(list), m, 1024);
-  bytes_as(sparsemap_get_capacity(map), l, 1024);
-
-  for (int i = 0; i < 5; i++)
-    printf("%.10f,%.10f,%.10f,%.10f,%.10f", iterations, pct[i] * 100, td_quantile(l_span_loc, pct[i]), td_quantile(b_span_loc, pct[i]));
-  for (int i = 0; i < 5; i++)
-    __diag("%lu\tspan_take:\t%f l: %.10f\tb: %.10f\n", iterations, pct[i] * 100, td_quantile(l_span_take, pct[i]), td_quantile(b_span_take, pct[i]));
-#endif
+    td_quantile(b_span_take, .75), td_quantile(b_span_take, .90), td_quantile(b_span_take, .99), td_quantile(b_span_take, .999), td_quantile(l_span_merge, .5),
+    td_quantile(l_span_merge, .75), td_quantile(l_span_merge, .90), td_quantile(l_span_merge, .99), td_quantile(l_span_merge, .999),
+    td_quantile(b_span_merge, .5), td_quantile(b_span_merge, .75), td_quantile(b_span_merge, .90), td_quantile(b_span_merge, .99),
+    td_quantile(b_span_merge, .999));
 }
 
 #define INITIAL_AMOUNT 1024 * 2
@@ -630,6 +634,8 @@ main()
   b_span_loc = td_new(100);
   l_span_take = td_new(100);
   b_span_take = td_new(100);
+  l_span_merge = td_new(100);
+  b_span_merge = td_new(100);
 
   stats_header();
 
@@ -795,24 +801,44 @@ main()
     if (iterations % 1000 == 0) {
     larger_please:;
       const int COUNT = 1024;
+      // ... add COUNT 4KiB pages, or
+      size_t len = COUNT;
+      // The largest page is at list[1] because this is a reverse sorted list.
+      pgno_t pg = list[0] ? list[1] + 1 : 0;
       if (toss(6) + 1 < 7) {
-        // ... add COUNT 4KiB pages, or
-        int len = COUNT;
-        // The largest page is at list[1] because this is a reverse sorted list.
-        pgno_t pg = list[1] + 1;
-        if (list[0] + COUNT > list[-1]) {
-          mdb_midl_grow(&list, list[0] + len);
+        MDB_IDL new_list = mdb_midl_alloc(len);
+        sparsemap_t *new_map = sparsemap(INITIAL_AMOUNT);
+        for (size_t i = 0; i < len; i++) {
+          pgno_t gp = (pg + len) - i;
+          new_list[i + 1] = gp;
+          new_list[0]++;
+          assert(verify_midl_contains(new_list, gp) == true);
+          assert(_sparsemap_set(&new_map, gp, true) == gp);
+          assert(sparsemap_is_set(new_map, gp));
         }
-        for (size_t i = pg; i < pg + len; i++) {
-          assert(verify_midl_contains(list, i) == false);
-          assert(sparsemap_is_set(map, i) == false);
-          mdb_midl_insert(list, i);
-          assert(_sparsemap_set(&map, i, true) == i);
+        assert(verify_sm_eq_ml(new_map, new_list));
+        {
+          b = nsts();
+          mdb_midl_append_list(&list, new_list);
+          mdb_midl_sort(list);
+          e = nsts();
+          td_add(l_span_merge, e - b, 1);
         }
-        mdb_midl_sort(list);
-        assert(verify_midl_nodups(list));
-        verify_sm_eq_ml(map, list);
-        amt += COUNT;
+        for (size_t i = 0; i < len; i++) {
+          pgno_t gp = (pg + len) - i;
+          assert(verify_midl_contains(list, gp) == true);
+        }
+        {
+          b = nsts();
+          sparsemap_merge(map, new_map);
+          e = nsts();
+          td_add(b_span_merge, e - b, 1);
+        }
+        for (size_t i = 0; i < len; i++) {
+          pgno_t gp = (pg + len) - i;
+          assert(sparsemap_is_set(map, gp));
+        }
+        free(new_map);
       } else {
         if (list[-1] > INITIAL_AMOUNT) {
           // ... a fraction of the time, remove COUNT / 2 of 4KiB pages.

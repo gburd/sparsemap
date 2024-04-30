@@ -1082,7 +1082,7 @@ sparsemap_set(sparsemap_t *map, sparsemap_idx_t idx, bool value)
     __sm_append_data(map, &buf[0], sizeof(buf));
 
     uint8_t *p = __sm_get_chunk_map_data(map, 0);
-    *(sm_idx_t *)p = __sm_get_aligned_offset(idx);
+    *(sm_idx_t *)p = __sm_get_fully_aligned_offset(idx); //TODO was not fully aligned before... why?
 
     __sm_set_chunk_map_count(map, 1);
 
@@ -1262,12 +1262,15 @@ sparsemap_merge(sparsemap_t *map, sparsemap_t *other)
   dst = __sm_get_chunk_map_data(map, 0);
   src = __sm_get_chunk_map_data(other, 0);
   for (size_t i = 0; i < max_chunk_count && src_count; i++) {
-    sm_idx_t dst_start = *(sm_idx_t *)dst;
     sm_idx_t src_start = *(sm_idx_t *)src;
+    sm_idx_t dst_start = *(sm_idx_t *)dst;
+    src_start = __sm_get_fully_aligned_offset(src_start);
+    dst_start = __sm_get_fully_aligned_offset(dst_start);
     if (src_start > dst_start && dst_count > 0) {
       __sm_chunk_t dst_chunk;
       __sm_chunk_map_init(&dst_chunk, dst + sizeof(sm_idx_t));
       dst += sizeof(sm_idx_t) + __sm_chunk_map_get_size(&dst_chunk);
+      dst_count--;
       continue;
     }
     if (src_start == dst_start && dst_count > 0) {
@@ -1277,7 +1280,7 @@ sparsemap_merge(sparsemap_t *map, sparsemap_t *other)
       __sm_chunk_t dst_chunk;
       __sm_chunk_map_init(&dst_chunk, dst + sizeof(sm_idx_t));
       __sm_chunk_map_merge(map, src_start, src_chunk);
-      *(sm_idx_t *)dst = __sm_get_aligned_offset(src_start);
+      *(sm_idx_t *)dst = __sm_get_fully_aligned_offset(src_start);
       src += sizeof(sm_idx_t) + __sm_chunk_map_get_size(&src_chunk);
       dst += sizeof(sm_idx_t) + __sm_chunk_map_get_size(&dst_chunk);
       dst_count--;
