@@ -606,6 +606,114 @@ test_api_split(const MunitParameter params[], void *data)
 }
 
 static void *
+test_api_merge_setup(const MunitParameter params[], void *user_data)
+{
+  (void)params;
+  (void)user_data;
+  sparsemap_t *map = sparsemap(10 * 1024);
+  assert_ptr_not_null(map);
+  return (void *)map;
+}
+static void
+test_api_merge_tear_down(void *fixture)
+{
+  sparsemap_t *map = (sparsemap_t *)fixture;
+  assert_ptr_not_null(map);
+  munit_free(map);
+}
+static MunitResult
+test_api_merge(const MunitParameter params[], void *data)
+{
+  sparsemap_t *map = (sparsemap_t *)data;
+  sparsemap_t *other = sparsemap(1024);
+  (void)params;
+
+  assert_ptr_not_null(map);
+  assert_ptr_not_null(other);
+
+  // Merge two empty maps to get an empty map.
+  sparsemap_merge(map, other);
+
+  // Merge a single set bit in the first chunk into the empty map.
+  sparsemap_set(other, 0, true);
+  sparsemap_merge(map, other);
+
+  assert_true(sparsemap_is_set(other, 0));
+  assert_true(sparsemap_is_set(map, 0));
+
+  sparsemap_clear(map);
+  sparsemap_clear(other);
+
+  // Merge two maps with the same single bit set.
+  sparsemap_set(map, 0, true);
+  sparsemap_set(other, 0, true);
+  sparsemap_merge(map, other);
+
+  sparsemap_clear(map);
+  sparsemap_clear(other);
+
+  // Merge an empty map with one that has the first bit set.
+  sparsemap_set(map, 0, true);
+  sparsemap_merge(map, other);
+
+  assert_true(sparsemap_is_set(map, 0));
+
+  sparsemap_clear(map);
+  sparsemap_clear(other);
+
+  sparsemap_set(other, 2049, true);
+  sparsemap_merge(map, other);
+
+  assert_true(sparsemap_is_set(map, 2049));
+
+  sparsemap_clear(map);
+  sparsemap_clear(other);
+
+  sparsemap_set(other, 1, true);
+  sparsemap_set(other, 2049, true);
+  sparsemap_set(map, 2050, true);
+  sparsemap_set(other, 4097, true);
+  sparsemap_set(other, 8193, true);
+
+  sparsemap_merge(map, other);
+
+  assert_true(sparsemap_is_set(map, 1));
+  assert_true(sparsemap_is_set(map, 2049));
+  assert_true(sparsemap_is_set(map, 2050));
+  assert_true(sparsemap_is_set(map, 4097));
+  assert_true(sparsemap_is_set(map, 8193));
+
+  for (int i = 0; i < 10000; i++) {
+    if (i == 2049 || i == 1 || i == 2050 || i == 4097 || i == 8193)
+      continue;
+    else
+      assert_false(sparsemap_is_set(map, i));
+  }
+
+  sparsemap_clear(map);
+  sparsemap_clear(other);
+
+  sparsemap_set(map, 0, true);
+  sparsemap_set(map, 2048, true);
+  sparsemap_set(map, 2049, true);
+  sparsemap_set(map, 8193, true);
+  for (int i = 2049; i < 4096; i++) {
+    sparsemap_set(other, i, true);
+  }
+
+  sparsemap_merge(map, other);
+  assert(sparsemap_is_set(map, 0));
+  assert(sparsemap_is_set(map, 2048));
+  assert(sparsemap_is_set(map, 8193));
+  for (int i = 2049; i < 4096; i++) {
+    assert(sparsemap_is_set(map, i));
+  }
+
+  free(other);
+  return MUNIT_OK;
+}
+
+static void *
 test_api_select_setup(const MunitParameter params[], void *user_data)
 {
   uint8_t *buf = munit_calloc(1024, sizeof(uint8_t));
@@ -919,6 +1027,7 @@ static MunitTest api_test_suite[] = {
   { (char *)"/get_size", test_api_get_size, test_api_get_size_setup, test_api_get_size_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
   { (char *)"/scan", test_api_scan, test_api_scan_setup, test_api_scan_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
   { (char *)"/split", test_api_split, test_api_split_setup, test_api_split_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
+  { (char *)"/merge", test_api_merge, test_api_merge_setup, test_api_merge_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
   { (char *)"/select/true", test_api_select, test_api_select_setup, test_api_select_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
 #ifdef SELECT_FALSE
   { (char *)"/select/false", test_api_select_false, test_api_select_false_setup, test_api_select_false_tear_down, MUNIT_TEST_OPTION_NONE, NULL },

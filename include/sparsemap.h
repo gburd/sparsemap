@@ -260,11 +260,22 @@ size_t sparsemap_get_size(sparsemap_t *map);
  */
 void sparsemap_scan(sparsemap_t *map, void (*scanner)(sm_idx_t vec[], size_t n), size_t skip);
 
-/** @brief Splits the bitmap by assigning all bits starting at \b offset to the
+/** @brief Merges the values from \b other into the \b map, \b other is unchanged.
  * \b other bitmap while removing them from \b map.
  *
  * @param[in] map The sparsemap reference.
- * @param[in] skip Start the scan after "skip" bits.
+ * @param[in] other The bitmap to merge into \b map.
+ */
+void sparsemap_merge(sparsemap_t *map, sparsemap_t *other);
+
+/** @brief Splits the bitmap by assigning all bits starting at \b offset to the
+ * \b other bitmap while removing them from \b map.
+ *
+ * The split must occur on a vector boundary.
+ *
+ * @param[in] map The sparsemap reference.
+ * @param[in] offset The 0-based offset into the bitmap at which to split.
+ * @param[in] other The bitmap into which we place the split.
  */
 void sparsemap_split(sparsemap_t *map, sparsemap_idx_t offset, sparsemap_t *other);
 
