@@ -423,7 +423,24 @@ __sm_chunk_map_set(__sm_chunk_t *map, size_t idx, bool value, size_t *pos, sm_bi
   return SM_OK;
 }
 
-/** @brief Finds the index of the \b n'th bit after \b offset bits with \b value.
+/** @brief Merges into the chunk at \b offset all set bits from \b src.
+ *
+ * @param[in] map The chunk in question.
+ * @param[in] offset The fully aligned offset of the chunk to be merged.
+ */
+void
+__sm_chunk_map_merge(sparsemap_t *map, sparsemap_idx_t offset, __sm_chunk_t src)
+{
+  size_t capacity = __sm_chunk_map_get_capacity(&src);
+  for (sparsemap_idx_t j = 0; j < capacity; j++, offset++) {
+    if (__sm_chunk_map_is_set(&src, j)) {
+      sparsemap_set(map, offset, true);
+    }
+  }
+}
+
+/** @brief Finds the index of the \b n'th bit after \b offset bits with \b
+ * value.
  *
  * Scans the chunk \b map until after \b offset bits (of any value) have
  * passed and then begins counting the bits that match \b value looking
@@ -797,6 +814,7 @@ __sm_get_size_impl(sparsemap_t *map)
   return SM_SIZEOF_OVERHEAD + p - start;
 }
 
+#if 0
 /** @brief Aligns to SM_BITS_PER_VECTOR a given index \b idx.
  *
  * @param[in] idx The index to align.
@@ -808,6 +826,7 @@ __sm_get_aligned_offset(size_t idx)
   const size_t capacity = SM_BITS_PER_VECTOR;
   return (idx / capacity) * capacity;
 }
+#endif
 
 /** @brief Aligns to SM_CHUNK_MAP_CAPACITY a given index \b idx.
  *
@@ -1082,7 +1101,7 @@ sparsemap_set(sparsemap_t *map, sparsemap_idx_t idx, bool value)
     __sm_append_data(map, &buf[0], sizeof(buf));
 
     uint8_t *p = __sm_get_chunk_map_data(map, 0);
-    *(sm_idx_t *)p = __sm_get_fully_aligned_offset(idx); //TODO was not fully aligned before... why?
+    *(sm_idx_t *)p = __sm_get_fully_aligned_offset(idx); // TODO was not fully aligned before... why?
 
     __sm_set_chunk_map_count(map, 1);
 
@@ -1239,17 +1258,6 @@ sparsemap_scan(sparsemap_t *map, void (*scanner)(sm_idx_t[], size_t), size_t ski
       skip -= skipped;
     }
     p += __sm_chunk_map_get_size(&chunk);
-  }
-}
-
-void
-__sm_chunk_map_merge(sparsemap_t *map, sparsemap_idx_t offset, __sm_chunk_t src)
-{
-  size_t capacity = __sm_chunk_map_get_capacity(&src);
-  for (sparsemap_idx_t j = 0; j < capacity; j++, offset++) {
-    if (__sm_chunk_map_is_set(&src, j)) {
-      sparsemap_set(map, offset, true);
-    }
   }
 }
 

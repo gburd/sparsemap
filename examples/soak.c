@@ -800,8 +800,8 @@ main()
     // every so often, either ...
     if (iterations % 1000 == 0) {
     larger_please:;
-      const int COUNT = 1024;
-      // ... add COUNT 4KiB pages, or
+      size_t COUNT = xorshift32() % 1024 + 513;
+      // ... add some amount of 4KiB pages, or
       size_t len = COUNT;
       // The largest page is at list[1] because this is a reverse sorted list.
       pgno_t pg = list[0] ? list[1] + 1 : 0;
@@ -843,7 +843,7 @@ main()
         if (list[-1] > INITIAL_AMOUNT) {
           // ... a fraction of the time, remove COUNT / 2 of 4KiB pages.
           pgno_t pg;
-          for (int i = 0; i < COUNT; i++) {
+          for (size_t i = 0; i < COUNT; i++) {
             pg = list[list[0] - i];
             assert(sparsemap_is_set(map, pg) == true);
             assert(_sparsemap_set(&map, pg, false) == pg);
