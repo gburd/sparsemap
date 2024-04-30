@@ -438,7 +438,7 @@ __sm_chunk_map_set(__sm_chunk_t *map, size_t idx, bool value, size_t *pos, sm_bi
  * SM_BITS_PER_VECTOR
  */
 static size_t
-__sm_chunk_map_select(__sm_chunk_t *map, size_t n, sparsemap_idx_t *offset, bool value)
+__sm_chunk_map_select(__sm_chunk_t *map, size_t n, ssize_t *offset, bool value)
 {
   size_t ret = 0;
   register uint8_t *p;
