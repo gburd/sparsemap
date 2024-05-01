@@ -361,7 +361,7 @@ print_bits(char *name, uint64_t value)
     printf("%s\t", name);
   }
   for (int i = 63; i >= 0; i--) {
-    printf("%llu", (value >> i) & 1);
+    printf("%lu", (value >> i) & 1);
     if (i % 8 == 0) {
       printf(" "); // Add space for better readability
     }
