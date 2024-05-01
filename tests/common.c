@@ -11,9 +11,11 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#ifdef __x86_64__ // Check if running on x86_64 architecture
 #ifdef X86_INTRIN
 #include <errno.h>
 #include <x86intrin.h>
+#endif
 #endif
 
 #include "../include/sparsemap.h"
@@ -31,6 +33,7 @@
 uint64_t
 tsc(void)
 {
+#ifdef __x86_64__ // Check if running on x86_64 architecture
 #ifdef X86_INTRIN
   return __rdtsc();
 #else
@@ -38,10 +41,18 @@ tsc(void)
   __asm__ volatile("rdtsc" : "=a"(low), "=d"(high));
   return ((uint64_t)high << 32) | low;
 #endif
+#ifdef __arm__ // Check if compiling for ARM architecture
+  uint64_t result;
+  __asm__ volatile("mrs %0, pmccntr_el0" : "=r"(result));
+  return result;
+}
+#endif
+#endif
+return 0;
 }
 
 double
-nsts()
+nsts(void)
 {
   struct timespec ts;
 
@@ -56,7 +67,7 @@ int __xorshift32_state = 0;
 
 // Xorshift algorithm for PRNG
 uint32_t
-xorshift32()
+xorshift32(void)
 {
   uint32_t x = __xorshift32_state;
   if (x == 0) {
@@ -70,7 +81,7 @@ xorshift32()
 }
 
 void
-xorshift32_seed()
+xorshift32_seed(void)
 {
   __xorshift32_state = XORSHIFT_SEED_VALUE;
 }
@@ -350,7 +361,7 @@ print_bits(char *name, uint64_t value)
     printf("%s\t", name);
   }
   for (int i = 63; i >= 0; i--) {
-    printf("%ld", (value >> i) & 1);
+    printf("%llu", (value >> i) & 1);
     if (i % 8 == 0) {
       printf(" "); // Add space for better readability
     }

@@ -25,10 +25,10 @@
 
 uint64_t tsc(void);
 double tsc_ticks_to_ns(uint64_t tsc_ticks);
-double nsts();
+double nsts(void);
 
-void xorshift32_seed();
-uint32_t xorshift32();
+void xorshift32_seed(void);
+uint32_t xorshift32(void);
 
 void print_array(int *array, int l);
 void print_spans(int *array, int n);

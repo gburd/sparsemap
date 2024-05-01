@@ -26,7 +26,7 @@
 #define G2 0xAAAAAAAAAAAAAAAAULL // Every highest 2nd bit: 101010...
 #define G4 0x3333333333333333ULL // 00110011 ... used to group the sum of 4 bits.
 #define G8 0x0F0F0F0F0F0F0F0FULL
-#define H8 0x8080808080808080ULL 
+#define H8 0x8080808080808080ULL
 #define L9 0x0040201008040201ULL
 #define H9 (L9 << 8)
 #define L16 0x0001000100010001ULL
@@ -44,7 +44,7 @@
 
 #define ONES_STEP_32 ( 0x0000000100000001ULL )
 #define MSBS_STEP_32 ( 0x8000000080000000ULL )
-	
+
 #define COMPARE_STEP_8(x,y) ( ( ( ( ( (x) | MSBS_STEP_8 ) - ( (y) & ~MSBS_STEP_8 ) ) ^ (x) ^ ~(y) ) & MSBS_STEP_8 ) >> 7 )
 #define LEQ_STEP_8(x,y) ( ( ( ( ( (y) | MSBS_STEP_8 ) - ( (x) & ~MSBS_STEP_8 ) ) ^ (x) ^ (y) ) & MSBS_STEP_8 ) >> 7 )
 

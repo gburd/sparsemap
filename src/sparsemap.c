@@ -814,7 +814,6 @@ __sm_get_size_impl(sparsemap_t *map)
   return SM_SIZEOF_OVERHEAD + p - start;
 }
 
-#if 0
 /** @brief Aligns to SM_BITS_PER_VECTOR a given index \b idx.
  *
  * @param[in] idx The index to align.
@@ -826,7 +825,6 @@ __sm_get_aligned_offset(size_t idx)
   const size_t capacity = SM_BITS_PER_VECTOR;
   return (idx / capacity) * capacity;
 }
-#endif
 
 /** @brief Aligns to SM_CHUNK_MAP_CAPACITY a given index \b idx.
  *
