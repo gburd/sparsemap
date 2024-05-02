@@ -680,24 +680,27 @@ __sm_chunk_map_rank(__sm_chunk_t *map, size_t *offset, size_t idx, size_t *pos, 
  * @param[in] map The chunk in question.
  * @param[in] start
  * @param[in] scanner
+ * @param[in] skip The number of
  * @returns the number of (set) bits that were passed to the scanner
  */
 static size_t
-__sm_chunk_map_scan(__sm_chunk_t *map, sm_idx_t start, void (*scanner)(sm_idx_t[], size_t), size_t skip)
+__sm_chunk_map_scan(__sm_chunk_t *map, sm_idx_t start, void (*scanner)(sm_idx_t[], size_t, void *aux), size_t skip, void *aux)
 {
   size_t ret = 0;
   register uint8_t *p = (uint8_t *)map->m_data;
   sm_idx_t buffer[SM_BITS_PER_VECTOR];
   for (size_t i = 0; i < sizeof(sm_bitvec_t); i++, p++) {
     if (*p == 0) {
-      /* skip the zeroes */
+      /* Skip chunks that are all zeroes. */
+      skip -= skip > SM_BITS_PER_VECTOR ? SM_BITS_PER_VECTOR : skip;
       continue;
     }
 
     for (int j = 0; j < SM_FLAGS_PER_INDEX_BYTE; j++) {
       size_t flags = SM_CHUNK_GET_FLAGS(*p, j);
       if (flags == SM_PAYLOAD_NONE || flags == SM_PAYLOAD_ZEROS) {
-        /* ignore the zeroes */
+        /* Skip when all zeroes. */
+        skip -= skip > SM_BITS_PER_VECTOR ? SM_BITS_PER_VECTOR : skip;
       } else if (flags == SM_PAYLOAD_ONES) {
         if (skip) {
           if (skip >= SM_BITS_PER_VECTOR) {
@@ -709,26 +712,31 @@ __sm_chunk_map_scan(__sm_chunk_t *map, sm_idx_t start, void (*scanner)(sm_idx_t[
           for (size_t b = skip; b < SM_BITS_PER_VECTOR; b++) {
             buffer[n++] = start + b;
           }
-          scanner(&buffer[0], n);
+          scanner(&buffer[0], n, aux);
           ret += n;
           skip = 0;
         } else {
           for (size_t b = 0; b < SM_BITS_PER_VECTOR; b++) {
             buffer[b] = start + b;
           }
-          scanner(&buffer[0], SM_BITS_PER_VECTOR);
+          scanner(&buffer[0], SM_BITS_PER_VECTOR, aux);
           ret += SM_BITS_PER_VECTOR;
         }
       } else if (flags == SM_PAYLOAD_MIXED) {
         sm_bitvec_t w = map->m_data[1 + __sm_chunk_map_get_position(map, i * SM_FLAGS_PER_INDEX_BYTE + j)];
-        int n = 0;
+        size_t n = 0;
         if (skip) {
+          if (skip >= SM_BITS_PER_VECTOR) {
+            skip -= SM_BITS_PER_VECTOR;
+            ret += SM_BITS_PER_VECTOR;
+            continue;
+          }
           for (int b = 0; b < SM_BITS_PER_VECTOR; b++) {
-            if (w & ((sm_bitvec_t)1 << b)) {
-
+            if (skip > 0) {
               skip--;
               continue;
-              // TODO: unreachable lines below... why?
+            }
+            if (w & ((sm_bitvec_t)1 << b)) {
               buffer[n++] = start + b;
               ret++;
             }
@@ -742,7 +750,7 @@ __sm_chunk_map_scan(__sm_chunk_t *map, sm_idx_t start, void (*scanner)(sm_idx_t[
           ret += n;
         }
         __sm_assert(n > 0);
-        scanner(&buffer[0], n);
+        scanner(&buffer[0], n, aux);
       }
     }
   }
@@ -993,10 +1001,6 @@ sparsemap_open(sparsemap_t *map, uint8_t *data, size_t size)
   map->m_capacity = size;
 }
 
-/*
- * TODO/NOTE: This is a dangerous operation because we cannot verify that
- *       data_size is not exceeding the size of the underlying buffer.
- */
 sparsemap_t *
 sparsemap_set_data_size(sparsemap_t *map, size_t size, uint8_t *data)
 {
@@ -1020,7 +1024,9 @@ sparsemap_set_data_size(sparsemap_t *map, size_t size, uint8_t *data)
     m->m_data = (uint8_t *)(((uintptr_t)m + sizeof(sparsemap_t)) & ~(uintptr_t)7);
     __sm_when_diag({ __sm_assert(IS_8_BYTE_ALIGNED(m->m_data)); }) return m;
   } else {
-    if (data != NULL && data_size > sparsemap_get_capacity(map) && data != map->m_data) {
+    /* NOTE: It is up to the caller to realloc their buffer and provide it here
+       for reassignment. */
+     if (data != NULL && data_size > sparsemap_get_capacity(map) && data != map->m_data) {
       map->m_data = data;
     }
     map->m_capacity = size;
@@ -1240,7 +1246,7 @@ sparsemap_get_size(sparsemap_t *map)
  * Decompresses the whole bitmap; calls scanner for all bits.
  */
 void
-sparsemap_scan(sparsemap_t *map, void (*scanner)(sm_idx_t[], size_t), size_t skip)
+sparsemap_scan(sparsemap_t *map, void (*scanner)(sm_idx_t[], size_t, void *aux), size_t skip, void *aux)
 {
   uint8_t *p = __sm_get_chunk_map_data(map, 0);
   size_t count = __sm_get_chunk_map_count(map);
@@ -1250,7 +1256,7 @@ sparsemap_scan(sparsemap_t *map, void (*scanner)(sm_idx_t[], size_t), size_t ski
     p += sizeof(sm_idx_t);
     __sm_chunk_t chunk;
     __sm_chunk_map_init(&chunk, p);
-    size_t skipped = __sm_chunk_map_scan(&chunk, start, scanner, skip);
+    size_t skipped = __sm_chunk_map_scan(&chunk, start, scanner, skip, aux);
     if (skip) {
       assert(skip >= skipped);
       skip -= skipped;

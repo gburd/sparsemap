@@ -249,16 +249,14 @@ size_t sparsemap_get_size(sparsemap_t *map);
 /** @brief Provides a method for a callback function to examine every bit set in
  * the index.
  *
- * This decompresses the whole bitmap and invokes #scanner() passing a 64bit
- * "vector" of bits in order from 0 index to the end of the map.  Using standard
- * bit masking techniques it is possible to read each bit from LSB to MSB in
- * these vectors to read the entire content of the bitmap index (see
- * examples/ex_4.c).
+ * This decompresses the whole bitmap and invokes #scanner() passing an array
+ * of the positions of set bits in order from 0 index to the end of the map.
  *
  * @param[in] map The sparsemap reference.
- * @param[in] skip Start the scan after "skip" bits.
+ * @param[in] skip Start the scan after \b skip position in the map.
+ * @param[in] aux Auxiliary information passed to the scanner.
  */
-void sparsemap_scan(sparsemap_t *map, void (*scanner)(sm_idx_t vec[], size_t n), size_t skip);
+void sparsemap_scan(sparsemap_t *map, void (*scanner)(sm_idx_t vec[], size_t n, void *aux), size_t skip, void *aux);
 
 /** @brief Merges the values from \b other into the \b map, \b other is unchanged.
  * \b other bitmap while removing them from \b map.

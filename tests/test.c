@@ -524,10 +524,7 @@ test_api_scan_setup(const MunitParameter params[], void *user_data)
   uint8_t *buf = munit_calloc(1024, sizeof(uint8_t));
   assert_ptr_not_null(buf);
   sparsemap_t *map = (sparsemap_t *)test_api_setup(params, user_data);
-
   sparsemap_init(map, buf, 1024);
-  sm_bitmap_from_uint64(map, 0, ((uint64_t)0xfeedface << 32) | 0xbadc0ffee);
-
   return (void *)map;
 }
 static void
@@ -539,11 +536,14 @@ test_api_scan_tear_down(void *fixture)
   test_api_tear_down(fixture);
 }
 void
-scan_for_0xfeedfacebadcoffee(sm_idx_t v[], size_t n)
+scan_for_0xfeedfacebadcoffee(sm_idx_t v[], size_t n, void *aux)
 {
-  /* Called multiple times */
-  ((void)v);
-  ((void)n);
+  size_t bit_pos[] = {1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 22, 23, 24, 26, 27, 29, 31, 32, 33, 34, 35, 38, 39, 41, 43, 44, 45, 46, 47, 48, 50, 51, 53, 54, 55, 57, 58, 59, 60, 61, 62, 63};
+  (void)aux;
+  
+  for (size_t i = 0; i < n; i++) {
+    assert(v[i] == bit_pos[i]);
+  }
 }
 static MunitResult
 test_api_scan(const MunitParameter params[], void *data)
@@ -552,10 +552,8 @@ test_api_scan(const MunitParameter params[], void *data)
   (void)params;
 
   assert_ptr_not_null(map);
-
-  sparsemap_set(map, 4200, true);
-  assert_true(sparsemap_is_set(map, 4200));
-  sparsemap_scan(map, scan_for_0xfeedfacebadcoffee, 0);
+  sm_bitmap_from_uint64(map, 0, ((uint64_t)0xfeedface << 32) | 0xbadc0ffee);
+  sparsemap_scan(map, scan_for_0xfeedfacebadcoffee, 0, NULL);
 
   return MUNIT_OK;
 }

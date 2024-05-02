@@ -534,6 +534,21 @@ verify_empty_sparsemap(sparsemap_t *map, pgno_t pg, unsigned len)
 }
 
 bool
+verify_sm_is_first_available_span(sparsemap_t *map, sparsemap_idx_t idx, size_t len, bool value)
+{
+  for (sparsemap_idx_t i = 0; i < idx + len; i++) {
+    sparsemap_idx_t j = 0;
+    while (sparsemap_is_set(map, i + j) == value && j < len && j < idx + len) {
+      j++;
+    }
+    if (j == len) {
+      return i == idx;
+    }
+  }
+  return false;
+}
+
+bool
 verify_sm_eq_ml(sparsemap_t *map, MDB_IDL list)
 {
   for (MDB_ID i = 1; i <= list[0]; i++) {
@@ -702,6 +717,7 @@ main(void)
       sl = pgno;
       e = nsts();
       td_add(b_span_loc, e - b, 1);
+      assert(verify_sm_is_first_available_span(map, pgno, n, true));
     }
     assert(verify_span_midl(list, sl, n));
     assert(verify_span_sparsemap(map, sl, n));
@@ -761,24 +777,25 @@ main(void)
     // Once we've used half of the free list, let's replenish it a bit.
     if (list[0] < amt / 2) {
       do {
-        pgno_t pg;
+        pgno_t pgno;
         size_t len, retries = amt;
         do {
           len = toss(15) + 1;
-          pg = sparsemap_span(map, 0, len, false);
+          pgno = sparsemap_span(map, 0, len, false);
+          assert(verify_sm_is_first_available_span(map, pgno, n, false));
           //__diag("%zu\t%zu,%zu\n", iterations, replenish, retries);
-        } while (SPARSEMAP_NOT_FOUND(pg) && --retries);
+        } while (SPARSEMAP_NOT_FOUND(pgno) && --retries);
         if (retries == 0) {
           goto larger_please;
         }
-        if (SPARSEMAP_FOUND(pg)) {
-          assert(verify_empty_midl(list, pg, len));
-          assert(verify_empty_sparsemap(map, pg, len));
+        if (SPARSEMAP_FOUND(pgno)) {
+          assert(verify_empty_midl(list, pgno, len));
+          assert(verify_empty_sparsemap(map, pgno, len));
           assert(verify_sm_eq_ml(map, list));
           if (list[-1] - list[0] < len) {
             mdb_midl_need(&list, list[-1] + len);
           }
-          for (size_t i = pg; i < pg + len; i++) {
+          for (size_t i = pgno; i < pgno + len; i++) {
             assert(verify_midl_contains(list, i) == false);
             assert(sparsemap_is_set(map, i) == false);
             mdb_midl_insert(list, i);
@@ -788,8 +805,8 @@ main(void)
           }
           mdb_midl_sort(list);
           assert(verify_midl_nodups(list));
-          assert(verify_span_midl(list, pg, len));
-          assert(verify_span_sparsemap(map, pg, len));
+          assert(verify_span_midl(list, pgno, len));
+          assert(verify_span_sparsemap(map, pgno, len));
         }
         assert(verify_sm_eq_ml(map, list));
         replenish++;
