@@ -1026,7 +1026,7 @@ sparsemap_set_data_size(sparsemap_t *map, size_t size, uint8_t *data)
   } else {
     /* NOTE: It is up to the caller to realloc their buffer and provide it here
        for reassignment. */
-     if (data != NULL && data_size > sparsemap_get_capacity(map) && data != map->m_data) {
+    if (data != NULL && data_size > sparsemap_get_capacity(map) && data != map->m_data) {
       map->m_data = data;
     }
     map->m_capacity = size;

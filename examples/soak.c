@@ -822,7 +822,7 @@ main(void)
       size_t len = COUNT;
       // The largest page is at list[1] because this is a reverse sorted list.
       pgno_t pg = list[0] ? list[1] + 1 : 0;
-//      if (toss(6) + 1 < 7) {
+      //      if (toss(6) + 1 < 7) {
       if (true) { // disable shrinking for now...
         MDB_IDL new_list = mdb_midl_alloc(len);
         sparsemap_t *new_map = sparsemap(INITIAL_AMOUNT);
