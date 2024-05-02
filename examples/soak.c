@@ -582,7 +582,7 @@ td_histogram_t *l_span_merge;
 td_histogram_t *b_span_merge;
 
 void
-stats_header()
+stats_header(void)
 {
   printf(
     "timestamp,iterations,idl_cap,idl_used,idl_bytes,sm_cap,sm_used,idl_loc_p50,idl_loc_p75,idl_loc_p90,idl_loc_p99,idl_loc_p999,sm_loc_p50,sm_loc_p75,sm_loc_p90,sm_loc_p99,sm_loc_p999,idl_take_p50,idl_take_p75,idl_take_p90,idl_take_p99,idl_take_p999,sm_take_p50,sm_take_p75,sm_take_p90,sm_take_p99,sm_take_p999,idl_merge_p50,idl_merge_p75,idl_merge_p90,idl_merge_p99,idl_merge_p999,sm_merge_p50,sm_merge_p75,sm_merge_p90,sm_merge_p99,sm_merge_p999\n");
@@ -619,7 +619,7 @@ stats(size_t iterations, sparsemap_t *map, MDB_IDL list)
  * A "soak test" that tries to replicate behavior in LMDB for page allocation.
  */
 int
-main()
+main(void)
 {
   size_t replenish = 0, iterations = 0;
   bool prefer_mdb_idl_location = (bool)xorshift32() % 2;
