@@ -29,6 +29,9 @@
 
 /* !!! Duplicated here for testing purposes. Keep in sync, or suffer. !!! */
 struct sparsemap {
+#ifdef REENTRENT_SPARSEMAP
+  pthread_mutex_t m_mutex;
+#endif
   size_t m_capacity;
   size_t m_data_used;
   uint8_t *m_data;
@@ -39,7 +42,8 @@ struct user_data {
 };
 
 #ifdef REENTRENT_SPARSEMAP
-#define sparsemap() GSB
+#define sparsemap(size) sparsemap_r(size)
+#define sparsemap_set_data_size(map, size, data) sparsemap_set_data_size_r(map, size, data)
 #endif
 
 /* -------------------------- Supporting Functions for Testing */
@@ -1011,6 +1015,34 @@ test_api_span(const MunitParameter params[], void *data)
   return MUNIT_OK;
 }
 
+static void *
+test_api_reentrent_setup(const MunitParameter params[], void *user_data)
+{
+  sparsemap_t *map = sparsemap_r(1024);
+  assert_ptr_not_null(map);
+  return (void *)map;
+}
+static void
+test_api_reentrent_tear_down(void *fixture)
+{
+  sparsemap_t *map = (sparsemap_t *)fixture;
+  free(map);
+  test_api_tear_down(fixture);
+}
+static MunitResult
+test_api_reentrent(const MunitParameter params[], void *data)
+{
+  sparsemap_t *map = (sparsemap_t *)data;
+  (void)params;
+
+  assert_ptr_not_null(map);
+  sparsemap_set_data_size_r(map, 2048, NULL);
+
+  // TODO... moar.
+
+  return MUNIT_OK;
+}
+
 // clang-format off
 static MunitTest api_test_suite[] = {
   { (char *)"/new", test_api_new, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -1042,6 +1074,7 @@ static MunitTest api_test_suite[] = {
   { (char *)"/rank/true", test_api_rank_true, test_api_rank_true_setup, test_api_rank_true_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
   { (char *)"/rank/false", test_api_rank_false, test_api_rank_false_setup, test_api_rank_false_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
   { (char *)"/span", test_api_span, test_api_span_setup, test_api_span_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
+  { (char *)"/reentrent", test_api_reentrent, test_api_reentrent_setup, test_api_reentrent_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
   { NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 // clang-format on

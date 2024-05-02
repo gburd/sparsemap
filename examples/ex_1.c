@@ -17,6 +17,9 @@
 
 /* !!! Duplicated here for testing purposes. Keep in sync, or suffer. !!! */
 struct sparsemap {
+#ifdef REENTRENT_SPARSEMAP
+  pthread_mutex_t m_mutex;
+#endif
   size_t m_capacity;
   size_t m_data_used;
   uint8_t *m_data;

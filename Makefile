@@ -5,14 +5,14 @@ SHARED_LIB = libsparsemap.so
 
 #CFLAGS = -Wall -Wextra -Wpedantic -Of -std=c11 -Iinclude/ -fPIC
 #CFLAGS = -Wall -Wextra -Wpedantic -Og -g -std=c11 -Iinclude/ -fPIC
-CFLAGS = -DSPARSEMAP_DIAGNOSTIC -DDEBUG -Wall -Wextra -Wpedantic -D_FORTIFY_SOURCE=0 -O0 -g -std=c11 -Iinclude/ -fPIC
+CFLAGS = -DREENTRENT_SPARSEMAP -DSPARSEMAP_DIAGNOSTIC -DDEBUG -Wall -Wextra -Wpedantic -O0 -g -std=c11 -Iinclude/ -fPIC
 #CFLAGS = -DREENTRENT_SPARSEMAP -DSPARSEMAP_DIAGNOSTIC -DDEBUG -Wall -Wextra -Wpedantic -Ofast -g -std=c11 -Iinclude/ -fPIC
 #CFLAGS = -Wall -Wextra -Wpedantic -Og -g -std=c11 -Iinclude/ -fPIC
 #CFLAGS = -Wall -Wextra -Wpedantic -Ofast -g -std=c11 -Iinclude/ -fPIC
 #CFLAGS = -DSPARSEMAP_DIAGNOSTIC -DDEBUG -Wall -Wextra -Wpedantic -Og -g -fsanitize=address,leak,object-size,pointer-compare,pointer-subtract,null,return,bounds,pointer-overflow,undefined -fsanitize-address-use-after-scope -std=c11 -Iinclude/ -fPIC
 #CFLAGS = -Wall -Wextra -Wpedantic -Og -g -fsanitize=all -fhardened -std=c11 -Iinclude/ -fPIC
 
-TEST_FLAGS = -DREENTRENT_SPARSEMAP -DDEBUG -Wall -Wextra -Wpedantic -O0 -D_FORTIFY_SOURCE=0 -g -std=c11 -Iinclude/ -Itests/ -fPIC
+TEST_FLAGS = -DREENTRENT_SPARSEMAP -DDEBUG -Wall -Wextra -Wpedantic -O0 -Wno-fortify-source -g -std=c11 -Iinclude/ -Itests/ -fPIC
 #TEST_FLAGS = -Wall -Wextra -Wpedantic -Og -g -std=c11 -Iinclude/ -Itests/ -fPIC
 #TEST_FLAGS = -Wall -Wextra -Wpedantic -Ofast -g -std=c11 -Iinclude/ -Itests/ -fPIC
 #TEST_FLAGS = -DDEBUG -Wall -Wextra -Wpedantic -Og -g -fsanitize=address,leak,object-size,pointer-compare,pointer-subtract,null,return,bounds,pointer-overflow,undefined -fsanitize-address-use-after-scope -std=c11 -Iinclude/ -fPIC

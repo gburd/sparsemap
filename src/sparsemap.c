@@ -33,6 +33,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
 #ifdef REENTRENT_SPARSEMAP
 #include <pthread.h>
 #endif
@@ -112,13 +113,15 @@ enum __SM_CHUNK_INFO {
 };
 
 #define SM_CHUNK_GET_FLAGS(from, at) (((from)) & ((sm_bitvec_t)SM_FLAG_MASK << ((at)*2))) >> ((at)*2)
-gsb #define SM_IS_REENTRENT(from) (((from)) & ((sm_bitvec_t)SM_FLAG_MASK)
 
 typedef struct {
   sm_bitvec_t *m_data;
 } __sm_chunk_t;
 
-struct __attribute__((aligned(8))) sparsemap {
+struct sparsemap {
+#ifdef REENTRENT_SPARSEMAP
+  pthread_mutex_t m_mutex;
+#endif
   size_t m_capacity;  /* The total size of m_data */
   size_t m_data_used; /* The used size of m_data */
   uint8_t *m_data;    /* The serialized bitmap data */
@@ -970,19 +973,6 @@ sparsemap(size_t size)
   return map;
 }
 
-#ifdef REENTRENT_SPARSEMAP
-sparsemap_t *
-sparsemap_r(size_t size)
-{
-  sparsemap_t *map = sparsemap(size + sizeof(pthread_mutex_t));
-  sparsemap_t *rm = (sparsemap_t *)((uintptr_t)map + sizeof(pthread_mutex_t));
-  pthread_mutex_t *mutex = (pthread_mutex_t *)map;
-  memcpy(rm, map, size);
-  pthread_mutex_init(mutex, NULL);
-  return map;
-}
-#endif
-
 sparsemap_t *
 sparsemap_wrap(uint8_t *data, size_t size)
 {
@@ -999,6 +989,9 @@ sparsemap_init(sparsemap_t *map, uint8_t *data, size_t size)
   map->m_data = data;
   map->m_data_used = 0;
   map->m_capacity = size;
+#ifdef REENTRENT_SPARSEMAP
+  pthread_mutex_init(&map->m_mutex);
+#endif
   sparsemap_clear(map);
 }
 
@@ -1032,8 +1025,8 @@ sparsemap_set_data_size(sparsemap_t *map, size_t size, uint8_t *data)
     total_size += padding;
 
 #ifdef REENTRENT_SPARSEMAP
-    sparsemap_t *rm = (sparsemap_t *)((uintptr_t)map - sizeof(pthread_mutex_t));
-    sparsemap_t *m = (sparsemap_t *)realloc(rm, total_size);
+    sparsemap_t *mem = (sparsemap_t *)((uintptr_t)map - sizeof(pthread_mutex_t));
+    sparsemap_t *m = (sparsemap_t *)realloc(mem, total_size);
 #else
     sparsemap_t *m = (sparsemap_t *)realloc(map, total_size);
 #endif
@@ -1041,12 +1034,13 @@ sparsemap_set_data_size(sparsemap_t *map, size_t size, uint8_t *data)
       return NULL;
     }
 #ifdef REENTRENT_SPARSEMAP
-    sparsemap_t *m = (sparsemap_t *)((uintptr_t)m + sizeof(pthread_mutex_t));
+    m = (sparsemap_t *)((uintptr_t)m + sizeof(pthread_mutex_t));
 #endif
     memset(((uint8_t *)m) + sizeof(sparsemap_t) + (m->m_capacity * sizeof(uint8_t)), 0, size - m->m_capacity + padding);
     m->m_capacity = data_size;
     m->m_data = (uint8_t *)(((uintptr_t)m + sizeof(sparsemap_t)) & ~(uintptr_t)7);
-    __sm_when_diag({ __sm_assert(IS_8_BYTE_ALIGNED(m->m_data)); }) return m;
+    __sm_when_diag({ __sm_assert(IS_8_BYTE_ALIGNED(m->m_data)); });
+    return m;
   } else {
     if (data != NULL && data_size > sparsemap_get_capacity(map) && data != map->m_data) {
       map->m_data = data;
@@ -1057,14 +1051,25 @@ sparsemap_set_data_size(sparsemap_t *map, size_t size, uint8_t *data)
 }
 
 #ifdef REENTRENT_SPARSEMAP
-sparsemap_t *sparsemap_set_data_size_r(sparsemap_t *map, size_t size, uint8_t *data)
+sparsemap_t *
+sparsemap_set_data_size_r(sparsemap_t *map, size_t size, uint8_t *data)
 {
-  pthread_mutex_t *mutex = (pthread_mutex_t *)map;
-  sparsemap_t *rm = (sparsemap_t *)((uintptr_t)map + sizeof(pthread_mutex_t));
-  pthread_mutex_lock(mutex);
-  sparsemap_t *ret = sparsemap_set_data_size(rm size, data);
-  pthread_mutex_unlock(mutex);
-  return ret;
+  sparsemap_t *retval;
+  pthread_mutex_t *mutex;
+
+  if (SM_IS_REENTRENT_MAP(map)) {
+    mutex = SM_REENTRENT_MUTEX(map);
+    pthread_mutex_lock(mutex);
+    sparsemap_t *real_map = SM_REENTRENT_MAP(map);
+    retval = sparsemap_set_data_size(real_map, size, data);
+    /* realloc() could have moved the map, so get these again. */
+    mutex = SM_REENTRENT_MUTEX(retval);
+    retval = SM_REENTRENT_MAP(retval);
+    pthread_mutex_unlock(mutex);
+  } else {
+    retval = sparsemap_set_data_size(map, size, data);
+  }
+  return retval;
 }
 #endif
 
