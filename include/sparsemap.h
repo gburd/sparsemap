@@ -109,6 +109,9 @@ typedef uint64_t sm_bitvec_t;
  * @returns The newly allocated sparsemap reference.
  */
 sparsemap_t *sparsemap(size_t size);
+#ifdef REENTRENT_SPARSEMAP
+sparsemap_t *sparsemap_r(size_t size);
+#endif
 
 /** @brief Allocate a new, empty sparsemap_t that references (wraps) the buffer
  * \b data of \b size bytes to use for storage of bitmap data.
@@ -190,6 +193,9 @@ void sparsemap_clear(sparsemap_t *map);
  * supported.
  */
 sparsemap_t *sparsemap_set_data_size(sparsemap_t *map, size_t size, uint8_t *data);
+#ifdef REENTRENT_SPARSEMAP
+sparsemap_t *sparsemap_set_data_size_r(sparsemap_t *map, size_t size, uint8_t *data);
+#endif
 
 /** @brief Calculate remaining capacity, approaches 0 when full.
  *

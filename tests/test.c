@@ -38,6 +38,10 @@ struct user_data {
   int foo;
 };
 
+#ifdef REENTRENT_SPARSEMAP
+#define sparsemap() GSB
+#endif
+
 /* -------------------------- Supporting Functions for Testing */
 
 void
