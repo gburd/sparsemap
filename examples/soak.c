@@ -541,7 +541,9 @@ verify_sm_is_first_available_span(sparsemap_t *map, sparsemap_idx_t idx, size_t 
     while (sparsemap_is_set(map, i + j) == value && j < len) {
       j++;
     }
-    return i == idx;
+    if (j == len) {
+      return i == idx;
+    }
   }
   return false;
 }

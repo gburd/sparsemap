@@ -289,7 +289,7 @@ void sparsemap_split(sparsemap_t *map, sparsemap_idx_t offset, sparsemap_t *othe
  * 3 when 0-based).
  *
  * @param[in] map The sparsemap reference.
- * @param[in] n Specifies how many bits to ignore (when n=3 return the position
+ * @param[in] n Specifies how many bits to ignore (when n=2 return the position
  * of the third matching bit).
  * @param[in] value Determines if the search is to examine set (true) or unset
  * (false) bits in the bitmap index.
