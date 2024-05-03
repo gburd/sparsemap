@@ -629,6 +629,25 @@ _sparsemap_set(sparsemap_t **map, sparsemap_idx_t idx, bool value)
   } while (true);
 }
 
+sparsemap_idx_t
+_sparsemap_merge(sparsemap_t **map, sparsemap_t *other)
+{
+  do {
+    int retval = sparsemap_merge(*map, other);
+    if (retval != 0) {
+      if (errno == ENOSPC) {
+        *map = sparsemap_set_data_size(*map, sparsemap_get_capacity(*map) + 64, NULL);
+        assert(*map != NULL);
+        errno = 0;
+      } else {
+        assert(false);
+      }
+    } else {
+      return retval;
+    }
+  } while (true);
+}
+
 td_histogram_t *l_span_loc;
 td_histogram_t *b_span_loc;
 td_histogram_t *l_span_take;
@@ -938,7 +957,7 @@ main(void)
         }
         {
           b = nsts();
-          sparsemap_merge(map, new_map);
+          _sparsemap_merge(&map, new_map);
           e = nsts();
           td_add(b_span_merge, e - b, 1);
         }
