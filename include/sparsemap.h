@@ -132,7 +132,7 @@ sparsemap_t *sparsemap_wrap(uint8_t *data, size_t size);
  * bytes for storage of bitmap data.
  *
  * Given the address of an existing \b map allocated on the stack or heap this
- * function will initialize the datastructure and use the provided \b data of
+ * function will initialize the data structure and use the provided \b data of
  * \b size for bitmap data.  Caller is responsible for all memory management.
  * Resizing the buffer is not directly supported, you
  * may resize it and call #sparsemap_set_data_size() and then ensure that should
@@ -150,7 +150,7 @@ void sparsemap_init(sparsemap_t *map, uint8_t *data, size_t size);
  * the specified buffer.
  *
  * Given the address of an existing \b map this function will assign to the
- * provided datastructure \b data of \b size for bitmap data.  Caller is
+ * provided data structure \b data of \b size for bitmap data.  Caller is
  * responsible for all memory management.  Use this when as a way to
  * "deserialize" bytes and make them ready for use as a bitmap.
  *
@@ -180,7 +180,7 @@ void sparsemap_clear(sparsemap_t *map);
  * caveats apply here as well.
  *
  * When called referencing a \b map that was allocate by the caller this
- * function will only update the values within the datastructure.
+ * function will only update the values within the data structure.
  *
  * @param[in] map The sparsemap reference.
  * @param[in] size The desired size of the buffer \b data used for the bitmap.
