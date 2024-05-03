@@ -42,7 +42,6 @@
       "esbenp.prettier-vscode"
       "golang.go"
       "mads-hartmann.bash-ide-vscode"
-      "ms-azuretools.vscode-docker"
       "ms-python.python"
       "ms-python.vscode-pylance"
       "ms-vscode.clangd"
