@@ -8,6 +8,7 @@
     act
     autoconf
     clang
+    clang-tools
     ed
     gcc
     gdb
