@@ -821,6 +821,7 @@ __sm_get_size_impl(sparsemap_t *map)
   return SM_SIZEOF_OVERHEAD + p - start;
 }
 
+#ifdef DIAGNOSTIC
 /** @brief Aligns to SM_BITS_PER_VECTOR a given index \b idx.
  *
  * @param[in] idx The index to align.
@@ -832,6 +833,7 @@ __sm_get_aligned_offset(size_t idx)
   const size_t capacity = SM_BITS_PER_VECTOR;
   return (idx / capacity) * capacity;
 }
+#endif
 
 /** @brief Aligns to SM_CHUNK_MAP_CAPACITY a given index \b idx.
  *
@@ -1264,13 +1266,20 @@ sparsemap_scan(sparsemap_t *map, void (*scanner)(sm_idx_t[], size_t, void *aux),
   }
 }
 
-void
+int
 sparsemap_merge(sparsemap_t *map, sparsemap_t *other)
 {
   uint8_t *src, *dst;
-  size_t src_count = __sm_get_chunk_map_count(other), dst_count = __sm_get_chunk_map_count(map), max_chunk_count = src_count + dst_count;
+  size_t src_count = __sm_get_chunk_map_count(other);
+  size_t dst_count = __sm_get_chunk_map_count(map);
+  size_t max_chunk_count = src_count + dst_count;
 
-  // TODO: ensure there is space, or ENOSPC
+  /* Estimate worst-case overhead required for merge. */
+  if (map->m_data_used + src_count * (sizeof(sm_idx_t) + sizeof(sm_bitvec_t) * 2) > map->m_capacity) {
+    errno = ENOSPC;
+    return -1;
+  }
+
   dst = __sm_get_chunk_map_data(map, 0);
   src = __sm_get_chunk_map_data(other, 0);
   for (size_t i = 0; i < max_chunk_count && src_count; i++) {
@@ -1321,6 +1330,7 @@ sparsemap_merge(sparsemap_t *map, sparsemap_t *other)
       src_count--;
     }
   }
+  return 0;
 }
 
 void

@@ -5,9 +5,9 @@ SHARED_LIB = libsparsemap.so
 
 LIBS =  -lm
 #CFLAGS = -Wall -Wextra -Wpedantic -Of -std=c11 -Iinclude/ -fPIC $(LIBS)
-#CFLAGS = -Wall -Wextra -Wpedantic -Og -g -std=c11 -Iinclude/ -fPIC  $(LIBS)
+CFLAGS = -Wall -Wextra -Wpedantic -Og -g -std=c11 -Iinclude/ -fPIC  $(LIBS)
 #CFLAGS = -DSPARSEMAP_DIAGNOSTIC -DDEBUG -Wall -Wextra -Wpedantic -O0 -g -std=c11 -Iinclude/ -fPIC $(LIBS)
-CFLAGS = -DSPARSEMAP_DIAGNOSTIC -DDEBUG -Wall -Wextra -Wpedantic -Ofast -g -std=c11 -Iinclude/ -fPIC $(LIBS)
+#CFLAGS = -DSPARSEMAP_DIAGNOSTIC -DDEBUG -Wall -Wextra -Wpedantic -Ofast -g -std=c11 -Iinclude/ -fPIC $(LIBS)
 #CFLAGS = -Wall -Wextra -Wpedantic -Og -g -std=c11 -Iinclude/ -fPIC $(LIBS)
 #CFLAGS = -Wall -Wextra -Wpedantic -Ofast -g -std=c11 -Iinclude/ -fPIC $(LIBS)
 #CFLAGS = -DSPARSEMAP_DIAGNOSTIC -DDEBUG -Wall -Wextra -Wpedantic -Og -g -fsanitize=address,leak,object-size,pointer-compare,pointer-subtract,null,return,bounds,pointer-overflow,undefined -fsanitize-address-use-after-scope -std=c11 -Iinclude/ -fPIC $(LIBS)
@@ -39,15 +39,15 @@ $(SHARED_LIB): $(OBJS)
 
 examples: $(STATIC_LIB) $(EXAMPLES) $(TEST_OBJS)
 
-soak: tests/soak.c
-	tests/soak
-
 mls: examples/mls
 
-test: $(TESTS)
+tests: $(TESTS)
 
-check: test
+test: tests
 	env ASAN_OPTIONS=detect_leaks=1 LSAN_OPTIONS=verbosity=1:log_threads=1 ./tests/test
+
+soak: tests
+	env ASAN_OPTIONS=detect_leaks=1 LSAN_OPTIONS=verbosity=1:log_threads=1 ./tests/soak
 
 tests/test: $(TEST_OBJS) $(LIB_OBJS) $(STATIC_LIB)
 	$(CC) $^ -o $@ $(TEST_FLAGS)
@@ -76,19 +76,19 @@ examples/%.o: examples/%.c
 	$(CC) $(CFLAGS) -c -o $@ $^
 
 examples/ex_1:  $(LIB_OBJS) examples/ex_1.o $(STATIC_LIB)
-	$(CC) $^ -o $@ $(CFLAGS) $(TEST_FLAGS)
+	$(CC) $^ -o $@ $(TEST_FLAGS)
 
 examples/ex_2: $(LIB_OBJS) examples/ex_2.o $(STATIC_LIB)
-	$(CC) $^ -o $@ $(CFLAGS) $(TEST_FLAGS)
+	$(CC) $^ -o $@ $(TEST_FLAGS)
 
 examples/ex_3: $(LIB_OBJS) examples/ex_3.o $(STATIC_LIB)
-	$(CC) $^ -o $@ $(CFLAGS) $(TEST_FLAGS)
+	$(CC) $^ -o $@ $(TEST_FLAGS)
 
 examples/ex_4: $(LIB_OBJS) examples/ex_4.o $(STATIC_LIB)
-	$(CC) $^ -o $@ $(CFLAGS) $(TEST_FLAGS)
+	$(CC) $^ -o $@ $(TEST_FLAGS)
 
 tests/soak: $(LIB_OBJS) tests/soak.o $(STATIC_LIB)
-	$(CC) $^ -o $@ $(CFLAGS) $(TEST_FLAGS)
+	$(CC) $^ -o $@ $(TEST_FLAGS)
 
 todo:
 	rg -i 'todo|gsb|abort'

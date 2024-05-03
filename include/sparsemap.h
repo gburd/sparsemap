@@ -263,8 +263,10 @@ void sparsemap_scan(sparsemap_t *map, void (*scanner)(sm_idx_t vec[], size_t n, 
  *
  * @param[in] map The sparsemap reference.
  * @param[in] other The bitmap to merge into \b map.
+ * @returns 0 on success, -1 and sets errno to ENOSPC when the merge might
+ * require more space than available.
  */
-void sparsemap_merge(sparsemap_t *map, sparsemap_t *other);
+int sparsemap_merge(sparsemap_t *map, sparsemap_t *other);
 
 /** @brief Splits the bitmap by assigning all bits starting at \b offset to the
  * \b other bitmap while removing them from \b map.
