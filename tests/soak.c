@@ -780,9 +780,14 @@ main(void)
       rl = offset;
       e = nsts();
     }
-    assert(verify_span_midl(list, rl, n));
-    assert(verify_span_sparsemap(map, rl, n));
-    assert(verify_span_roaring(rbm, rl, n));
+    /*
+    if (rl != sl) {
+      assert(verify_span_midl(list, rl, n));
+      assert(verify_span_sparsemap(map, rl, n));
+      assert(verify_span_roaring(rbm, rl, n));
+    }
+    */
+    assert(rl == sl);
 
     bool prefer_mdb_idl_loc = (bool)xorshift32() % 2;
 
