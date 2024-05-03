@@ -87,7 +87,7 @@ xorshift32_seed(void)
 }
 
 void
-shuffle(int *array, size_t n) // TODO working?
+shuffle(int *array, size_t n)
 {
   for (size_t i = n - 1; i > 0; --i) {
     size_t j = xorshift32() % (i + 1);

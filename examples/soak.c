@@ -538,12 +538,10 @@ verify_sm_is_first_available_span(sparsemap_t *map, sparsemap_idx_t idx, size_t 
 {
   for (sparsemap_idx_t i = 0; i < idx + len; i++) {
     sparsemap_idx_t j = 0;
-    while (sparsemap_is_set(map, i + j) == value && j < len && j < idx + len) {
+    while (sparsemap_is_set(map, i + j) == value && j < len) {
       j++;
     }
-    if (j == len) {
-      return i == idx;
-    }
+    return i == idx;
   }
   return false;
 }
@@ -669,7 +667,6 @@ main(void)
     assert(_sparsemap_set(&map, pg, true) == pg);
   }
   mdb_midl_sort(list);
-  stats(0, map, list);
   assert(verify_sm_eq_ml(map, list));
 
   double b, e;
@@ -774,8 +771,8 @@ main(void)
 
     assert(verify_sm_eq_ml(map, list));
 
-    // Once we've used half of the free list, let's replenish it a bit.
-    if (list[0] < amt / 2) {
+    // Once we've used a tenth of the free list, let's replenish it a bit.
+    if (list[0] < amt / 10) {
       do {
         pgno_t pgno;
         size_t len, retries = amt;
@@ -817,7 +814,7 @@ main(void)
     // every so often, either ...
     if (iterations % 1000 == 0) {
     larger_please:;
-      size_t COUNT = xorshift32() % 1024 + 513;
+      size_t COUNT = xorshift32() % 3586 + 513;
       // ... add some amount of 4KiB pages, or
       size_t len = COUNT;
       // The largest page is at list[1] because this is a reverse sorted list.
@@ -873,8 +870,9 @@ main(void)
         }
       }
     }
-    iterations++;
     stats(iterations, map, list);
+    // printf("\033[K%zu\r", iterations);
+    iterations++;
   }
 
   return 0;

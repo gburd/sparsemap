@@ -46,7 +46,6 @@ populate_map(sparsemap_t *map, int size, int max_value)
   int array[size];
 
   setup_test_array(array, size, max_value);
-  // TODO ensure_sequential_set(array, size, 10);
   shuffle(array, size);
   for (int i = 0; i < size; i++) {
     sparsemap_set(map, array[i], true);
@@ -995,14 +994,6 @@ test_api_span(const MunitParameter params[], void *data)
   located_at = sparsemap_span(map, placed_at / 2, 50, true);
   assert_true(located_at == placed_at);
 
-  /* TODO
-  sparsemap_clear(map);
-
-  placed_at = sm_add_span(map, amt, amt - 1);
-  located_at = sparsemap_span(map, 0, amt - 1, true);
-  assert_true(located_at == placed_at);
-   */
-
   return MUNIT_OK;
 }
 
@@ -1070,7 +1061,6 @@ test_scale_lots_o_spans(const MunitParameter params[], void *data)
 
   for (size_t i = 0; i < amt;) {
     int l = i % 31 + 16;
-    // TODO: sm_add_span(map, amt, l);
     sm_add_span(map, 10000, l);
     if (errno == ENOSPC) {
       map = sparsemap_set_data_size(map, sparsemap_get_capacity(map) * 2, NULL);
@@ -1250,8 +1240,6 @@ test_scale_best_case(const MunitParameter params[], void *data)
      So, in a 1KiB buffer you have:
        (1024 KiB / 8 bytes) * 2048 = 268,435,456 bits
      or 1.09 TiB of 4KiB pages. Let's investigate, and find out if that's the case.
-
-     TODO: Actually, 172032 are stored before SEGV, or 706 MiB of 4KiB pages.
   */
 
   /* Set every bit on, that should be the best case. */
@@ -1296,8 +1284,6 @@ test_scale_worst_case(const MunitParameter params[], void *data)
      So, in a 1KiB buffer you have:
        (1024 KiB / 264 bytes) * 2048 = 8,134,407.75758 bits
      or 33.3 GiB of 4KiB pages. Let's investigate, and find out if that's the case.
-
-     TODO: actually 7744 are stored before SEGV, or 31MiB of 4KiB pages.
   */
 
   /* Set every other bit, that has to be the "worst case" for this index. */
@@ -1336,26 +1322,16 @@ static MunitResult
 test_perf_span_solo(const MunitParameter params[], void *data)
 {
   sparsemap_t *map = (sparsemap_t *)data;
-  // double stop, start;
   (void)params;
   int located_at, placed_at, amt = 500;
 
   assert_ptr_not_null(map);
-  return MUNIT_OK; // TODO
 
   for (int i = 1; i < amt; i++) {
     for (int length = 1; length <= 100; length++) {
       sparsemap_clear(map);
       placed_at = sm_add_span(map, amt, length);
-      // logf("i = %d, length = %d\tplaced_at %d\n", i, length, placed_at);
-      // sm_whats_set(map, 5000);
-      // start = nsts();
       located_at = sparsemap_span(map, 0, length, true);
-      // stop = nsts();
-      // double amt = (stop - start) * 1e6;
-      // if (amt > 0) {
-      //   fprintf(stdout, "%0.8f\n", amt);
-      // }
       if (placed_at != located_at)
         logf("a: i = %d, length = %d\tplaced_at %d located_at %d\n", i, length, placed_at, located_at);
     }

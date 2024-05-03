@@ -38,7 +38,6 @@
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wpedantic"
 #pragma GCC diagnostic ignored "-Wvariadic-macros"
-#include <stdarg.h>
 #define __sm_diag(format, ...) __sm_diag_(__FILE__, __LINE__, __func__, format, ##__VA_ARGS__)
 #pragma GCC diagnostic pop
 void __attribute__((format(printf, 4, 5))) __sm_diag_(const char *file, int line, const char *func, const char *format, ...)
@@ -236,7 +235,7 @@ __sm_chunk_map_set_capacity(__sm_chunk_t *map, size_t capacity)
 
   size_t reduced = 0;
   register uint8_t *p = (uint8_t *)map->m_data;
-  for (ssize_t i = sizeof(sm_bitvec_t) - 1; i >= 0; i--) { // TODO:
+  for (ssize_t i = sizeof(sm_bitvec_t) - 1; i >= 0; i--) {
     for (int j = SM_FLAGS_PER_INDEX_BYTE - 1; j >= 0; j--) {
       p[i] &= ~((sm_bitvec_t)SM_PAYLOAD_ONES << (j * 2));
       p[i] |= ((sm_bitvec_t)SM_PAYLOAD_NONE << (j * 2));
@@ -1105,7 +1104,7 @@ sparsemap_set(sparsemap_t *map, sparsemap_idx_t idx, bool value)
     __sm_append_data(map, &buf[0], sizeof(buf));
 
     uint8_t *p = __sm_get_chunk_map_data(map, 0);
-    *(sm_idx_t *)p = __sm_get_fully_aligned_offset(idx); // TODO was not fully aligned before... why?
+    *(sm_idx_t *)p = __sm_get_fully_aligned_offset(idx);
 
     __sm_set_chunk_map_count(map, 1);
 
@@ -1582,18 +1581,18 @@ sparsemap_span(sparsemap_t *map, sparsemap_idx_t idx, size_t len, bool value)
 {
   size_t rank, nth;
   sm_bitvec_t vec = 0;
-  sparsemap_idx_t offset = 0;
+  sparsemap_idx_t offset;
 
   /* When skipping forward to `idx` offset in the map we can determine how
      many selects we can avoid by taking the rank of the range and starting
      at that bit. */
-  nth = (idx < 1) ? 0 : sparsemap_rank(map, 0, idx - 1, value);
+  nth = (idx == 0) ? 0 : sparsemap_rank(map, 0, idx - 1, value);
   /* Find the first bit that matches value, then... */
   offset = sparsemap_select(map, nth, value);
   do {
     /* See if the rank of the bits in the range starting at offset is equal
        to the desired amount. */
-    rank = len == 1 ? 1 : sparsemap_rank_vec(map, offset, offset + len - 1, value, &vec);
+    rank = (len == 1) ? 1 : sparsemap_rank_vec(map, offset, offset + len - 1, value, &vec);
     if (rank >= len) {
       /* We've found what we're looking for, return the index of the first
          bit in the range. */
@@ -1602,13 +1601,10 @@ sparsemap_span(sparsemap_t *map, sparsemap_idx_t idx, size_t len, bool value)
     /* Now we try to jump forward as much as possible before we look for a
        new match. We do this by counting the remaining bits in the returned
        vec from the call to rank_vec(). */
-    int amt = 0;
-    if (vec == 0) {
-      /* The returned vec had no set bits, let's move forward in the map. */
-      amt = (rank == 0) ? len : 1;
-    } else {
-      /* We might be able to jump forward up to 64 bit positions saving us repeated
-         calls to select()/rank(). */
+    int amt = 1;
+    if (vec > 0) {
+      /* The returned vec had som set bits, let's move forward in the map as much
+         as possible (max: 64 bit positions). */
       int max = len > SM_BITS_PER_VECTOR ? SM_BITS_PER_VECTOR : len;
       while (amt < max && (vec & 1 << amt)) {
         amt++;
