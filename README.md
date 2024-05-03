@@ -1,5 +1,9 @@
 # Sparsemap
 
+Bitsets, also called bitmaps, are commonly used as fast data structures.
+Unfortunately, they can use too much memory. To compensate, we often use
+compressed bitmaps.
+
 `sparsemap` is a sparse, compressed bitmap. In best case, it can store 2048
 bits in just 8 bytes. In worst case, it stores the 2048 bits uncompressed and
 requires additional 8 bytes of overhead.
@@ -14,7 +18,7 @@ On the lowest level stores bits in sm_bitvec_t's (a uint32_t or uint64_t).
 
 Each sm_bitvec_t has an additional descriptor (2 bits). A single word prepended
 to each sm_bitvec_t describes its condition. The descriptor word and the
-sm_bitvec_t's have the same size.) The descriptor of a sm_bitvec_t
+sm_bitvec_t's have the same size. The descriptor of a sm_bitvec_t
 specifies whether the sm_bitvec_t consists only of set bits ("1"), unset
 bits ("0") or has a mixed payload. In the first and second case the
 sm_bitvec_t is not stored.
@@ -45,7 +49,8 @@ offset 0, the second starts at offset 8192).
 
 ## Usage instructions
 
-The file `examples/ex_1.c` has example code.
+Copy the files `src/sparsemap.c` and `include/sparsemap.h` into your project.
+Review the `examples/*` and `tests/*` code.
 
 ## Final words
 
@@ -58,7 +63,10 @@ However, if the sequence is not consecutive and has gaps, it's possible that
 the compression is inefficient, and the size (in the worst case) is identical
 to an uncompressed bit vector (sometimes higher due to the bytes required for
 metadata). In such cases, other compression schemes are more efficient (i.e.
-http://lemire.me/blog/archives/2008/08/20/the-mythical-bitmap-index/).
+http://lemire.me/blog/archives/2008/08/20/the-mythical-bitmap-index/).  We
+include in `lib` the amalgamated (git `2dc8070`) and well-known
+[Roaring Bitmaps](https://github.com/RoaringBitmap/CRoaring/tree/master) and
+use it in the soak test to ensure our results are as accurate as theirs.
 
 This library was originally created for [hamsterdb](http://hamsterdb.com) in
 C++ and then translated to C and further improved by Greg Burd <greg@burd.me>

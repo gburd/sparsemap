@@ -1270,6 +1270,7 @@ sparsemap_merge(sparsemap_t *map, sparsemap_t *other)
   uint8_t *src, *dst;
   size_t src_count = __sm_get_chunk_map_count(other), dst_count = __sm_get_chunk_map_count(map), max_chunk_count = src_count + dst_count;
 
+  // TODO: ensure there is space, or ENOSPC
   dst = __sm_get_chunk_map_data(map, 0);
   src = __sm_get_chunk_map_data(other, 0);
   for (size_t i = 0; i < max_chunk_count && src_count; i++) {

@@ -6,9 +6,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "../include/common.h"
+#include "../include/roaring.h"
 #include "../include/sparsemap.h"
-#include "../tests/common.h"
-#include "../tests/tdigest.h"
+#include "../include/tdigest.h"
 
 /* midl.h ------------------------------------------------------------------ */
 /** @defgroup idls	ID List Management
@@ -512,6 +513,17 @@ verify_empty_midl(MDB_IDL list, pgno_t pg, unsigned len)
 }
 
 bool
+verify_span_roaring(roaring_bitmap_t *rbm, pgno_t pg, unsigned len)
+{
+  for (pgno_t i = pg; i < pg + len; i++) {
+    if (roaring_bitmap_contains(rbm, i) != true) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool
 verify_span_sparsemap(sparsemap_t *map, pgno_t pg, unsigned len)
 {
   for (pgno_t i = pg; i < pg + len; i++) {
@@ -534,6 +546,17 @@ verify_empty_sparsemap(sparsemap_t *map, pgno_t pg, unsigned len)
 }
 
 bool
+verify_empty_roaring(roaring_bitmap_t *rbm, pgno_t pg, unsigned len)
+{
+  for (pgno_t i = 0; i < len; i++) {
+    if (roaring_bitmap_contains(rbm, pg + i) != false) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool
 verify_sm_is_first_available_span(sparsemap_t *map, sparsemap_idx_t idx, size_t len, bool value)
 {
   for (sparsemap_idx_t i = 0; i < idx + len; i++) {
@@ -546,6 +569,23 @@ verify_sm_is_first_available_span(sparsemap_t *map, sparsemap_idx_t idx, size_t 
     }
   }
   return false;
+}
+
+bool
+verify_sm_eq_rm(sparsemap_t *map, roaring_bitmap_t *rbm)
+{
+  uint64_t max = roaring_bitmap_maximum(rbm);
+  roaring_uint32_iterator_t iter;
+  roaring_iterator_init(rbm, &iter);
+  for (uint64_t i = 0; i <= max; i++) {
+    if (i == iter.current_value) {
+      assert(sparsemap_is_set(map, i) == true);
+      roaring_uint32_iterator_advance(&iter);
+    } else {
+      assert(sparsemap_is_set(map, i) == false);
+    }
+  }
+  return true;
 }
 
 bool
@@ -637,7 +677,6 @@ int
 main(void)
 {
   size_t replenish = 0, iterations = 0;
-  bool prefer_mdb_idl_location = (bool)xorshift32() % 2;
 
   // disable buffering
 #ifdef DEBUG
@@ -657,6 +696,7 @@ main(void)
   sparsemap_idx_t amt = INITIAL_AMOUNT;
   MDB_IDL list = mdb_midl_alloc(amt);
   sparsemap_t *map = sparsemap(INITIAL_AMOUNT);
+  roaring_bitmap_t *rbm = roaring_bitmap_create();
 
   // start with 2GiB of 4KiB free pages to track:
   //  - MDB_IDL requires one int for each free page
@@ -665,16 +705,19 @@ main(void)
   for (sparsemap_idx_t pg = 0; pg < amt; pg++) {
     // We list every free (unallocated) page in the IDL, while...
     mdb_midl_xappend(list, pg);
-    // ... true (unset in the bitmap) indicates free in the bitmap.
+    // ... true (unset in the bitmap) indicates free in the bitmap, ...
     assert(_sparsemap_set(&map, pg, true) == pg);
+    assert(roaring_bitmap_add_checked(rbm, pg));
   }
   mdb_midl_sort(list);
+  roaring_bitmap_run_optimize(rbm);
   assert(verify_sm_eq_ml(map, list));
+  assert(verify_sm_eq_rm(map, rbm));
 
   double b, e;
   while (1) {
     unsigned mi;
-    pgno_t ml, sl;
+    pgno_t ml, sl, rl;
 
     // get an amount [1, 16] of pages to find preferring smaller sizes
     unsigned n = toss(15) + 1;
@@ -707,6 +750,7 @@ main(void)
     }
     assert(verify_span_midl(list, ml, n));
     assert(verify_span_sparsemap(map, ml, n));
+    assert(verify_span_roaring(rbm, ml, n));
 
     // find a set of pages using the Sparsemap
     {
@@ -720,9 +764,30 @@ main(void)
     }
     assert(verify_span_midl(list, sl, n));
     assert(verify_span_sparsemap(map, sl, n));
+    assert(verify_span_roaring(rbm, sl, n));
+
+    // find a set of pages using the Roaring Bitmap
+    {
+      b = nsts();
+      uint64_t max = roaring_bitmap_maximum(rbm);
+      uint64_t offset = roaring_bitmap_minimum(rbm);
+      do {
+        if (n == 1 || roaring_bitmap_range_cardinality(rbm, offset, offset + n) == n) {
+          break;
+        }
+        offset++;
+      } while (offset <= max);
+      rl = offset;
+      e = nsts();
+    }
+    assert(verify_span_midl(list, rl, n));
+    assert(verify_span_sparsemap(map, rl, n));
+    assert(verify_span_roaring(rbm, rl, n));
+
+    bool prefer_mdb_idl_loc = (bool)xorshift32() % 2;
 
     // acquire the set of pages within the list
-    if (prefer_mdb_idl_location) {
+    if (prefer_mdb_idl_loc) {
       b = nsts();
       unsigned j, num = n;
       int i = mi;
@@ -755,7 +820,7 @@ main(void)
     }
 
     // acquire the set of pages within the sparsemap
-    if (prefer_mdb_idl_location) {
+    if (prefer_mdb_idl_loc) {
       b = nsts();
       for (pgno_t i = ml; i < ml + n; i++) {
         assert(_sparsemap_set(&map, i, false) == i);
@@ -771,7 +836,20 @@ main(void)
       td_add(b_span_take, e - b, 1);
     }
 
+    // acquire the set of pages within the roaring bitmap
+    if (prefer_mdb_idl_loc) {
+      b = nsts();
+      roaring_bitmap_remove_range(rbm, ml, ml + n);
+      e = nsts();
+    } else {
+      b = nsts();
+      roaring_bitmap_remove_range(rbm, sl, sl + n);
+      e = nsts();
+    }
+    roaring_bitmap_run_optimize(rbm);
+
     assert(verify_sm_eq_ml(map, list));
+    assert(verify_sm_eq_rm(map, rbm));
 
     // Once we've used a tenth of the free list, let's replenish it a bit.
     if (list[0] < amt / 10) {
@@ -790,7 +868,9 @@ main(void)
         if (SPARSEMAP_FOUND(pgno)) {
           assert(verify_empty_midl(list, pgno, len));
           assert(verify_empty_sparsemap(map, pgno, len));
+          assert(verify_empty_roaring(rbm, pgno, len));
           assert(verify_sm_eq_ml(map, list));
+          assert(verify_sm_eq_rm(map, rbm));
           if (list[-1] - list[0] < len) {
             mdb_midl_need(&list, list[-1] + len);
           }
@@ -801,13 +881,16 @@ main(void)
             assert(verify_midl_contains(list, i) == true);
             assert(_sparsemap_set(&map, i, true) == i);
             assert(sparsemap_is_set(map, i) == true);
+            assert(roaring_bitmap_add_checked(rbm, i) == true);
           }
           mdb_midl_sort(list);
           assert(verify_midl_nodups(list));
           assert(verify_span_midl(list, pgno, len));
           assert(verify_span_sparsemap(map, pgno, len));
+          assert(verify_span_roaring(rbm, pgno, len));
         }
         assert(verify_sm_eq_ml(map, list));
+        assert(verify_sm_eq_rm(map, rbm));
         replenish++;
       } while (list[0] < amt - 32);
     }
@@ -821,10 +904,10 @@ main(void)
       size_t len = COUNT;
       // The largest page is at list[1] because this is a reverse sorted list.
       pgno_t pg = list[0] ? list[1] + 1 : 0;
-      //      if (toss(6) + 1 < 7) {
-      if (true) { // disable shrinking for now...
+      if (true) { // disable shrinking for now... (toss(6) + 1 < 7)
         MDB_IDL new_list = mdb_midl_alloc(len);
         sparsemap_t *new_map = sparsemap(INITIAL_AMOUNT);
+        roaring_bitmap_t *new_rbm = roaring_bitmap_create();
         for (size_t i = 0; i < len; i++) {
           pgno_t gp = (pg + len) - i;
           new_list[i + 1] = gp;
@@ -832,8 +915,11 @@ main(void)
           assert(verify_midl_contains(new_list, gp) == true);
           assert(_sparsemap_set(&new_map, gp, true) == gp);
           assert(sparsemap_is_set(new_map, gp));
+          assert(roaring_bitmap_add_checked(new_rbm, gp));
+          assert(roaring_bitmap_contains(new_rbm, gp));
         }
         assert(verify_sm_eq_ml(new_map, new_list));
+        assert(verify_sm_eq_rm(new_map, new_rbm));
         {
           b = nsts();
           mdb_midl_append_list(&list, new_list);
@@ -856,19 +942,37 @@ main(void)
           assert(sparsemap_is_set(map, gp));
         }
         free(new_map);
+        {
+          b = nsts();
+          roaring_bitmap_or_inplace(rbm, new_rbm);
+          e = nsts();
+        }
+        for (size_t i = 0; i < len; i++) {
+          pgno_t gp = (pg + len) - i;
+          assert(roaring_bitmap_contains(rbm, gp));
+        }
+        roaring_free(new_rbm);
       } else {
         if (list[-1] > INITIAL_AMOUNT) {
           // ... a fraction of the time, remove COUNT / 2 of 4KiB pages.
-          pgno_t pg;
-          for (size_t i = 0; i < COUNT; i++) {
-            pg = list[list[0] - i];
-            assert(sparsemap_is_set(map, pg) == true);
-            assert(_sparsemap_set(&map, pg, false) == pg);
+          {
+            pgno_t pg;
+            for (size_t i = 0; i < COUNT; i++) {
+              pg = list[list[0] - i];
+              assert(sparsemap_is_set(map, pg) == true);
+              assert(_sparsemap_set(&map, pg, false) == pg);
+            }
           }
-          mdb_midl_shrink_to(&list, list[0] - COUNT);
+          {
+            roaring_bitmap_remove_range_closed(rbm, list[list[0] - COUNT], list[list[0]]);
+          }
+          {
+            mdb_midl_shrink_to(&list, list[0] - COUNT);
+          }
           assert(list[list[0]] != pg);
           assert(verify_midl_nodups(list));
           verify_sm_eq_ml(map, list);
+          verify_sm_eq_rm(map, rbm);
         }
       }
     }

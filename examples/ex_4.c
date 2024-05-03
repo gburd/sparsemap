@@ -1,10 +1,9 @@
 #include <assert.h>
+#include <common.h>
+#include <sparsemap.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
-
-#include "../include/sparsemap.h"
-#include "../tests/common.h"
 
 #define TEST_ARRAY_SIZE 1024
 

@@ -1,10 +1,9 @@
 #include <assert.h>
+#include <common.h>
+#include <sparsemap.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
-
-#include "../include/sparsemap.h"
-#include "../tests/common.h"
 
 int
 main(void)

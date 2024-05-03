@@ -5,7 +5,6 @@
     # nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     nixpkgs.url = "github:NixOS/nixpkgs/23.11";
     utils.url = "github:numtide/flake-utils";
-    utils.inputs.nixpkgs.follows = "nixpkgs";
   };
 
   outputs = { self, nixpkgs, ... }
@@ -18,38 +17,39 @@
             config.allowUnfree = true;
           };
       in {
-      devShell = pkgs.mkShell rec {
-        name = "sparsemap";
-        packages = with pkgs; [
-          act
-          autoconf
-          clang
-          ed
-          gcc
-          gdb
-          gettext
-          graphviz-nox
-          libtool
-          m4
-          perl
-          pkg-config
-          python3
-          ripgrep
-          valgrind
-        ];
+        flake-utils.inputs.systems.follows = "system";
+        devShell = pkgs.mkShell rec {
+          name = "sparsemap";
+          packages = with pkgs; [
+            act
+            autoconf
+            clang
+            ed
+            gcc
+            gdb
+            gettext
+            graphviz-nox
+            libtool
+            m4
+            perl
+            pkg-config
+            python3
+            ripgrep
+            valgrind
+          ];
 
-        buildInputs = with pkgs; [
-          libbacktrace
-          glibc.out
-          glibc.static
-        ];
+          buildInputs = with pkgs; [
+            libbacktrace
+            glibc.out
+            glibc.static
+          ];
 
-        shellHook = let
-          icon = "f121";
-        in ''
+          shellHook = let
+            icon = "f121";
+          in ''
         export PS1="$(echo -e '\u${icon}') {\[$(tput sgr0)\]\[\033[38;5;228m\]\w\[$(tput sgr0)\]\[\033[38;5;15m\]} (${name}) \\$ \[$(tput sgr0)\]"
         '';
-      };
-      DOCKER_BUILDKIT = 1;
-    });
+        };
+        DOCKER_BUILDKIT = 1;
+      });
 }

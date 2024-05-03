@@ -3,7 +3,7 @@
 **/*.o
 tests/test
 examples/ex_?
-examples/soak
+tests/soak
 .cache
 hints.txt
 tmp/
@@ -28,6 +28,7 @@ compile_commands.json
 *.dat
 *.fsm
 *.db
+.vscode/
 
 # Created by https://www.gitignore.io/api/jetbrains
 # Edit at https://www.gitignore.io/?templates=jetbrains
