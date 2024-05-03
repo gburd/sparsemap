@@ -10,22 +10,23 @@
     clang
     clang-tools
     ed
+    fira-code-nerdfont
     gcc
     gdb
     gettext
+    glibc.out
+    glibc.static
+    gnumake
     graphviz-nox
+    libbacktrace
     libtool
     lldb
     m4
-    gnumake
     neovim
     perl
     pkg-config
     python3
     ripgrep
-    libbacktrace
-    glibc.out
-    glibc.static
     # pkgs.python311
     # pkgs.python311Packages.pip
   ];
@@ -34,39 +35,37 @@
   idx = {
     # Search for the extensions you want on https://open-vsx.org/ and use "publisher.id"
     extensions = [
-      "vscodevim.vim"
       "asvetliakov.vscode-neovim"
       "coolbear.systemd-unit-file"
       "dotjoshjohnson.xml"
-      "eamodio.gitlens"
       "editorconfig.editorconfig"
       "esbenp.prettier-vscode"
-      "github.copilot"
-      "github.vscode-github-actions"
       "golang.go"
-      #"jnoortheen.nix-ide"
       "mads-hartmann.bash-ide-vscode"
       "ms-azuretools.vscode-docker"
       "ms-python.python"
       "ms-python.vscode-pylance"
+      "ms-vscode.clangd"
       "ms-vscode.cmake-tools"
       "ms-vscode.cpptools"
       "ms-vscode.cpptools-extension-pack"
       "ms-vscode.makefile-tools"
       "ms-vsliveshare.vsliveshare"
+      "mspython.debugpy"
       "redhat.vscode-yaml"
+      "rogalmic.bash-debug"
       "ryu1kn.partial-diff"
       "scala-lang.scala"
       "scalameta.metals"
       "streetsidesoftware.code-spell-checker"
       "timonwong.shellcheck"
-      "tuttieee.emacs-mcx"
-      "vscode-icons-team.vscode-icons"
-      "yzhang.markdown-all-in-one"
-      "rogalmic.bash-debug"
-      "znck.grammarly"
       "twxs.cmake"
-      "mspython.debugpy"
+      "vadimcn.vscode-lldb"
+      "vscode-icons-team.vscode-icons"
+      "vscodevim.vim"
+      "yzhang.markdown-all-in-one"
+      "znck.grammarly"
+      #"jnoortheen.nix-ide"
     ];
     # Enable previews
     previews = {
