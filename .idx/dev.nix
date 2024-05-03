@@ -14,7 +14,10 @@
     gettext
     graphviz-nox
     libtool
+    lldb
     m4
+    gnumake
+    neovim
     perl
     pkg-config
     python3
@@ -40,7 +43,7 @@
       "github.copilot"
       "github.vscode-github-actions"
       "golang.go"
-      "jnoortheen.nix-ide"
+      #"jnoortheen.nix-ide"
       "mads-hartmann.bash-ide-vscode"
       "ms-azuretools.vscode-docker"
       "ms-python.python"
@@ -61,6 +64,8 @@
       "yzhang.markdown-all-in-one"
       "rogalmic.bash-debug"
       "znck.grammarly"
+      "twxs.cmake"
+      "mspython.debugpy"
     ];
     # Enable previews
     previews = {
