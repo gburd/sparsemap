@@ -4,9 +4,9 @@ Bitsets, also called bitmaps, are commonly used as fast data structures.
 Unfortunately, they can use too much memory. To compensate, we often use
 compressed bitmaps.
 
-`sparsemap` is a sparse, compressed bitmap. In best case, it can store 2048
-bits in just 8 bytes. In worst case, it stores the 2048 bits uncompressed and
-requires additional 8 bytes of overhead.
+`sparsemap` is a sparse, compressed bitmap. In the best case, it can store 2048
+bits in just 8 bytes. In the worst case, it stores the 2048 bits uncompressed and
+requires an additional 8 bytes of overhead.
 
 The "best" case happens when large consecutive sequences of the bits are
 either set ("1") or not set ("0"). If your numbers are consecutive 64bit
@@ -20,7 +20,7 @@ Each sm_bitvec_t has an additional descriptor (2 bits). A single word prepended
 to each sm_bitvec_t describes its condition. The descriptor word and the
 sm_bitvec_t's have the same size. The descriptor of a sm_bitvec_t
 specifies whether the sm_bitvec_t consists only of set bits ("1"), unset
-bits ("0") or has a mixed payload. In the first and second case the
+bits ("0") or has a mixed payload. In the first and second cases, the
 sm_bitvec_t is not stored.
 
 An example shows a sequence of 4 x 16 bits (here, each sm_bitvec_t and the
@@ -40,9 +40,9 @@ The actual memory sequence looks like this:
       0000000011001110 0110010101111001
 
 Instead of storing 8 Words (16 bytes), we only store 2 Words (2 bytes): one
-for the descriptor, one for last sm_bitvec_t #7.
+for the descriptor, and one for the last sm_bitvec_t #7.
 
-The sparsemap stores a list of chunk maps, and for each chunk map it stores the
+The sparsemap stores a list of chunk maps, and for each chunk map, it stores the
 absolute address (i.e. if the user sets bit 0 and bit 10000, and the chunk map
 capacity is 2048, the sparsemap creates two chunk maps; the first starts at
 offset 0, the second starts at offset 8192).
@@ -55,9 +55,9 @@ Review the `examples/*` and `tests/*` code.
 ## Final words
 
 This bitmap has efficient compression when used on long sequences of set (or
-unset) bits (i.e. with a word size of 64bit, and a payload of consecutive
+unset) bits (i.e. with a word size of 64 bit and a payload of consecutive
 numbers without gaps, the payload of 2048 x sizeof(uint64_t) = 16kb will occupy
-only 8 bytes!
+only 8 bytes!).
 
 However, if the sequence is not consecutive and has gaps, it's possible that
 the compression is inefficient, and the size (in the worst case) is identical
@@ -68,6 +68,6 @@ include in `lib` the amalgamated (git `2dc8070`) and well-known
 [Roaring Bitmaps](https://github.com/RoaringBitmap/CRoaring/tree/master) and
 use it in the soak test to ensure our results are as accurate as theirs.
 
-This library was originally created for [hamsterdb](http://hamsterdb.com) in
+This library was created for [hamsterdb](http://hamsterdb.com) in
 C++ and then translated to C and further improved by Greg Burd <greg@burd.me>
 for use in LMDB and OpenLDAP.
