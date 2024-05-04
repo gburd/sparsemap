@@ -976,6 +976,19 @@ sparsemap(size_t size)
 }
 
 sparsemap_t *
+sparsemap_copy(sparsemap_t *other)
+{
+  size_t cap = sparsemap_get_capacity(other);
+  sparsemap_t *map = sparsemap(cap);
+  if (map) {
+    map->m_capacity = other->m_capacity;
+    map->m_data_used = other->m_data_used;
+    memcpy(map->m_data, other->m_data, cap);
+  }
+  return map;
+}
+
+sparsemap_t *
 sparsemap_wrap(uint8_t *data, size_t size)
 {
   sparsemap_t *map = (sparsemap_t *)calloc(1, sizeof(sparsemap_t));
@@ -1273,11 +1286,12 @@ sparsemap_merge(sparsemap_t *map, sparsemap_t *other)
   size_t src_count = __sm_get_chunk_map_count(other);
   size_t dst_count = __sm_get_chunk_map_count(map);
   size_t max_chunk_count = src_count + dst_count;
+  ssize_t difference = map->m_capacity - (other->m_data_used + src_count * (sizeof(sm_idx_t) + sizeof(sm_bitvec_t) * 2));
 
   /* Estimate worst-case overhead required for merge. */
-  if (map->m_data_used + src_count * (sizeof(sm_idx_t) + sizeof(sm_bitvec_t) * 2) > map->m_capacity) {
+  if (difference <= 0) {
     errno = ENOSPC;
-    return -1;
+    return -difference;
   }
 
   dst = __sm_get_chunk_map_data(map, 0);
