@@ -633,11 +633,11 @@ sparsemap_idx_t
 _sparsemap_merge(sparsemap_t **map, sparsemap_t *other)
 {
   do {
-    ssize_t retval = sparsemap_merge(*map, other);
+    int retval = sparsemap_merge(*map, other);
     if (retval != 0) {
       if (errno == ENOSPC) {
 	size_t new_size = retval + (64 - (retval % 64)) + 64;
-        *map = sparsemap_set_data_size(*map, sparsemap_get_capacity(*map) + , NULL);
+        *map = sparsemap_set_data_size(*map, sparsemap_get_capacity(*map) + new_size, NULL);
         assert(*map != NULL);
         errno = 0;
       } else {
