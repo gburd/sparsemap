@@ -23,6 +23,7 @@
     lldb
     m4
     neovim
+    openssh
     perl
     pkg-config
     python3
@@ -31,7 +32,9 @@
     # pkgs.python311Packages.pip
   ];
   # Sets environment variables in the workspace
-  env = { };
+  env = {
+    GIT_SSH_COMMAND="ssh -i ~/.ssh/id_ed25519 -F /dev/null";
+  };
   idx = {
     # Search for the extensions you want on https://open-vsx.org/ and use "publisher.id"
     extensions = [
