@@ -110,6 +110,12 @@ typedef uint64_t sm_bitvec_t;
  */
 sparsemap_t *sparsemap(size_t size);
 
+/** @brief Allocate a new, copy of the \b other sparsemap_t.
+ *
+ * @param[in] other The sparsemap to copy.
+ */
+sparsemap_t *sparsemap_copy(sparsemap_t *other);
+
 /** @brief Allocate a new, empty sparsemap_t that references (wraps) the buffer
  * \b data of \b size bytes to use for storage of bitmap data.
  *
