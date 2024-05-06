@@ -100,7 +100,7 @@ typedef uint64_t sm_bitvec_t;
  *
  * The buffer used for the bitmap is allocated in the same heap allocation as
  * the structure, this means that you only need to call free() on the returned
- * object to free all resources.  Using this method it is allowable to grow the
+ * object to free all resources.  Using this method allows you to grow the
  * buffer size by calling #sparsemap_set_data_size().  This function calls
  * #sparsemap_init().
  *
@@ -122,9 +122,9 @@ sparsemap_t *sparsemap_copy(sparsemap_t *other);
  * This function allocates a new sparsemap_t but not the buffer which is
  * provided by the caller as \b data which can be allocated on the stack or
  * heap.  Caller is responsible for calling free() on the returned heap object
- * and releasing the memory used for \b data.  Resizing the buffer is not
- * directly supported, you may attempt to resize by calling
- * #sparsemap_set_data_size() with the potentially relocated address of \b data.
+ * and releasing the memory used for \b data.  Resizing the buffer is only
+ * supported when the heap object for the map includes the buffer and the
+ * \b data offset supplied is relative to the object (see #sparsemap()).
  * This function calls #sparsemap_init().
  *
  * @param[in] data A heap or stack memory buffer of \b size for use storing
@@ -168,7 +168,7 @@ void sparsemap_init(sparsemap_t *map, uint8_t *data, size_t size);
 void sparsemap_open(sparsemap_t *map, uint8_t *data, size_t size);
 
 /** @brief Resets values and empties the buffer making it ready to accept new
- *  data.
+ *  data but does not free the memory.
  *
  * @param[in] map The sparsemap reference.
  */
@@ -195,7 +195,7 @@ void sparsemap_clear(sparsemap_t *map);
  * @note The resizing of caller supplied allocated objects is not yet fully
  * supported.
  */
-sparsemap_t *sparsemap_set_data_size(sparsemap_t *map, size_t size, uint8_t *data);
+sparsemap_t *sparsemap_set_data_size(sparsemap_t *map, uint8_t *data, size_t size);
 
 /** @brief Calculate remaining capacity, approaches 0 when full.
  *
@@ -264,8 +264,7 @@ size_t sparsemap_get_size(sparsemap_t *map);
  */
 void sparsemap_scan(sparsemap_t *map, void (*scanner)(sm_idx_t vec[], size_t n, void *aux), size_t skip, void *aux);
 
-/** @brief Merges the values from \b other into the \b map, \b other is unchanged.
- * \b other bitmap while removing them from \b map.
+/** @brief Merges the values from \b other into \b map, \b other is unchanged.
  *
  * @param[in] map The sparsemap reference.
  * @param[in] other The bitmap to merge into \b map.
@@ -277,7 +276,7 @@ int sparsemap_merge(sparsemap_t *map, sparsemap_t *other);
 /** @brief Splits the bitmap by assigning all bits starting at \b offset to the
  * \b other bitmap while removing them from \b map.
  *
- * The split must occur on a vector boundary.
+ * The \b other bitmap is expected to be empty.
  *
  * @param[in] map The sparsemap reference.
  * @param[in] offset The 0-based offset into the bitmap at which to split.
@@ -327,14 +326,14 @@ size_t sparsemap_rank(sparsemap_t *map, size_t x, size_t y, bool value);
  * matching \b value in the bitmap.
  *
  * @param[in] map The sparsemap reference.
- * @param[in] idx 0-based start of search within the bitmap.
+ * @param[in] start 0-based start of search within the bitmap.
  * @param[in] len The length of contiguous bits we're seeking.
  * @param[in] value Determines if the scan is to find all set (true) or unset
  * (false) bits of \b len.
  * @returns the index of the first bit matching the criteria; when not found
  * found SPARSEMAP_IDX_MAX
  */
-size_t sparsemap_span(sparsemap_t *map, sparsemap_idx_t idx, size_t len, bool value);
+size_t sparsemap_span(sparsemap_t *map, sparsemap_idx_t start, size_t len, bool value);
 
 #if defined(__cplusplus)
 }

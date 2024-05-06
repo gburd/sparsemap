@@ -102,7 +102,7 @@ test_api_new_realloc(const MunitParameter params[], void *data)
   assert_true(map->m_capacity == 1024);
   assert_true(map->m_data_used == sizeof(uint32_t));
 
-  map = sparsemap_set_data_size(map, 2048, NULL);
+  map = sparsemap_set_data_size(map, NULL, 2048);
   assert_true(map->m_capacity == 2048);
   assert_true(map->m_data_used == sizeof(uint32_t));
 
@@ -275,7 +275,7 @@ test_api_set_data_size(const MunitParameter params[], void *data)
   assert_ptr_not_null(map);
   assert_true(map->m_capacity == 1024);
   assert_true(map->m_capacity == sparsemap_get_capacity(map));
-  sparsemap_set_data_size(map, 512, NULL);
+  sparsemap_set_data_size(map, NULL, 512);
   assert_true(map->m_capacity == 512);
   assert_true(map->m_capacity == sparsemap_get_capacity(map));
   return MUNIT_OK;
@@ -1063,7 +1063,7 @@ test_scale_lots_o_spans(const MunitParameter params[], void *data)
     int l = i % 31 + 16;
     sm_add_span(map, 10000, l);
     if (errno == ENOSPC) {
-      map = sparsemap_set_data_size(map, sparsemap_get_capacity(map) * 2, NULL);
+      map = sparsemap_set_data_size(map, NULL, sparsemap_get_capacity(map) * 2);
       errno = 0;
     }
     i += l;
@@ -1109,7 +1109,7 @@ test_scale_ondrej(const MunitParameter params[], void *data)
       bool set = (i != needle) ? (j < 10) : (j < 9);
       sparsemap_set(map, i, set);
       if (errno == ENOSPC) {
-        map = sparsemap_set_data_size(map, sparsemap_get_capacity(map) * 2, NULL);
+        map = sparsemap_set_data_size(map, NULL, sparsemap_get_capacity(map) * 2);
         errno = 0;
       }
     }
@@ -1177,7 +1177,7 @@ test_scale_spans_come_spans_go(const MunitParameter params[], void *data)
     int l = i % 31 + 16;
     sm_add_span(map, amt, l);
     if (errno == ENOSPC) {
-      map = sparsemap_set_data_size(map, sparsemap_get_capacity(map) + 1024, NULL);
+      map = sparsemap_set_data_size(map, NULL, sparsemap_get_capacity(map) + 1024);
       assert_ptr_not_null(map);
       errno = 0;
     }

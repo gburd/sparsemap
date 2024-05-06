@@ -617,7 +617,7 @@ _sparsemap_set(sparsemap_t **map, sparsemap_idx_t idx, bool value)
     sparsemap_idx_t l = sparsemap_set(*map, idx, value);
     if (l != idx) {
       if (errno == ENOSPC) {
-        *map = sparsemap_set_data_size(*map, sparsemap_get_capacity(*map) + 64, NULL);
+        *map = sparsemap_set_data_size(*map, NULL, sparsemap_get_capacity(*map) + 64);
         assert(*map != NULL);
         errno = 0;
       } else {
@@ -637,7 +637,7 @@ _sparsemap_merge(sparsemap_t **map, sparsemap_t *other)
     if (retval != 0) {
       if (errno == ENOSPC) {
 	size_t new_size = retval + (64 - (retval % 64)) + 64;
-        *map = sparsemap_set_data_size(*map, sparsemap_get_capacity(*map) + new_size, NULL);
+        *map = sparsemap_set_data_size(*map, NULL, sparsemap_get_capacity(*map) + new_size);
         assert(*map != NULL);
         errno = 0;
       } else {

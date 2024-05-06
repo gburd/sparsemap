@@ -68,6 +68,6 @@ include in `lib` the amalgamated (git `2dc8070`) and well-known
 [Roaring Bitmaps](https://github.com/RoaringBitmap/CRoaring/tree/master) and
 use it in the soak test to ensure our results are as accurate as theirs.
 
-This library was created for [hamsterdb](http://hamsterdb.com) in
+This library was originally created by [Christoph Rupp](https://crupp.de) in
 C++ and then translated to C and further improved by Greg Burd <greg@burd.me>
 for use in LMDB and OpenLDAP.
