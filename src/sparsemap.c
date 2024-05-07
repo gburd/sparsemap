@@ -448,7 +448,7 @@ __sm_merge_chunk(sparsemap_t *chunk, sparsemap_idx_t offset, __sm_chunk_t src)
  *
  * @param[in] chunk The chunk in question.
  * @param[in] value Informs what we're seeking, a set or unset bit's position.
- * @param offset[in,out] Sets \b offset to 0 if the n'th bit was found
+ * @param offset[in,out] Sets \b offset to n if the n'th bit was found
  * in this __sm_chunk_t, or reduced value of \b n bits observed the search up
  * to a maximum of SM_BITS_PER_VECTOR.
  * @returns the 0-based index of the n'th set bit when found, otherwise
@@ -825,7 +825,7 @@ __sm_get_size_impl(sparsemap_t *map)
   return SM_SIZEOF_OVERHEAD + p - start;
 }
 
-#ifdef DIAGNOSTIC
+#ifdef SPARSEMAP_DIAGNOSTIC
 /** @brief Aligns to SM_BITS_PER_VECTOR a given index \b idx.
  *
  * @param[in] idx The index to align.
@@ -903,6 +903,8 @@ __sm_set_chunk_count(sparsemap_t *map, size_t new_count)
 static void
 __sm_append_data(sparsemap_t *map, uint8_t *buffer, size_t buffer_size)
 {
+  __sm_assert(map->m_data_used + buffer_size <= map->m_capacity);
+
   memcpy(&map->m_data[map->m_data_used], buffer, buffer_size);
   map->m_data_used += buffer_size;
 }
@@ -918,6 +920,7 @@ void
 __sm_insert_data(sparsemap_t *map, size_t offset, uint8_t *buffer, size_t buffer_size)
 {
   __sm_assert(map->m_data_used + buffer_size <= map->m_capacity);
+
   uint8_t *p = __sm_get_chunk_data(map, offset);
   memmove(p + buffer_size, p, map->m_data_used - offset);
   memcpy(p, buffer, buffer_size);
@@ -975,8 +978,6 @@ sparsemap(size_t size)
     sparsemap_init(map, data, size);
     __sm_when_diag({ __sm_assert(IS_8_BYTE_ALIGNED(map->m_data)); });
   }
-  sparsemap_clear(map);
-
   return map;
 }
 
@@ -1248,9 +1249,6 @@ sparsemap_get_starting_offset(sparsemap_t *map)
   return (sparsemap_idx_t)*chunk;
 }
 
-/**
- * Returns the used size in the data buffer.
- */
 size_t
 sparsemap_get_size(sparsemap_t *map)
 {
@@ -1261,9 +1259,6 @@ sparsemap_get_size(sparsemap_t *map)
   return map->m_data_used = __sm_get_size_impl(map);
 }
 
-/**
- * Decompresses the whole bitmap; calls scanner for all bits.
- */
 void
 sparsemap_scan(sparsemap_t *map, void (*scanner)(sm_idx_t[], size_t, void *aux), size_t skip, void *aux)
 {
@@ -1391,8 +1386,8 @@ sparsemap_split(sparsemap_t *map, sparsemap_idx_t offset, sparsemap_t *other)
     src += sizeof(sm_idx_t) + __sm_chunk_get_size(&chunk);
   }
   if (i == count) {
-    assert(sparsemap_get_size(map) > SM_SIZEOF_OVERHEAD);
-    assert(sparsemap_get_size(other) > SM_SIZEOF_OVERHEAD);
+    __sm_assert(sparsemap_get_size(map) > SM_SIZEOF_OVERHEAD);
+    __sm_assert(sparsemap_get_size(other) > SM_SIZEOF_OVERHEAD);
     return;
   }
 
@@ -1500,7 +1495,7 @@ sparsemap_select(sparsemap_t *map, sparsemap_idx_t n, bool value)
   return SPARSEMAP_IDX_MAX;
 }
 
-size_t
+static size_t
 __sm_rank_vec(sparsemap_t *map, size_t begin, size_t end, bool value, sm_bitvec_t *vec)
 {
   assert(sparsemap_get_size(map) >= SM_SIZEOF_OVERHEAD);
