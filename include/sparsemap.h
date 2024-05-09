@@ -125,7 +125,6 @@ sparsemap_t *sparsemap_copy(sparsemap_t *other);
  * and releasing the memory used for \b data.  Resizing the buffer is only
  * supported when the heap object for the map includes the buffer and the
  * \b data offset supplied is relative to the object (see #sparsemap()).
- * This function calls #sparsemap_init().
  *
  * @param[in] data A heap or stack memory buffer of \b size for use storing
  * bitmap data.
@@ -252,6 +251,40 @@ sparsemap_idx_t sparsemap_set(sparsemap_t *map, sparsemap_idx_t idx, bool value)
  */
 size_t sparsemap_get_size(sparsemap_t *map);
 
+/** @brief Returns a pointer to the data buffer used for the map.
+ *
+ * @param[in] map The sparsemap reference.
+ * @returns a pointer to the data buffer used for the map
+ */
+void *sparsemap_get_data(sparsemap_t *map);
+
+/** @brief Returns the number of elements in the map.
+ *
+ * @param[in] map The sparsemap reference.
+ * @returns the number of elements in the map
+ */
+size_t sparsemap_count(sparsemap_t *map);
+
+/** @brief Returns the offset of the first bit set in the map.
+ *
+ * This is the same as the value of the first set bit in the
+ * map.
+ *
+ * @param[in] map The sparsemap reference.
+ * @returns the offset of the first bit set in the map
+ */
+sparsemap_idx_t sparsemap_get_starting_offset(sparsemap_t *map);
+
+/** @brief Returns the offset of the last bit set in the map.
+ *
+ * This is the same as the value of the last bit set in the
+ * map.
+ *
+ * @param[in] map The sparsemap reference.
+ * @returns the offset of the index bit set in the map
+ */
+sparsemap_idx_t sparsemap_get_ending_offset(sparsemap_t *map);
+
 /** @brief Provides a method for a callback function to examine every bit set in
  * the index.
  *
@@ -279,10 +312,12 @@ int sparsemap_merge(sparsemap_t *map, sparsemap_t *other);
  * The \b other bitmap is expected to be empty.
  *
  * @param[in] map The sparsemap reference.
- * @param[in] offset The 0-based offset into the bitmap at which to split.
+ * @param[in] offset The 0-based offset into the bitmap at which to split, if
+ * set to SPARSEMAP_IDX_MAX then the bits will be evenly split.
  * @param[in] other The bitmap into which we place the split.
+ * @returns the offset at which the map was split
  */
-void sparsemap_split(sparsemap_t *map, sparsemap_idx_t offset, sparsemap_t *other);
+sparsemap_idx_t sparsemap_split(sparsemap_t *map, sparsemap_idx_t offset, sparsemap_t *other);
 
 /** @brief Finds the index of the \b n'th bit set to \b value.
  *

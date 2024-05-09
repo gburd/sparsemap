@@ -44,14 +44,17 @@ void
 populate_map(sparsemap_t *map, int size, int max_value)
 {
   int array[size];
+  size_t before;
 
   setup_test_array(array, size, max_value);
   shuffle(array, size);
+  before = sparsemap_count(map);
   for (int i = 0; i < size; i++) {
     sparsemap_set(map, array[i], true);
     bool set = sparsemap_is_set(map, array[i]);
-    munit_assert_true(set);
+    assert_true(set);
   }
+  assert_true(sparsemap_count(map) == before + size);
 }
 
 static void *
@@ -444,45 +447,6 @@ test_api_set(const MunitParameter params[], void *data)
   return MUNIT_OK;
 }
 
-// TODO remove? not public API anymore...
-extern sparsemap_idx_t sparsemap_get_starting_offset(sparsemap_t *map);
-
-static void *
-test_api_get_starting_offset_setup(const MunitParameter params[], void *user_data)
-{
-  uint8_t *buf = munit_calloc(1024, sizeof(uint8_t));
-  assert_ptr_not_null(buf);
-  sparsemap_t *map = (sparsemap_t *)test_api_setup(params, user_data);
-
-  sparsemap_init(map, buf, 1024);
-  populate_map(map, 1024, 3 * 1024);
-
-  return (void *)map;
-}
-static void
-test_api_get_starting_offset_tear_down(void *fixture)
-{
-  sparsemap_t *map = (sparsemap_t *)fixture;
-  assert_ptr_not_null(map->m_data);
-  munit_free(map->m_data);
-  test_api_tear_down(fixture);
-}
-static MunitResult
-test_api_get_starting_offset(const MunitParameter params[], void *data)
-{
-  sparsemap_t *map = (sparsemap_t *)data;
-  (void)params;
-
-  assert_ptr_not_null(map);
-
-  sparsemap_set(map, 42, true);
-  assert_true(sparsemap_is_set(map, 42));
-  size_t offset = sparsemap_get_starting_offset(map);
-  assert_true(offset == 0);
-
-  return MUNIT_OK;
-}
-
 static void *
 test_api_get_size_setup(const MunitParameter params[], void *user_data)
 {
@@ -513,6 +477,174 @@ test_api_get_size(const MunitParameter params[], void *data)
 
   size_t size = sparsemap_get_size(map);
   assert_true(size > 400);
+
+  return MUNIT_OK;
+}
+
+static void *
+test_api_count_setup(const MunitParameter params[], void *user_data)
+{
+  uint8_t *buf = munit_calloc(1024, sizeof(uint8_t));
+  assert_ptr_not_null(buf);
+  sparsemap_t *map = (sparsemap_t *)test_api_setup(params, user_data);
+
+  sparsemap_init(map, buf, 1024);
+  populate_map(map, 1024, 3 * 1024);
+
+  return (void *)map;
+}
+static void
+test_api_count_tear_down(void *fixture)
+{
+  sparsemap_t *map = (sparsemap_t *)fixture;
+  assert_ptr_not_null(map->m_data);
+  munit_free(map->m_data);
+  test_api_tear_down(fixture);
+}
+static MunitResult
+test_api_count(const MunitParameter params[], void *data)
+{
+  sparsemap_t *map = (sparsemap_t *)data;
+  (void)params;
+
+  assert_ptr_not_null(map);
+
+  assert_true(sparsemap_count(map) == 1024);
+
+  sparsemap_clear(map);
+  sparsemap_set(map, 0, true);
+  assert_true(sparsemap_count(map) == 1);
+
+  sparsemap_set(map, 8675309, true);
+  assert_true(sparsemap_count(map) == 2);
+
+  sparsemap_clear(map);
+  for (int i = 0; i < 512; i++) {
+    sparsemap_set(map, i + 13, true);
+  }
+  assert_true(sparsemap_count(map) == 512);
+
+  sparsemap_clear(map);
+  assert_true(sparsemap_count(map) == 0);
+
+  return MUNIT_OK;
+}
+
+static MunitResult
+test_api_get_data(const MunitParameter params[], void *data)
+{
+  (void)data;
+  (void)params;
+  uint8_t *buf = munit_calloc(1024, sizeof(uint8_t));
+  assert_ptr_not_null(buf);
+  sparsemap_t *map = (sparsemap_t *)sparsemap_wrap(buf, 1024);
+  assert_ptr_not_null(map);
+  populate_map(map, 1024, 3 * 1024);
+
+  assert_true(sparsemap_get_data(map) == buf);
+
+  return MUNIT_OK;
+}
+
+static void *
+test_api_get_starting_offset_setup(const MunitParameter params[], void *user_data)
+{
+  uint8_t *buf = munit_calloc(1024, sizeof(uint8_t));
+  assert_ptr_not_null(buf);
+  sparsemap_t *map = (sparsemap_t *)test_api_setup(params, user_data);
+
+  sparsemap_init(map, buf, 1024);
+
+  return (void *)map;
+}
+static void
+test_api_get_starting_offset_tear_down(void *fixture)
+{
+  sparsemap_t *map = (sparsemap_t *)fixture;
+  assert_ptr_not_null(map->m_data);
+  munit_free(map->m_data);
+  test_api_tear_down(fixture);
+}
+static MunitResult
+test_api_get_starting_offset(const MunitParameter params[], void *data)
+{
+  sparsemap_t *map = (sparsemap_t *)data;
+  (void)params;
+
+  assert_ptr_not_null(map);
+
+  sparsemap_set(map, 0, true);
+  assert_true(sparsemap_get_starting_offset(map) == 0);
+  sparsemap_clear(map);
+
+  sparsemap_set(map, 1, true);
+  assert_true(sparsemap_get_starting_offset(map) == 1);
+  sparsemap_clear(map);
+
+  sparsemap_set(map, 1025, true);
+  assert_true(sparsemap_get_starting_offset(map) == 1025);
+  sparsemap_clear(map);
+
+  for (int i = 0; i < 1000; i++) {
+    sparsemap_set(map, i, true);
+  }
+  assert_true(sparsemap_get_starting_offset(map) == 0);
+  sparsemap_clear(map);
+
+  for (int i = 0; i < 1000; i++) {
+    sparsemap_set(map, i + 1024, true);
+  }
+  assert_true(sparsemap_get_starting_offset(map) == 1024);
+  sparsemap_clear(map);
+
+  sparsemap_set(map, 13012, true);
+  assert_true(sparsemap_get_starting_offset(map) == 13012);
+
+  return MUNIT_OK;
+}
+
+static void *
+test_api_get_ending_offset_setup(const MunitParameter params[], void *user_data)
+{
+  uint8_t *buf = munit_calloc(1024, sizeof(uint8_t));
+  assert_ptr_not_null(buf);
+  sparsemap_t *map = (sparsemap_t *)test_api_setup(params, user_data);
+
+  sparsemap_init(map, buf, 1024);
+
+  return (void *)map;
+}
+static void
+test_api_get_ending_offset_tear_down(void *fixture)
+{
+  sparsemap_t *map = (sparsemap_t *)fixture;
+  assert_ptr_not_null(map->m_data);
+  munit_free(map->m_data);
+  test_api_tear_down(fixture);
+}
+static MunitResult
+test_api_get_ending_offset(const MunitParameter params[], void *data)
+{
+  sparsemap_t *map = (sparsemap_t *)data;
+  (void)params;
+
+  assert_ptr_not_null(map);
+
+  sparsemap_set(map, 0, true);
+  assert_true(sparsemap_get_ending_offset(map) == 0);
+  sparsemap_clear(map);
+
+  sparsemap_set(map, 0, true);
+  sparsemap_set(map, 1, true);
+  assert_true(sparsemap_get_ending_offset(map) == 1);
+  sparsemap_clear(map);
+
+  sparsemap_set(map, 0, true);
+  sparsemap_set(map, 67, true);
+  sparsemap_set(map, 1002, true);
+  sparsemap_set(map, 3087, true);
+  sparsemap_set(map, 13012, true);
+  assert_true(sparsemap_get_ending_offset(map) == 13012);
 
   return MUNIT_OK;
 }
@@ -566,9 +698,6 @@ test_api_split_setup(const MunitParameter params[], void *user_data)
   sparsemap_t *map = (sparsemap_t *)test_api_setup(params, user_data);
 
   sparsemap_init(map, buf, 1024);
-  for (int i = 0; i < 1024; i++) {
-    sparsemap_set(map, i, true);
-  }
   return (void *)map;
 }
 static void
@@ -589,7 +718,15 @@ test_api_split(const MunitParameter params[], void *data)
 
   assert_ptr_not_null(map);
 
-  sparsemap_init(&portion, buf, 512);
+  sparsemap_init(&portion, buf, 1024);
+
+  for (int i = 0; i < 1024; i++) {
+    sparsemap_set(map, i, true);
+  }
+  for (int i = 0; i < 1024; i++) {
+    assert_true(sparsemap_is_set(map, i));
+    assert_false(sparsemap_is_set(&portion, i));
+  }
   sparsemap_split(map, 512, &portion);
   for (int i = 0; i < 512; i++) {
     assert_true(sparsemap_is_set(map, i));
@@ -598,6 +735,45 @@ test_api_split(const MunitParameter params[], void *data)
   for (int i = 513; i < 1024; i++) {
     assert_false(sparsemap_is_set(map, i));
     assert_true(sparsemap_is_set(&portion, i));
+  }
+
+  sparsemap_clear(map);
+  sparsemap_clear(&portion);
+
+  for (int i = 0; i < 100; i++) {
+    sparsemap_set(map, i, true);
+  }
+  for (int i = 0; i < 100; i++) {
+    assert_true(sparsemap_is_set(map, i));
+    assert_false(sparsemap_is_set(&portion, i));
+  }
+
+  sparsemap_idx_t offset = sparsemap_split(map, SPARSEMAP_IDX_MAX, &portion);
+  for (int i = 0; i < offset; i++) {
+    assert_true(sparsemap_is_set(map, i));
+    assert_false(sparsemap_is_set(&portion, i));
+  }
+  for (int i = offset; i < 100; i++) {
+    assert_false(sparsemap_is_set(map, i));
+    assert_true(sparsemap_is_set(&portion, i));
+  }
+
+  sparsemap_clear(&portion);
+  sparsemap_clear(map);
+
+  sparsemap_init(&portion, buf, 1024);
+  for (int i = 0; i < 13; i++) {
+    sparsemap_set(map, i + 24, true);
+  }
+
+  offset = sparsemap_split(map, SPARSEMAP_IDX_MAX, &portion);
+  for (int i = 0; i < offset - 24; i++) {
+    assert_true(sparsemap_is_set(map, i + 24));
+    assert_false(sparsemap_is_set(&portion, i + 24));
+  }
+  for (int i = offset - 24; i < 13; i++) {
+    assert_false(sparsemap_is_set(map, i + 24));
+    assert_true(sparsemap_is_set(&portion, i + 24));
   }
 
   return MUNIT_OK;
@@ -707,7 +883,7 @@ test_api_merge(const MunitParameter params[], void *data)
     assert(sparsemap_is_set(map, i));
   }
 
-  free(other);
+  munit_free(other);
   return MUNIT_OK;
 }
 
@@ -1012,9 +1188,11 @@ static MunitTest api_test_suite[] = {
   { (char *)"/get_capacity", test_api_get_capacity, test_api_get_capacity_setup, test_api_get_capacity_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
   { (char *)"/is_set", test_api_is_set, test_api_is_set_setup, test_api_is_set_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
   { (char *)"/set", test_api_set, test_api_set_setup, test_api_set_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
-  { (char *)"/get_starting_offset", test_api_get_starting_offset, test_api_get_starting_offset_setup, test_api_get_starting_offset_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
-  //TODO { (char *)"/get_ending_offset", test_api_get_ending_offset, test_api_get_ending_offset_setup, test_api_get_ending_offset_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
   { (char *)"/get_size", test_api_get_size, test_api_get_size_setup, test_api_get_size_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
+  { (char *)"/count", test_api_count, test_api_count_setup, test_api_count_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
+  { (char *)"/get_data", test_api_get_data, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+  { (char *)"/get_starting_offset", test_api_get_starting_offset, test_api_get_starting_offset_setup, test_api_get_starting_offset_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
+  { (char *)"/get_ending_offset", test_api_get_ending_offset, test_api_get_ending_offset_setup, test_api_get_ending_offset_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
   { (char *)"/scan", test_api_scan, test_api_scan_setup, test_api_scan_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
   { (char *)"/split", test_api_split, test_api_split_setup, test_api_split_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
   { (char *)"/merge", test_api_merge, test_api_merge_setup, test_api_merge_tear_down, MUNIT_TEST_OPTION_NONE, NULL },

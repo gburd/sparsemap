@@ -825,19 +825,17 @@ __sm_get_size_impl(sparsemap_t *map)
   return SM_SIZEOF_OVERHEAD + p - start;
 }
 
-#ifdef SPARSEMAP_DIAGNOSTIC
 /** @brief Aligns to SM_BITS_PER_VECTOR a given index \b idx.
  *
  * @param[in] idx The index to align.
  * @returns the aligned offset (aligned to sm_bitvec_t capacity).
  */
 static sm_idx_t
-__sm_get_aligned_offset(size_t idx)
+__sm_get_vector_aligned_offset(size_t idx)
 {
   const size_t capacity = SM_BITS_PER_VECTOR;
   return (idx / capacity) * capacity;
 }
-#endif
 
 /** @brief Aligns to SM_CHUNK_CAPACITY a given index \b idx.
  *
@@ -845,7 +843,7 @@ __sm_get_aligned_offset(size_t idx)
  * @returns the aligned offset (aligned to __sm_chunk_t capacity)
  */
 static sm_idx_t
-__sm_get_fully_aligned_offset(size_t idx)
+__sm_get_chunk_aligned_offset(size_t idx)
 {
   const size_t capacity = SM_CHUNK_MAX_CAPACITY;
   return (idx / capacity) * capacity;
@@ -871,7 +869,7 @@ __sm_get_chunk_offset(sparsemap_t *map, sparsemap_idx_t idx)
 
   for (sparsemap_idx_t i = 0; i < count - 1; i++) {
     sm_idx_t s = *(sm_idx_t *)p;
-    __sm_assert(s == __sm_get_aligned_offset(s));
+    __sm_assert(s == __sm_get_vector_aligned_offset(s));
     __sm_chunk_t chunk;
     __sm_chunk_init(&chunk, p + sizeof(sm_idx_t));
     if (s >= idx || idx < s + __sm_chunk_get_capacity(&chunk)) {
@@ -999,7 +997,9 @@ sparsemap_wrap(uint8_t *data, size_t size)
 {
   sparsemap_t *map = (sparsemap_t *)calloc(1, sizeof(sparsemap_t));
   if (map) {
-    sparsemap_init(map, data, size);
+    map->m_data = data;
+    map->m_data_used = 0;
+    map->m_capacity = size;
   }
   return map;
 }
@@ -1125,7 +1125,7 @@ sparsemap_set(sparsemap_t *map, sparsemap_idx_t idx, bool value)
     __sm_append_data(map, &buf[0], sizeof(buf));
 
     uint8_t *p = __sm_get_chunk_data(map, 0);
-    *(sm_idx_t *)p = __sm_get_fully_aligned_offset(idx);
+    *(sm_idx_t *)p = __sm_get_vector_aligned_offset(idx); // TODO: get_fully_aligned_offset?
 
     __sm_set_chunk_count(map, 1);
 
@@ -1150,7 +1150,7 @@ sparsemap_set(sparsemap_t *map, sparsemap_idx_t idx, bool value)
     uint8_t buf[sizeof(sm_idx_t) + sizeof(sm_bitvec_t) * 2] = { 0 };
     __sm_insert_data(map, offset, &buf[0], sizeof(buf));
 
-    size_t aligned_idx = __sm_get_fully_aligned_offset(idx);
+    size_t aligned_idx = __sm_get_chunk_aligned_offset(idx);
     if (start - aligned_idx < SM_CHUNK_MAX_CAPACITY) {
       __sm_chunk_t chunk;
       __sm_chunk_init(&chunk, p + sizeof(sm_idx_t));
@@ -1186,7 +1186,7 @@ sparsemap_set(sparsemap_t *map, sparsemap_idx_t idx, bool value)
 
       start += __sm_chunk_get_capacity(&chunk);
       if ((sparsemap_idx_t)start + SM_CHUNK_MAX_CAPACITY < idx) {
-        start = __sm_get_fully_aligned_offset(idx);
+        start = __sm_get_chunk_aligned_offset(idx);
       }
       *(sm_idx_t *)p = start;
 
@@ -1241,12 +1241,93 @@ sparsemap_set(sparsemap_t *map, sparsemap_idx_t idx, bool value)
 sparsemap_idx_t
 sparsemap_get_starting_offset(sparsemap_t *map)
 {
+  sparsemap_idx_t offset = 0;
   size_t count = __sm_get_chunk_count(map);
   if (count == 0) {
     return 0;
   }
-  sm_idx_t *chunk = (sm_idx_t *)__sm_get_chunk_data(map, 0);
-  return (sparsemap_idx_t)*chunk;
+  uint8_t *p = __sm_get_chunk_data(map, 0);
+  sm_idx_t start = *(sm_idx_t *)p;
+  p += sizeof(sm_idx_t);
+  __sm_chunk_t chunk;
+  __sm_chunk_init(&chunk, p);
+  sparsemap_idx_t relative_position = start;
+  for (size_t m = 0; m < sizeof(sm_bitvec_t); m++, p++) {
+    for (int n = 0; n < SM_FLAGS_PER_INDEX_BYTE; n++) {
+      size_t flags = SM_CHUNK_GET_FLAGS(*p, n);
+      if (flags == SM_PAYLOAD_NONE) {
+        continue;
+      } else if (flags == SM_PAYLOAD_ZEROS) {
+        relative_position += SM_BITS_PER_VECTOR;
+      } else if (flags == SM_PAYLOAD_ONES) {
+        offset = relative_position;
+        goto done;
+      } else if (flags == SM_PAYLOAD_MIXED) {
+        sm_bitvec_t w = chunk.m_data[1 + __sm_chunk_get_position(&chunk, m * SM_FLAGS_PER_INDEX_BYTE + n)];
+        for (int k = 0; k < SM_BITS_PER_VECTOR; k++) {
+          if (w & ((sm_bitvec_t)1 << k)) {
+            offset = relative_position + k;
+            goto done;
+          }
+        }
+        relative_position += SM_BITS_PER_VECTOR;
+      }
+    }
+  }
+done:;
+  return offset;
+}
+
+sparsemap_idx_t
+sparsemap_get_ending_offset(sparsemap_t *map)
+{
+  sparsemap_idx_t offset = 0;
+  size_t count = __sm_get_chunk_count(map);
+  if (count == 0) {
+    return 0;
+  }
+  uint8_t *p = __sm_get_chunk_data(map, 0);
+  for (size_t i = 0; i < count - 1; i++) {
+    p += sizeof(sm_idx_t);
+    __sm_chunk_t chunk;
+    __sm_chunk_init(&chunk, p);
+    p += __sm_chunk_get_size(&chunk);
+  }
+  sm_idx_t start = *(sm_idx_t *)p;
+  p += sizeof(sm_idx_t);
+  __sm_chunk_t chunk;
+  __sm_chunk_init(&chunk, p);
+  sparsemap_idx_t relative_position = start;
+  for (size_t m = 0; m < sizeof(sm_bitvec_t); m++, p++) {
+    for (int n = 0; n < SM_FLAGS_PER_INDEX_BYTE; n++) {
+      size_t flags = SM_CHUNK_GET_FLAGS(*p, n);
+      if (flags == SM_PAYLOAD_NONE) {
+        continue;
+      } else if (flags == SM_PAYLOAD_ZEROS) {
+        relative_position += SM_BITS_PER_VECTOR;
+      } else if (flags == SM_PAYLOAD_ONES) {
+        relative_position += SM_BITS_PER_VECTOR;
+        offset = relative_position;
+      } else if (flags == SM_PAYLOAD_MIXED) {
+        sm_bitvec_t w = chunk.m_data[1 + __sm_chunk_get_position(&chunk, m * SM_FLAGS_PER_INDEX_BYTE + n)];
+        int idx = 0;
+        for (int k = 0; k < SM_BITS_PER_VECTOR; k++) {
+          if (w & ((sm_bitvec_t)1 << k)) {
+            idx = k;
+          }
+        }
+        offset = relative_position + idx;
+        relative_position += SM_BITS_PER_VECTOR;
+      }
+    }
+  }
+  return offset;
+}
+
+void *
+sparsemap_get_data(sparsemap_t *map)
+{
+  return map->m_data;
 }
 
 size_t
@@ -1257,6 +1338,41 @@ sparsemap_get_size(sparsemap_t *map)
     return map->m_data_used;
   }
   return map->m_data_used = __sm_get_size_impl(map);
+}
+
+size_t
+sparsemap_count(sparsemap_t *map)
+{
+  return sparsemap_rank(map, 0, SPARSEMAP_IDX_MAX, true);
+#if 0
+  size_t c = 0, count = __sm_get_chunk_count(map);
+
+  if (count == 0) {
+    return 0;
+  }
+  uint8_t *p = __sm_get_chunk_data(map, 0);
+  for (size_t i = 0; i < count; i++) {
+    p += sizeof(sm_idx_t);
+    __sm_chunk_t chunk;
+    __sm_chunk_init(&chunk, p);
+    for (size_t m = 0; m < sizeof(sm_bitvec_t); m++, p++) {
+      for (int n = 0; n < SM_FLAGS_PER_INDEX_BYTE; n++) {
+        size_t flags = SM_CHUNK_GET_FLAGS(*p, n);
+        if (flags == SM_PAYLOAD_NONE) {
+          continue;
+        } else if (flags == SM_PAYLOAD_ZEROS) {
+          continue;
+        } else if (flags == SM_PAYLOAD_ONES) {
+          c += SM_BITS_PER_VECTOR;
+        } else if (flags == SM_PAYLOAD_MIXED) {
+          sm_bitvec_t w = chunk.m_data[1 + __sm_chunk_get_position(&chunk, m * SM_FLAGS_PER_INDEX_BYTE + n)];
+          c += popcountll(w);
+        }
+      }
+    }
+  }
+  return c;
+#endif
 }
 
 void
@@ -1299,8 +1415,8 @@ sparsemap_merge(sparsemap_t *map, sparsemap_t *other)
   for (size_t i = 0; i < max_chunk_count && src_count; i++) {
     sm_idx_t src_start = *(sm_idx_t *)src;
     sm_idx_t dst_start = *(sm_idx_t *)dst;
-    src_start = __sm_get_fully_aligned_offset(src_start);
-    dst_start = __sm_get_fully_aligned_offset(dst_start);
+    src_start = __sm_get_chunk_aligned_offset(src_start);
+    dst_start = __sm_get_chunk_aligned_offset(dst_start);
     if (src_start > dst_start && dst_count > 0) {
       __sm_chunk_t dst_chunk;
       __sm_chunk_init(&dst_chunk, dst + sizeof(sm_idx_t));
@@ -1315,7 +1431,7 @@ sparsemap_merge(sparsemap_t *map, sparsemap_t *other)
       __sm_chunk_t dst_chunk;
       __sm_chunk_init(&dst_chunk, dst + sizeof(sm_idx_t));
       __sm_merge_chunk(map, src_start, src_chunk);
-      *(sm_idx_t *)dst = __sm_get_fully_aligned_offset(src_start);
+      *(sm_idx_t *)dst = __sm_get_chunk_aligned_offset(src_start);
       src += sizeof(sm_idx_t) + __sm_chunk_get_size(&src_chunk);
       dst += sizeof(sm_idx_t) + __sm_chunk_get_size(&dst_chunk);
       dst_count--;
@@ -1347,10 +1463,23 @@ sparsemap_merge(sparsemap_t *map, sparsemap_t *other)
   return 0;
 }
 
-void
+sparsemap_idx_t
 sparsemap_split(sparsemap_t *map, sparsemap_idx_t offset, sparsemap_t *other)
 {
-  assert(offset % SM_BITS_PER_VECTOR == 0);
+  if (offset == 0) {
+    return 0;
+  }
+
+  if (offset == SPARSEMAP_IDX_MAX) {
+    sparsemap_idx_t begin = sparsemap_get_starting_offset(map);
+    sparsemap_idx_t end = sparsemap_get_ending_offset(map);
+    if (begin != end) {
+      size_t count = sparsemap_rank(map, begin, end, true);
+      offset = sparsemap_select(map, count / 2, true);
+    } else {
+      return SPARSEMAP_IDX_MAX;
+    }
+  }
 
   /* |dst| points to the destination buffer */
   uint8_t *dst = __sm_get_chunk_end(other);
@@ -1388,7 +1517,7 @@ sparsemap_split(sparsemap_t *map, sparsemap_idx_t offset, sparsemap_t *other)
   if (i == count) {
     __sm_assert(sparsemap_get_size(map) > SM_SIZEOF_OVERHEAD);
     __sm_assert(sparsemap_get_size(other) > SM_SIZEOF_OVERHEAD);
-    return;
+    return offset;
   }
 
   /* Now copy all the remaining chunks. */
@@ -1399,7 +1528,7 @@ sparsemap_split(sparsemap_t *map, sparsemap_idx_t offset, sparsemap_t *other)
     uint8_t buf[sizeof(sm_idx_t) + sizeof(sm_bitvec_t) * 2] = { 0 };
     memcpy(dst, &buf[0], sizeof(buf));
 
-    *(sm_idx_t *)dst = offset;
+    *(sm_idx_t *)dst = __sm_get_chunk_aligned_offset(offset); //TODO: was simply "offset"
     dst += sizeof(sm_idx_t);
 
     /* the |other| sparsemap_t now has one additional chunk */
@@ -1422,6 +1551,7 @@ sparsemap_split(sparsemap_t *map, sparsemap_idx_t offset, sparsemap_t *other)
     for (size_t j = offset % capacity; j < capacity; j++, d++) {
       if (__sm_chunk_is_set(&s_chunk, j)) {
         sparsemap_set(other, d, true);
+        sparsemap_set(map, d, false); //TODO remove, and fix set_capacity below
       }
     }
 
@@ -1431,7 +1561,7 @@ sparsemap_split(sparsemap_t *map, sparsemap_idx_t offset, sparsemap_t *other)
     i++;
 
     /* Reduce the capacity of the source-chunk. */
-    __sm_chunk_set_capacity(&s_chunk, offset % capacity);
+    //__sm_chunk_set_capacity(&s_chunk, offset % capacity); //TODO see comment above
   }
 
   /* Now continue with all remaining chunks. */
@@ -1461,6 +1591,8 @@ sparsemap_split(sparsemap_t *map, sparsemap_idx_t offset, sparsemap_t *other)
 
   __sm_assert(sparsemap_get_size(map) >= SM_SIZEOF_OVERHEAD);
   __sm_assert(sparsemap_get_size(other) > SM_SIZEOF_OVERHEAD);
+
+  return offset;
 }
 
 sparsemap_idx_t

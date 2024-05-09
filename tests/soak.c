@@ -636,7 +636,7 @@ _sparsemap_merge(sparsemap_t **map, sparsemap_t *other)
     int retval = sparsemap_merge(*map, other);
     if (retval != 0) {
       if (errno == ENOSPC) {
-	size_t new_size = retval + (64 - (retval % 64)) + 64;
+        size_t new_size = retval + (64 - (retval % 64)) + 64;
         *map = sparsemap_set_data_size(*map, NULL, sparsemap_get_capacity(*map) + new_size);
         assert(*map != NULL);
         errno = 0;

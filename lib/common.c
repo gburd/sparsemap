@@ -18,8 +18,8 @@
 #endif
 #endif
 
+#include "../include/common.h"
 #include "../include/sparsemap.h"
-#include "common.h"
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wvariadic-macros"
@@ -278,17 +278,6 @@ is_set(const int array[], int bit)
 }
 
 int
-is_unique(int a[], int l, int value)
-{
-  for (int i = 0; i < l; ++i) {
-    if (a[i] == value) {
-      return 0; // Not unique
-    }
-  }
-  return 1; // Unique
-}
-
-int
 whats_set_uint64(uint64_t number, int pos[64])
 {
   int length = 0;
@@ -302,19 +291,31 @@ whats_set_uint64(uint64_t number, int pos[64])
   return length;
 }
 
+/** @brief Fills an array with unique random values between 0 and max_value.
+ *
+ * @param[in] a The array to fill.
+ * @param[in] l The length of the array to fill.
+ * @param[in] max_value The maximum value for the random numbers.
+ */
 void
 setup_test_array(int a[], int l, int max_value)
 {
-  if (a == NULL || max_value < 0) {
-    return; // Basic error handling and validation
+
+  // Create a set to store the unique values.
+  int unique_values[max_value + 1];
+  for (int i = 0; i <= max_value; ++i) {
+    unique_values[i] = 0;
   }
 
-  for (int i = 0; i < l; ++i) {
-    int candidate;
-    do {
-      candidate = random_uint32() % (max_value + 1); // Generate a new value within the specified range
-    } while (!is_unique(a, i, candidate));           // Repeat until a unique value is found
-    a[i] = candidate;                                // Assign the unique value to the array
+  // Keep generating random numbers until we have l unique values.
+  int count = 0;
+  while (count < l) {
+    int random_number = random_uint32() % (max_value + 1);
+    if (unique_values[random_number] == 0) {
+      unique_values[random_number] = 1;
+      a[count] = random_number;
+      count++;
+    }
   }
 }
 
