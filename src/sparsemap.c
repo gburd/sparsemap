@@ -1125,7 +1125,7 @@ sparsemap_set(sparsemap_t *map, sparsemap_idx_t idx, bool value)
     __sm_append_data(map, &buf[0], sizeof(buf));
 
     uint8_t *p = __sm_get_chunk_data(map, 0);
-    *(sm_idx_t *)p = __sm_get_vector_aligned_offset(idx); // TODO: get_fully_aligned_offset?
+    *(sm_idx_t *)p = __sm_get_chunk_aligned_offset(idx); // TODO: this was get_vector_aligned_offset
 
     __sm_set_chunk_count(map, 1);
 
