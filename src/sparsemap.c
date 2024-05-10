@@ -423,30 +423,6 @@ __sm_chunk_set(__sm_chunk_t *chunk, size_t idx, bool value, size_t *pos, sm_bitv
   return SM_OK;
 }
 
-/** @brief Merges into the chunk at \b offset all set bits from \b src.
- *
- * @param[in] chunk The chunk in question.
- * @param[in] offset The offset of the first bit in the chunk to be merged.
- * @todo merge vectors rather than call sparsemap_set() in a loop
- */
-void
-__sm_merge_chunk(sparsemap_t *map, sparsemap_idx_t offset, __sm_chunk_t dst_chunk, __sm_chunk_t src_chunk)
-{
-  size_t src_capacity = __sm_chunk_get_capacity(&src_chunk);
-  (void)dst_chunk;
-#if 0
-  size_t dst_capacity = __sm_chunk_get_capacity(&dst_chunk);
-  if (dst_capacity < src_capacity) {
-    __sm_chunk_set_capacity(&dst_chunk, src_capacity);
-  }
-#endif
-  for (sparsemap_idx_t j = 0; j < src_capacity; j++) {
-    if (__sm_chunk_is_set(&src_chunk, j)) {
-      sparsemap_set(map, offset + j, true);
-    }
-  }
-}
-
 /** @brief Finds the index of the \b n'th bit after \b offset bits with \b
  * value.
  *
@@ -948,6 +924,37 @@ __sm_remove_data(sparsemap_t *map, size_t offset, size_t gap_size)
   map->m_data_used -= gap_size;
 }
 
+/** @brief Merges into the chunk at \b offset all set bits from \b src.
+ *
+ * @param[in] chunk The chunk in question.
+ * @param[in] offset The offset of the first bit in the chunk to be merged.
+ * @todo merge vectors rather than call sparsemap_set() in a loop
+ */
+void
+__sm_merge_chunk(sparsemap_t *map, sparsemap_idx_t idx, sparsemap_idx_t capacity, __sm_chunk_t *dst_chunk, __sm_chunk_t *src_chunk)
+{
+  int rc;
+  for (sparsemap_idx_t j = 0; j < capacity; j++) {
+    bool retried = false;
+    size_t position;
+    sm_bitvec_t fill;
+    if (__sm_chunk_is_set(src_chunk, j) && !__sm_chunk_is_set(dst_chunk, j)) {
+    retry:;
+      rc = __sm_chunk_set(dst_chunk, j, true, &position, &fill, retried);
+      if (rc == SM_NEEDS_TO_GROW) {
+        sparsemap_idx_t offset = __sm_get_chunk_offset(map, j + idx);
+        offset += sizeof(sm_idx_t) + position * sizeof(sm_bitvec_t);
+        __sm_insert_data(map, offset, (uint8_t *)&fill, sizeof(sm_bitvec_t));
+        if (!retried) {
+          retried = true;
+          goto retry;
+        }
+      }
+      __sm_assert(rc == SM_OK);
+    }
+  }
+}
+
 /*
  * The following is the "Sparsemap" implementation, it uses chunks (code above)
  * and is the public API for this compressed bitmap representation.
@@ -1410,7 +1417,8 @@ sparsemap_merge(sparsemap_t *destination, sparsemap_t *source)
   size_t src_count = __sm_get_chunk_count(source);
   size_t dst_count = __sm_get_chunk_count(destination);
   size_t max_chunk_count = src_count + dst_count;
-  ssize_t remaining_capacity = destination->m_capacity - (source->m_data_used + src_count * (sizeof(sm_idx_t) + sizeof(sm_bitvec_t) * 2));
+  ssize_t remaining_capacity = destination->m_capacity - destination->m_data_used -
+    (source->m_data_used + src_count * (sizeof(sm_idx_t) + sizeof(sm_bitvec_t) * 2));
 
   /* Estimate worst-case overhead required for merge. */
   if (remaining_capacity <= 0) {
@@ -1438,7 +1446,15 @@ sparsemap_merge(sparsemap_t *destination, sparsemap_t *source)
       __sm_chunk_init(&src_chunk, src + sizeof(sm_idx_t));
       __sm_chunk_t dst_chunk;
       __sm_chunk_init(&dst_chunk, dst + sizeof(sm_idx_t));
-      __sm_merge_chunk(destination, *(sm_idx_t *)src, dst_chunk, src_chunk);
+      size_t src_capacity = __sm_chunk_get_capacity(&src_chunk);
+      size_t dst_capacity = __sm_chunk_get_capacity(&dst_chunk);
+      if (dst_capacity < src_capacity) {
+        __sm_chunk_set_capacity(&dst_chunk, src_capacity);
+      }
+      if (*(sm_idx_t *)dst > *(sm_idx_t *)src) {
+        *(sm_idx_t *)dst = *(sm_idx_t *)src;
+      }
+      __sm_merge_chunk(destination, src_start, src_capacity, &dst_chunk, &src_chunk);
       src += sizeof(sm_idx_t) + __sm_chunk_get_size(&src_chunk);
       dst += sizeof(sm_idx_t) + __sm_chunk_get_size(&dst_chunk);
       dst_count--;

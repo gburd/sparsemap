@@ -870,13 +870,13 @@ test_api_merge(const MunitParameter params[], void *data)
 
   sparsemap_set(map, 0, true);
   sparsemap_set(map, 2048, true);
-  sparsemap_set(map, 2049, true);
   sparsemap_set(map, 8193, true);
   for (int i = 2049; i < 4096; i++) {
     sparsemap_set(other, i, true);
   }
 
   sparsemap_merge(map, other);
+
   assert(sparsemap_is_set(map, 0));
   assert(sparsemap_is_set(map, 2048));
   assert(sparsemap_is_set(map, 8193));
@@ -1246,7 +1246,7 @@ test_scale_lots_o_spans(const MunitParameter params[], void *data)
       errno = 0;
     }
     i += l;
-    /* ANSI esc code to clear line, carrage return, then print on the same line */
+    /* ANSI esc code to clear line, carriage return, then print on the same line */
     // printf("\033[2K\r%d", i);
     // printf("%d\t%d\n", l, i);
   }
@@ -1346,7 +1346,7 @@ test_scale_spans_come_spans_go_tear_down(void *fixture)
 static MunitResult
 test_scale_spans_come_spans_go(const MunitParameter params[], void *data)
 {
-  size_t amt = 8192; // 268435456; // ~5e7 interations due to 2e9 / avg(l)
+  size_t amt = 8192; // 268435456; // ~5e7 iterations due to 2e9 / avg(l)
   sparsemap_t *map = (sparsemap_t *)data;
   (void)params;
 

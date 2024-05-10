@@ -38,6 +38,7 @@
   idx = {
     # Search for the extensions you want on https://open-vsx.org/ and use "publisher.id"
     extensions = [
+      "asvetliakov.vscode-neovim"
       "coolbear.systemd-unit-file"
       "dotjoshjohnson.xml"
       "editorconfig.editorconfig"
@@ -66,7 +67,6 @@
       "vscodevim.vim"
       "yzhang.markdown-all-in-one"
       "znck.grammarly"
-      #"asvetliakov.vscode-neovim"
       #"jnoortheen.nix-ide"
     ];
     # Enable previews
