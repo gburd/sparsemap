@@ -5,8 +5,8 @@ SHARED_LIB = libsparsemap.so
 
 LIBS =  -lm
 #CFLAGS = -Wall -Wextra -Wpedantic -Of -std=c11 -Iinclude/ -fPIC
-CFLAGS = -Wall -Wextra -Wpedantic -Og -g -std=c11 -Iinclude/ -fPIC
-#CFLAGS = -DSPARSEMAP_DIAGNOSTIC -DDEBUG -Wall -Wextra -Wpedantic -O0 -g -std=c11 -Iinclude/ -fPIC
+#CFLAGS = -Wall -Wextra -Wpedantic -Og -g -std=c11 -Iinclude/ -fPIC
+CFLAGS = -DSPARSEMAP_DIAGNOSTIC -DDEBUG -Wall -Wextra -Wpedantic -O0 -g -std=c11 -Iinclude/ -fPIC
 #CFLAGS = -DSPARSEMAP_DIAGNOSTIC -DDEBUG -Wall -Wextra -Wpedantic -Ofast -g -std=c11 -Iinclude/ -fPIC
 #CFLAGS = -Wall -Wextra -Wpedantic -Og -g -std=c11 -Iinclude/ -fPIC
 #CFLAGS = -Wall -Wextra -Wpedantic -Ofast -g -std=c11 -Iinclude/ -fPIC
@@ -14,8 +14,8 @@ CFLAGS = -Wall -Wextra -Wpedantic -Og -g -std=c11 -Iinclude/ -fPIC
 #CFLAGS = -Wall -Wextra -Wpedantic -Og -g -fsanitize=all -fhardened -std=c11 -Iinclude/ -fPIC
 
 #TEST_FLAGS = -DDEBUG -Wall -Wextra -Wpedantic -O0 -g -std=c11 -Iinclude/ -Itests/ -fPIC
-#TEST_FLAGS = -Wall -Wextra -Wpedantic -Og -g -std=c11 -Iinclude/ -Itests/ -fPIC
-TEST_FLAGS = -Wall -Wextra -Wpedantic -Ofast -g -std=c11 -Iinclude/ -Itests/ -fPIC
+#TEST_FLAGS = -Wall -Wextra -Wpedantic -Ofast -g -std=c11 -Iinclude/ -Itests/ -fPIC
+TEST_FLAGS = -Wall -Wextra -Wpedantic -Og -g -std=c11 -Iinclude/ -Itests/ -fPIC
 #TEST_FLAGS = -DDEBUG -Wall -Wextra -Wpedantic -Og -g -fsanitize=address,leak,object-size,pointer-compare,pointer-subtract,null,return,bounds,pointer-overflow,undefined -fsanitize-address-use-after-scope -std=c11 -Iinclude/ -fPIC
 
 TESTS = tests/test tests/soak
@@ -50,7 +50,7 @@ soak: tests
 	env ASAN_OPTIONS=detect_leaks=1 LSAN_OPTIONS=verbosity=1:log_threads=1 ./tests/soak
 
 tests/test: $(TEST_OBJS) $(LIB_OBJS) $(STATIC_LIB)
-	$(CC) $^ -o $@ $(TEST_FLAGS)
+	$(CC) $^ $(LIBS) -o $@ $(TEST_FLAGS)
 
 clean:
 	rm -f $(OBJS)

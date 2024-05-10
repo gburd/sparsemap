@@ -297,14 +297,16 @@ sparsemap_idx_t sparsemap_get_ending_offset(sparsemap_t *map);
  */
 void sparsemap_scan(sparsemap_t *map, void (*scanner)(sm_idx_t vec[], size_t n, void *aux), size_t skip, void *aux);
 
-/** @brief Merges the values from \b other into \b map, \b other is unchanged.
+/** @brief Merges the values from \b source into \b destination, \b source is unchanged.
  *
- * @param[in] map The sparsemap reference.
- * @param[in] other The bitmap to merge into \b map.
+ * Efficiently adds all set bits from \b source into \b destination.
+ *
+ * @param[in] destination The sparsemap reference into which we will merge \b source.
+ * @param[in] source The bitmap to merge into \b destination.
  * @returns 0 on success, or sets errno to ENOSPC and returns the amount of
  * additional space required to successfully merge the maps.
  */
-int sparsemap_merge(sparsemap_t *map, sparsemap_t *other);
+int sparsemap_merge(sparsemap_t *destination, sparsemap_t *source);
 
 /** @brief Splits the bitmap by assigning all bits starting at \b offset to the
  * \b other bitmap while removing them from \b map.

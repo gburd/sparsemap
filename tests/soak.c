@@ -6,9 +6,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "../include/sparsemap.h"
 #include "../include/common.h"
 #include "../include/roaring.h"
-#include "../include/sparsemap.h"
 #include "../include/tdigest.h"
 
 /* midl.h ------------------------------------------------------------------ */
