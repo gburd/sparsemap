@@ -933,24 +933,28 @@ __sm_remove_data(sparsemap_t *map, size_t offset, size_t gap_size)
 void
 __sm_merge_chunk(sparsemap_t *map, sparsemap_idx_t idx, sparsemap_idx_t capacity, __sm_chunk_t *dst_chunk, __sm_chunk_t *src_chunk)
 {
-  int rc;
   for (sparsemap_idx_t j = 0; j < capacity; j++) {
-    bool retried = false;
-    size_t position;
-    sm_bitvec_t fill;
-    if (__sm_chunk_is_set(src_chunk, j) && !__sm_chunk_is_set(dst_chunk, j)) {
-    retry:;
-      rc = __sm_chunk_set(dst_chunk, j, true, &position, &fill, retried);
-      if (rc == SM_NEEDS_TO_GROW) {
-        sparsemap_idx_t offset = __sm_get_chunk_offset(map, j + idx);
+    sparsemap_idx_t offset = __sm_get_chunk_offset(map, idx + j);
+    if (__sm_chunk_is_set(src_chunk, j)) {
+      size_t position;
+      sm_bitvec_t fill;
+      switch (__sm_chunk_set(dst_chunk, j, true, &position, &fill, false)) {
+      case SM_NEEDS_TO_GROW:
         offset += sizeof(sm_idx_t) + position * sizeof(sm_bitvec_t);
         __sm_insert_data(map, offset, (uint8_t *)&fill, sizeof(sm_bitvec_t));
-        if (!retried) {
-          retried = true;
-          goto retry;
+        __sm_chunk_set(dst_chunk, j, true, &position, &fill, true);
+        break;
+      case SM_NEEDS_TO_SHRINK:
+        if (__sm_chunk_is_empty(src_chunk)) {
+          __sm_assert(position == 1);
+          __sm_remove_data(map, offset, sizeof(sm_idx_t) + sizeof(sm_bitvec_t) * 2);
+          __sm_set_chunk_count(map, __sm_get_chunk_count(map) - 1);
+        } else {
+          offset += sizeof(sm_idx_t) + position * sizeof(sm_bitvec_t);
+          __sm_remove_data(map, offset, sizeof(sm_bitvec_t));
         }
+        break;
       }
-      __sm_assert(rc == SM_OK);
     }
   }
 }
