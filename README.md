@@ -31,7 +31,7 @@ Descriptor word has 16 bits):
       ^^ ^^ ^^ ^^-- sm_bitvec_t #0 - #3 are "0000000000000000"
                   ^^-- sm_bitvec_t #4 is "1111111111111111"
                      ^^-- sm_bitvec_t #5 is "0000000000000000"
-                        ^^-- sm_bitvec_t #7 is "1111111111111111"
+                        ^^-- sm_bitvec_t #6 is "1111111111111111"
                            ^^-- sm_bitvec_t #7 is "0110010101111001"
 
 Since the first 7 sm_bitvec_t's are either all "1" or "0" they are not stored.
