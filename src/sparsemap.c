@@ -228,7 +228,7 @@ static void
 __sm_chunk_reduce_capacity(__sm_chunk_t *chunk, size_t capacity)
 {
   __sm_assert(capacity % SM_BITS_PER_VECTOR == 0);
-  __sm_assert(capacity < SM_CHUNK_MAX_CAPACITY);
+  __sm_assert(capacity <= SM_CHUNK_MAX_CAPACITY);
 
   if (capacity >= SM_CHUNK_MAX_CAPACITY) {
     return;
@@ -1251,7 +1251,7 @@ sparsemap_set(sparsemap_t *map, sparsemap_idx_t idx, bool value)
       __sm_insert_data(map, offset, &buf[0], sizeof(buf));
 
       start += __sm_chunk_get_capacity(&chunk);
-      if ((sparsemap_idx_t)start + SM_CHUNK_MAX_CAPACITY < idx) {
+      if ((sparsemap_idx_t)start + SM_CHUNK_MAX_CAPACITY <= idx) {
         start = __sm_get_chunk_aligned_offset(idx);
       }
       *(sm_idx_t *)p = start;
@@ -1610,7 +1610,7 @@ sparsemap_merge(sparsemap_t *destination, sparsemap_t *source)
 sparsemap_idx_t
 sparsemap_split(sparsemap_t *map, sparsemap_idx_t offset, sparsemap_t *other)
 {
-  if (offset == 0) {
+  if (!(offset == SPARSEMAP_IDX_MAX) && (offset < 0 || offset >= sparsemap_get_ending_offset(map))) {
     return 0;
   }
 
@@ -1630,10 +1630,6 @@ sparsemap_split(sparsemap_t *map, sparsemap_idx_t offset, sparsemap_t *other)
 
   /* |src| points to the source-chunk */
   uint8_t *src = __sm_get_chunk_data(map, 0);
-
-  /* |offset| is relative to the beginning of this sparsemap_t; best
-     make it absolute. */
-  offset += *(sm_idx_t *)src;
 
   bool in_middle = false;
   uint8_t *prev = src;
@@ -1688,14 +1684,17 @@ sparsemap_split(sparsemap_t *map, sparsemap_idx_t offset, sparsemap_t *other)
 
     __sm_chunk_t d_chunk;
     __sm_chunk_init(&d_chunk, dst);
-    __sm_chunk_reduce_capacity(&d_chunk, capacity - (offset % capacity));
+    __sm_chunk_reduce_capacity(&d_chunk, __sm_get_vector_aligned_offset(capacity - (offset % capacity)));
 
     /* Now copy the bits. */
     sparsemap_idx_t d = offset;
+    sparsemap_idx_t b = __sm_get_vector_aligned_offset(offset % capacity);
     for (size_t j = offset % capacity; j < capacity; j++, d++) {
       if (__sm_chunk_is_set(&s_chunk, j)) {
-        sparsemap_set(other, d, true);
-        sparsemap_set(map, d, false); // TODO remove, and fix reduce_capacity below
+        assert(sparsemap_set(other, d, true) == d);
+        if (j > b && (j - b) % capacity < SM_BITS_PER_VECTOR) {
+          sparsemap_set(map, d, false);
+        }
       }
     }
 
@@ -1705,7 +1704,7 @@ sparsemap_split(sparsemap_t *map, sparsemap_idx_t offset, sparsemap_t *other)
     i++;
 
     /* Reduce the capacity of the source-chunk effectively erases bits. */
-    // TODO: __sm_chunk_reduce_capacity(&s_chunk, offset % capacity);
+    __sm_chunk_reduce_capacity(&s_chunk, b + SM_BITS_PER_VECTOR);
   }
 
   /* Now continue with all remaining chunks. */

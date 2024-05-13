@@ -720,35 +720,43 @@ test_api_split(const MunitParameter params[], void *data)
 
   sparsemap_init(&portion, buf, 1024);
 
-  for (int i = 0; i < 1024; i++) {
-    sparsemap_set(map, i, true);
-  }
-  for (int i = 0; i < 1024; i++) {
-    assert_true(sparsemap_is_set(map, i));
-    assert_false(sparsemap_is_set(&portion, i));
-  }
-  sparsemap_split(map, 512, &portion);
-  for (int i = 0; i < 512; i++) {
-    assert_true(sparsemap_is_set(map, i));
-    assert_false(sparsemap_is_set(&portion, i));
-  }
-  for (int i = 513; i < 1024; i++) {
-    assert_false(sparsemap_is_set(map, i));
-    assert_true(sparsemap_is_set(&portion, i));
+  for (sparsemap_idx_t off = 0; off < 1024; off++) {
+    for (sparsemap_idx_t seg = 0; seg < 10 * 1024; seg += 1024) {
+
+      for (sparsemap_idx_t i = 0; i < 1024; i++) {
+        assert_true(sparsemap_set(map, i + seg, true) == i + seg);
+      }
+      for (sparsemap_idx_t i = 0; i < 1024; i++) {
+        assert_true(sparsemap_is_set(map, i + seg));
+        assert_false(sparsemap_is_set(&portion, i + seg));
+      }
+
+      sparsemap_split(map, seg + off, &portion);
+
+      for (sparsemap_idx_t i = 0; i < off; i++) {
+        assert_true(sparsemap_is_set(map, i + seg));
+        assert_false(sparsemap_is_set(&portion, i + seg));
+      }
+      for (sparsemap_idx_t i = off + 1; i < 1024; i++) {
+        assert_false(sparsemap_is_set(map, i + seg));
+        assert_true(sparsemap_is_set(&portion, i + seg));
+      }
+
+      sparsemap_clear(map);
+      sparsemap_clear(&portion);
+    }
   }
 
-  sparsemap_clear(map);
-  sparsemap_clear(&portion);
-
-  for (int i = 0; i < 100; i++) {
-    sparsemap_set(map, i, true);
+  for (sparsemap_idx_t i = 0; i < 100; i++) {
+    assert_true(sparsemap_set(map, i, true) == i);
   }
-  for (int i = 0; i < 100; i++) {
+  for (sparsemap_idx_t i = 0; i < 100; i++) {
     assert_true(sparsemap_is_set(map, i));
     assert_false(sparsemap_is_set(&portion, i));
   }
 
   sparsemap_idx_t offset = sparsemap_split(map, SPARSEMAP_IDX_MAX, &portion);
+
   for (size_t i = 0; i < offset; i++) {
     assert_true(sparsemap_is_set(map, i));
     assert_false(sparsemap_is_set(&portion, i));
@@ -762,16 +770,17 @@ test_api_split(const MunitParameter params[], void *data)
   sparsemap_clear(map);
 
   sparsemap_init(&portion, buf, 1024);
-  for (int i = 0; i < 13; i++) {
-    sparsemap_set(map, i + 24, true);
+  for (sparsemap_idx_t i = 0; i < 13; i++) {
+    assert_true(sparsemap_set(map, i + 24, true) == i + 24);
   }
 
   offset = sparsemap_split(map, SPARSEMAP_IDX_MAX, &portion);
-  for (size_t i = 0; i < offset - 24; i++) {
+
+  for (sparsemap_idx_t i = 0; i < offset - 24; i++) {
     assert_true(sparsemap_is_set(map, i + 24));
     assert_false(sparsemap_is_set(&portion, i + 24));
   }
-  for (int i = offset - 24; i < 13; i++) {
+  for (sparsemap_idx_t i = offset - 24; i < 13; i++) {
     assert_false(sparsemap_is_set(map, i + 24));
     assert_true(sparsemap_is_set(&portion, i + 24));
   }
