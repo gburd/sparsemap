@@ -285,6 +285,13 @@ sparsemap_idx_t sparsemap_get_starting_offset(sparsemap_t *map);
  */
 sparsemap_idx_t sparsemap_get_ending_offset(sparsemap_t *map);
 
+/** @brief Returns the percent of bits set in the map.
+ *
+ * @param[in] map The sparsemap reference.
+ * @returns the percent of bits set.
+ */
+double sparsemap_fill_factor(sparsemap_t *map);
+
 /** @brief Provides a method for a callback function to examine every bit set in
  * the index.
  *

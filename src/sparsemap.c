@@ -1183,7 +1183,7 @@ sparsemap_set(sparsemap_t *map, sparsemap_idx_t idx, bool value)
     __sm_append_data(map, &buf[0], sizeof(buf));
 
     uint8_t *p = __sm_get_chunk_data(map, 0);
-    *(sm_idx_t *)p = __sm_get_vector_aligned_offset(idx); // TODO: vector or chunk aligned?
+    *(sm_idx_t *)p = __sm_get_chunk_aligned_offset(idx); // TODO: vector or chunk aligned?
 
     __sm_set_chunk_count(map, 1);
 
@@ -1382,6 +1382,14 @@ sparsemap_get_ending_offset(sparsemap_t *map)
     }
   }
   return offset;
+}
+
+double
+sparsemap_fill_factor(sparsemap_t *map)
+{
+  size_t rank = sparsemap_rank(map, 0, SPARSEMAP_IDX_MAX, true);
+  sparsemap_idx_t end = sparsemap_get_ending_offset(map);
+  return (double)rank / (double)end * 100.0;
 }
 
 void *
