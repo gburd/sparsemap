@@ -1183,7 +1183,7 @@ sparsemap_set(sparsemap_t *map, sparsemap_idx_t idx, bool value)
     __sm_append_data(map, &buf[0], sizeof(buf));
 
     uint8_t *p = __sm_get_chunk_data(map, 0);
-    *(sm_idx_t *)p = __sm_get_chunk_aligned_offset(idx); // TODO: vector or chunk aligned?
+    *(sm_idx_t *)p = __sm_get_vector_aligned_offset(idx); // TODO: vector or chunk aligned?
 
     __sm_set_chunk_count(map, 1);
 
@@ -1209,7 +1209,7 @@ sparsemap_set(sparsemap_t *map, sparsemap_idx_t idx, bool value)
     uint8_t buf[sizeof(sm_idx_t) + sizeof(sm_bitvec_t) * 2] = { 0 };
     __sm_insert_data(map, offset, &buf[0], sizeof(buf));
 
-    size_t aligned_idx = __sm_get_chunk_aligned_offset(idx); // TODO: vector or chunk alignment?
+    size_t aligned_idx = __sm_get_vector_aligned_offset(idx); // TODO: vector or chunk alignment?
     if (start - aligned_idx < SM_CHUNK_MAX_CAPACITY) {
       __sm_chunk_t chunk;
       __sm_chunk_init(&chunk, p + sizeof(sm_idx_t));
@@ -1799,7 +1799,7 @@ __sm_rank_vec(sparsemap_t *map, size_t begin, size_t end, bool value, sm_bitvec_
           begin = 0;
         }
       } else {
-        if (begin > gap) {
+        if (begin >= gap) {
           begin -= gap;
         }
       }
