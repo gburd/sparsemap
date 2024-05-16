@@ -24,6 +24,7 @@
             act
             autoconf
             clang
+            cmake
             ed
             gcc
             gdb
@@ -31,6 +32,7 @@
             graphviz-nox
             libtool
             m4
+            ninja
             perl
             pkg-config
             python3
