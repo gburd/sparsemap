@@ -79,3 +79,9 @@ target_link_libraries(test PRIVATE sparsemap)
 target_include_directories(test PRIVATE ${HEADER_DIR})
 add_custom_target(run_test COMMAND test WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
+# Add soak program
+add_executable(soak tests/soak.c lib/common.c lib/tdigest.c lib/roaring.c)
+target_link_libraries(soak PRIVATE sparsemap)
+target_include_directories(soak PRIVATE ${HEADER_DIR} lib)
+target_link_libraries(soak PUBLIC m)
+add_custom_target(run_soak COMMAND soak WORKING_DIRECTORY ${CMAKE_BINARY_DIR})

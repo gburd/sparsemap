@@ -186,15 +186,17 @@ main()
   sparsemap_clear(map);
   for (int i = 0; i < 2048 * 3; i++) {
     sparsemap_set(map, i, true);
+    assert(sparsemap_is_set(map, i) == true);
   }
   sparsemap_split(map, 64, sm2);
-  for (int i = 0; i < 64; i++) {
-    assert(sparsemap_is_set(map, i) == true);
-    assert(sparsemap_is_set(sm2, i) == false);
-  }
-  for (int i = 64; i < 2048 * 3; i++) {
-    assert(sparsemap_is_set(map, i) == false);
-    assert(sparsemap_is_set(sm2, i) == true);
+  for (int i = 0; i < 2048 * 3; i++) {
+    if (i < 64) {
+      assert(sparsemap_is_set(map, i) == true);
+      assert(sparsemap_is_set(sm2, i) == false);
+    } else {
+      assert(sparsemap_is_set(map, i) == false);
+      assert(sparsemap_is_set(sm2, i) == true);
+    }
   }
 
   fprintf(stderr, " ok\n");

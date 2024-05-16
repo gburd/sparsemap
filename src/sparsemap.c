@@ -1075,7 +1075,7 @@ void
 sparsemap_open(sparsemap_t *map, uint8_t *data, size_t size)
 {
   map->m_data = data;
-  map->m_data_used = map->m_data_used > 0 ? map->m_data_used : 0;
+  map->m_data_used = __sm_get_size_impl(map);
   map->m_capacity = size;
 }
 
@@ -1183,7 +1183,7 @@ sparsemap_set(sparsemap_t *map, sparsemap_idx_t idx, bool value)
     __sm_append_data(map, &buf[0], sizeof(buf));
 
     uint8_t *p = __sm_get_chunk_data(map, 0);
-    *(sm_idx_t *)p = __sm_get_vector_aligned_offset(idx); // TODO: vector or chunk aligned?
+    *(sm_idx_t *)p = __sm_get_chunk_aligned_offset(idx);
 
     __sm_set_chunk_count(map, 1);
 
@@ -1209,7 +1209,7 @@ sparsemap_set(sparsemap_t *map, sparsemap_idx_t idx, bool value)
     uint8_t buf[sizeof(sm_idx_t) + sizeof(sm_bitvec_t) * 2] = { 0 };
     __sm_insert_data(map, offset, &buf[0], sizeof(buf));
 
-    size_t aligned_idx = __sm_get_vector_aligned_offset(idx); // TODO: vector or chunk alignment?
+    size_t aligned_idx = __sm_get_chunk_aligned_offset(idx);
     if (start - aligned_idx < SM_CHUNK_MAX_CAPACITY) {
       __sm_chunk_t chunk;
       __sm_chunk_init(&chunk, p + sizeof(sm_idx_t));
@@ -1402,6 +1402,10 @@ size_t
 sparsemap_get_size(sparsemap_t *map)
 {
   if (map->m_data_used) {
+    size_t size = __sm_get_size_impl(map);
+    if (size != map->m_data_used) {
+      map->m_data_used = size;
+    }
     __sm_when_diag({ __sm_assert(map->m_data_used == __sm_get_size_impl(map)); });
     return map->m_data_used;
   }
@@ -1621,7 +1625,7 @@ sparsemap_split(sparsemap_t *map, sparsemap_idx_t offset, sparsemap_t *other)
     uint8_t buf[sizeof(sm_idx_t) + sizeof(sm_bitvec_t) * 2] = { 0 };
     memcpy(dst, &buf[0], sizeof(buf));
 
-    *(sm_idx_t *)dst = __sm_get_vector_aligned_offset(offset); // TODO: was simply "offset"
+    *(sm_idx_t *)dst = __sm_get_vector_aligned_offset(offset);
     dst += sizeof(sm_idx_t);
 
     /* the |other| sparsemap_t now has one additional chunk */
