@@ -9,6 +9,7 @@
     autoconf
     clang
     clang-tools
+    cmake
     ed
     fira-code-nerdfont
     gcc
@@ -23,6 +24,7 @@
     lldb
     m4
     neovim
+    ninja
     openssh
     perl
     pkg-config
