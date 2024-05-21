@@ -456,3 +456,18 @@ sm_occupied(sparsemap_t *map, sparsemap_idx_t m, int len, bool value)
   }
   return false;
 }
+
+char *
+bytes_as(double bytes, char *s, size_t size)
+{
+  const char *units[] = { "b", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB", "ZiB", "YiB" };
+  size_t i = 0;
+
+  while (bytes >= 1024 && i < sizeof(units) / sizeof(units[0]) - 1) {
+    bytes /= 1024;
+    i++;
+  }
+
+  snprintf(s, size, "%.2f %s", bytes, units[i]);
+  return s;
+}

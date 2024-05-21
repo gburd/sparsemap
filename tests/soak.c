@@ -1,3 +1,5 @@
+#define _POSIX_C_SOURCE 199309L
+
 #include <assert.h>
 #include <errno.h>
 #include <stdbool.h>
@@ -130,23 +132,6 @@ typedef struct container {
   td_histogram_t *validate_stats;
 
 } container_t;
-
-#define digest(name) containers[type].name##_stats.td
-
-char *
-bytes_as(double bytes, char *s, size_t size)
-{
-  const char *units[] = { "b", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB", "ZiB", "YiB" };
-  size_t i = 0;
-
-  while (bytes >= 1024 && i < sizeof(units) / sizeof(units[0]) - 1) {
-    bytes /= 1024;
-    i++;
-  }
-
-  snprintf(s, size, "%.2f %s", bytes, units[i]);
-  return s;
-}
 
 /**
  * A "coin toss" function that is critical to the proper operation of the
@@ -450,7 +435,7 @@ __sm_find_span(void *handle, unsigned len)
 {
   sparsemap_t *map = (sparsemap_t *)handle;
   pgno_t pgno = (pgno_t)sparsemap_span(map, 0, len, true);
-  return SPARSEMAP_NOT_FOUND(pgno) ? -1 : pgno;
+  return SPARSEMAP_NOT_FOUND(pgno) ? (pgno_t)-1 : pgno;
 }
 
 static bool
@@ -552,7 +537,7 @@ __sm_count(void *handle)
 
 /* midl ------------------------------------------------------------------ */
 
-//static bool __midl_validate(void *handle);
+// static bool __midl_validate(void *handle);
 
 static void *
 __midl_alloc(size_t capacity)
@@ -632,11 +617,11 @@ __midl_find_span(void *handle, unsigned len)
       if (--retry < 0)
         break;
     } else {
-      return -1;
+      return (pgno_t)-1;
     }
   } while (1);
 search_done:;
-  return retry < 0 ? -1 : pgno;
+  return retry < 0 ? (pgno_t)-1 : pgno;
 }
 
 static bool
@@ -762,7 +747,7 @@ __midl_validate(void *handle)
 static void *
 __roar_alloc(size_t capacity)
 {
-  roaring_bitmap_t *map = roaring_bitmap_create();
+  roaring_bitmap_t *map = roaring_bitmap_create_with_capacity(capacity);
   assert(map != NULL);
   return map;
 }
@@ -809,7 +794,7 @@ __roar_find_span(void *handle, unsigned len)
     }
     offset++;
   } while (offset <= max);
-  return offset > max ? -1 : offset;
+  return offset > max ? (pgno_t)-1 : offset;
 }
 
 static bool
@@ -1046,6 +1031,8 @@ __stats_merge(td_histogram_t *stats, void *fn, void **handle, void *other_handle
 
 /* ----------------------------------------------------------------------- */
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wcast-function-type"
 // clang-format off
 container_t containers[] = {
   { "sparsemap",
@@ -1063,7 +1050,7 @@ container_t containers[] = {
     .merge = timed_merge(__sm_merge),
     .size = __sm_size,
     .count = __sm_count,
-    .validate = NULL
+    .validate = NULL,
   },
   { "midl",
     .alloc = __midl_alloc,
@@ -1080,7 +1067,7 @@ container_t containers[] = {
     .merge = timed_merge(__midl_merge),
     .size = __midl_size,
     .count = __midl_count,
-    .validate = __midl_validate
+    .validate = __midl_validate,
   },
   { "roaring",
     .alloc = __roar_alloc,
@@ -1101,6 +1088,7 @@ container_t containers[] = {
   },
 };
 // clang-format on
+#pragma GCC diagnostic pop
 
 /* ----------------------------------------------------------------------- */
 
@@ -1178,6 +1166,7 @@ verify_eq(unsigned a, void *ad, unsigned b, void *bd)
   bool ret = true;
 
   // 'a' should always be a Sparsemap
+  assert(a == SM);
   switch (b) {
   case ML:
     assert((ret = verify_sm_eq_ml((sparsemap_t *)ad, (MDB_IDL)bd)) == true);
@@ -1291,9 +1280,10 @@ main(int argc, char *argv[])
     setvbuf(record_fp, NULL, _IONBF, 0);
     setvbuf(stats_fp, NULL, _IONBF, 0);
   }
+
+  const char *names[] = { "sm", "ml", "rb" };
   unsigned types[] = { SM, ML, RB };
   unsigned num_types = (sizeof((types)) / sizeof((types)[0]));
-
   foreach(types)
   {
     containers[type].alloc_stats.td = NULL;
@@ -1310,6 +1300,40 @@ main(int argc, char *argv[])
     containers[type].merge_stats.td = td_new(100);
   }
 
+#define digest(idx) *((td_histogram_t **)((uintptr_t)(containers + type) + digests[(idx)].td_offset))
+#define digest_offset(name) (offsetof(container_t, name##_stats.td))
+
+  // clang-format off
+  static struct {
+    size_t td_offset;
+    const char *statistic;
+  } digests[] = {
+    { .td_offset = digest_offset(set), .statistic = "set" },
+    { .td_offset = digest_offset(is_set), .statistic = "is_set" },
+    { .td_offset = digest_offset(clear), .statistic = "clear" },
+    { .td_offset = digest_offset(find_span), .statistic = "find_span" },
+    { .td_offset = digest_offset(take_span), .statistic = "take_span" },
+    { .td_offset = digest_offset(release_span), .statistic = "release_span" },
+    { .td_offset = digest_offset(is_span), .statistic = "is_span" },
+    { .td_offset = digest_offset(is_empty), .statistic = "is_empty" },
+    { .td_offset = digest_offset(is_first), .statistic = "is_first" },
+    { .td_offset = digest_offset(merge), .statistic = "merge" },
+  };
+  size_t num_digests = (sizeof((digests)) / sizeof((digests)[0]));
+
+  static struct {
+    double numeric;
+    const char *name;
+  } pctils[] = {
+    { .numeric = 0.5, .name = "p50" },
+    { .numeric = 0.75, .name = "p75" },
+    { .numeric = 0.90, .name = "p90" },
+    { .numeric = 0.99, .name = "p99" },
+    { .numeric = 0.999, .name = "p999" },
+  };
+  // clang-format on
+  size_t num_pctils = (sizeof((pctils)) / sizeof((pctils)[0]));
+
   /* Setup: add an amt of bits to each container. */
   foreach(types)
   {
@@ -1324,77 +1348,6 @@ main(int argc, char *argv[])
   checkpoint(types);
   left = amt;
 
-  if (statistics) {
-    const char *names[] = { "sm", "ml", "rb" };
-    const char *dists[] = { "p50", "p75", "p90", "p99", "p999" };
-    fprintf(stats_fp, "timestamp,iterations,");
-    foreach(types)
-    {
-      fprintf(stats_fp, "%s_size,%s_bytes,", names[type], names[type]);
-      if (digest(alloc) != NULL) {
-        for (int i = 0; i < 5; i++) {
-          fprintf(stats_fp, "%s_alloc_%s,", names[type], dists[i]);
-        }
-      }
-      if (digest(free) != NULL) {
-        for (int i = 0; i < 5; i++) {
-          fprintf(stats_fp, "%s_free_%s,", names[type], dists[i]);
-        }
-      }
-      if (digest(set) != NULL) {
-        for (int i = 0; i < 5; i++) {
-          fprintf(stats_fp, "%s_set_%s,", names[type], dists[i]);
-        }
-      }
-      if (digest(is_set) != NULL) {
-        for (int i = 0; i < 5; i++) {
-          fprintf(stats_fp, "%s_is_set_%s,", names[type], dists[i]);
-        }
-      }
-      if (digest(clear) != NULL) {
-        for (int i = 0; i < 5; i++) {
-          fprintf(stats_fp, "%s_clear_%s,", names[type], dists[i]);
-        }
-      }
-      if (digest(find_span) != NULL) {
-        for (int i = 0; i < 5; i++) {
-          fprintf(stats_fp, "%s_find_span_%s,", names[type], dists[i]);
-        }
-      }
-      if (digest(take_span) != NULL) {
-        for (int i = 0; i < 5; i++) {
-          fprintf(stats_fp, "%s_take_span_%s,", names[type], dists[i]);
-        }
-      }
-      if (digest(release_span) != NULL) {
-        for (int i = 0; i < 5; i++) {
-          fprintf(stats_fp, "%s_release_span_%s,", names[type], dists[i]);
-        }
-      }
-      if (digest(is_span) != NULL) {
-        for (int i = 0; i < 5; i++) {
-          fprintf(stats_fp, "%s_is_span_%s,", names[type], dists[i]);
-        }
-      }
-      if (digest(is_empty) != NULL) {
-        for (int i = 0; i < 5; i++) {
-          fprintf(stats_fp, "%s_is_empty_%s,", names[type], dists[i]);
-        }
-      }
-      if (digest(is_first) != NULL) {
-        for (int i = 0; i < 5; i++) {
-          fprintf(stats_fp, "%s_is_first_%s,", names[type], dists[i]);
-        }
-      }
-      if (digest(merge) != NULL) {
-        for (int i = 0; i < 5; i++) {
-          fprintf(stats_fp, "%s_merge_%s,", names[type], dists[i]);
-        }
-      }
-    }
-    fprintf(stats_fp, "\n");
-  }
-
   while (true) {
     iteration++;
     // the an amount [1, 16] of pages to find preferring smaller sizes
@@ -1403,7 +1356,7 @@ main(int argc, char *argv[])
     foreach(types)
     {
       loc[type] = invoke(type, find_span, len);
-      if (loc[type] == -1) {
+      if (loc[type] == (pgno_t)-1) {
         goto larger_please;
       }
     }
@@ -1461,7 +1414,6 @@ main(int argc, char *argv[])
     // if (toss(10) > 8) {
     if (0) {
       size_t new_offset, new_amt;
-      pgno_t max;
     larger_please:
       new_amt = 1024 + (xorshift32() % 2048) + toss(1024);
       new_offset = sparsemap_get_ending_offset(handles[SM]) + 1;
@@ -1494,32 +1446,34 @@ main(int argc, char *argv[])
     }
 
     if (statistics) {
-      const float dists[] = { 0.5, 0.75, 0.90, 0.99, 0.999 };
-      fprintf(stats_fp, "%f,%zu,", nsts(), iteration);
+      if (iteration > 1) {
+        fprintf(stats_fp, "%f,%zu,", nsts(), iteration);
+      }
       foreach(types)
       {
-        fprintf(stats_fp, "%zu,%zu,", containers[type].count(handles[type]), containers[type].size(handles[type]));
-        // clang-format off
-        td_histogram_t *td[] = {
-          digest(alloc),
-          digest(free),
-          digest(set),
-          digest(is_set),
-          digest(clear),
-          digest(find_span),
-          digest(take_span),
-          digest(release_span),
-          digest(is_span),
-          digest(is_empty),
-          digest(is_first),
-          digest(merge)
-        };
-        // clang-format on
-        for (int i = 0; i < 12; i++) {
-          if (td[i] != NULL) {
-            td_compress(td[i]);
-            for (int j = 0; j < 5; j++) {
-              fprintf(stats_fp, "%.10f,", td_quantile(td[i], dists[j]));
+        if (iteration == 1 && type == SM) {
+          fprintf(stats_fp, "timestamp,iterations,");
+          fprintf(stats_fp, "%s_size,%s_bytes,", names[type], names[type]);
+          for (size_t i = 0; i < num_digests; i++) {
+            td_histogram_t *h = digest(i);
+            if (h) {
+              for (size_t j = 0; j < num_pctils; j++) {
+                fprintf(stats_fp, "%s_%s_%s,", names[type], digests[i].statistic, pctils[j].name);
+              }
+            }
+          }
+          fprintf(stats_fp, "\n");
+        }
+
+        if (iteration > 1) {
+          fprintf(stats_fp, "%zu,%zu,", containers[type].count(handles[type]), containers[type].size(handles[type]));
+          for (size_t i = 0; i < num_digests; i++) {
+            td_histogram_t *h = digest(i);
+            if (h) {
+              td_compress(h);
+              for (size_t j = 0; j < num_pctils; j++) {
+                fprintf(stats_fp, "%.10f,", td_quantile(h, pctils[j].numeric));
+              }
             }
           }
         }

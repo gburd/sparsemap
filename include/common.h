@@ -56,3 +56,5 @@ void sm_whats_set(sparsemap_t *map, int off, int len);
 
 bool sm_is_span(sparsemap_t *map, sparsemap_idx_t m, int len, bool value);
 bool sm_occupied(sparsemap_t *map, sparsemap_idx_t m, int len, bool value);
+
+char *bytes_as(double bytes, char *s, size_t size);
