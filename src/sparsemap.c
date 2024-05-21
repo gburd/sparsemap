@@ -730,15 +730,15 @@ __sm_chunk_scan(__sm_chunk_t *chunk, sm_idx_t start, void (*scanner)(sm_idx_t[],
             continue;
           }
           size_t n = 0;
-          for (size_t b = skip; b < SM_BITS_PER_VECTOR; b++) {
-            buffer[n++] = start + b;
+          for (size_t b = 0; b < SM_BITS_PER_VECTOR; b++) {
+            buffer[n++] = start + ret + b;
           }
           scanner(&buffer[0], n, aux);
           ret += n;
           skip = 0;
         } else {
           for (size_t b = 0; b < SM_BITS_PER_VECTOR; b++) {
-            buffer[b] = start + b;
+            buffer[b] = start + ret + b;
           }
           scanner(&buffer[0], SM_BITS_PER_VECTOR, aux);
           ret += SM_BITS_PER_VECTOR;
@@ -758,14 +758,14 @@ __sm_chunk_scan(__sm_chunk_t *chunk, sm_idx_t start, void (*scanner)(sm_idx_t[],
               continue;
             }
             if (w & ((sm_bitvec_t)1 << b)) {
-              buffer[n++] = start + b;
+              buffer[n++] = start + ret + b;
               ret++;
             }
           }
         } else {
           for (int b = 0; b < SM_BITS_PER_VECTOR; b++) {
             if (w & ((sm_bitvec_t)1 << b)) {
-              buffer[n++] = start + b;
+              buffer[n++] = start + ret + b;
             }
           }
           ret += n;

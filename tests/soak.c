@@ -5,433 +5,133 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#include <unistd.h>
 
 #include "../include/common.h"
 #include "../include/roaring.h"
 #include "../include/sparsemap.h"
 #include "../include/tdigest.h"
 
-/* midl.h ------------------------------------------------------------------ */
-/** @defgroup idls	ID List Management
- *	@{
- */
-/** A generic unsigned ID number. These were entryIDs in back-bdb.
- *	Preferably it should have the same size as a pointer.
- */
-typedef size_t MDB_ID;
+#include "midl.c"
 
-/** An IDL is an ID List, a sorted array of IDs. The first
- * element of the array is a counter for how many actual
- * IDs are in the list. In the original back-bdb code, IDLs are
- * sorted in ascending order. For libmdb IDLs are sorted in
- * descending order.
- */
-typedef MDB_ID *MDB_IDL;
+#define INITIAL_AMOUNT 1024 * 2
 
-/* IDL sizes - likely should be even bigger
- *   limiting factors: sizeof(ID), thread stack size
- */
-#define MDB_IDL_LOGN 16 /* DB_SIZE is 2^16, UM_SIZE is 2^17 */
-#define MDB_IDL_DB_SIZE (1 << MDB_IDL_LOGN)
-#define MDB_IDL_UM_SIZE (1 << (MDB_IDL_LOGN + 1))
+typedef size_t pgno_t;
 
-#define MDB_IDL_DB_MAX (MDB_IDL_DB_SIZE - 1)
-#define MDB_IDL_UM_MAX (MDB_IDL_UM_SIZE - 1)
+typedef enum { SM, ML, RB } container_impl_t;
 
-#define MDB_IDL_SIZEOF(ids) (((ids)[0] + 1) * sizeof(MDB_ID))
-#define MDB_IDL_IS_ZERO(ids) ((ids)[0] == 0)
-#define MDB_IDL_CPY(dst, src) (memcpy(dst, src, MDB_IDL_SIZEOF(src)))
-#define MDB_IDL_FIRST(ids) ((ids)[1])
-#define MDB_IDL_LAST(ids) ((ids)[(ids)[0]])
+typedef struct container {
+  const char *name;
+  /* allocate a new container */
+  void *(*alloc)(size_t capacity);
+  struct {
+    td_histogram_t *td;
+    void *(*alloc)(size_t capacity);
+  } alloc_stats;
 
-/** Current max length of an #mdb_midl_alloc()ed IDL */
-#define MDB_IDL_ALLOCLEN(ids) ((ids)[-1])
+  /* free the container */
+  void (*free)(void *handle);
+  struct {
+    td_histogram_t *td;
+    void (*free)(void *handle);
+  } free_stats;
 
-/** Append ID to IDL. The IDL must be big enough. */
-#define mdb_midl_xappend(idl, id)             \
-  do {                                        \
-    MDB_ID *xidl = (idl), xlen = ++(xidl[0]); \
-    xidl[xlen] = (id);                        \
-  } while (0)
+  /* add pg to the container */
+  pgno_t (*set)(void **handle, pgno_t pg);
+  struct {
+    td_histogram_t *td;
+    pgno_t (*set)(void **handle, pgno_t pg);
+  } set_stats;
+#define timed_set(fn) (pgno_t(*)(void **, pgno_t)) __stats_set, .set_stats.set = fn
 
-/** Search for an ID in an IDL.
- * @param[in] ids	The IDL to search.
- * @param[in] id	The ID to search for.
- * @return	The index of the first ID greater than or equal to \b id.
- */
-unsigned mdb_midl_search(MDB_IDL ids, MDB_ID id);
+  /* is pg in the container */
+  bool (*is_set)(void *handle, pgno_t pg);
+  struct {
+    td_histogram_t *td;
+    bool (*is_set)(void *handle, pgno_t pg);
+  } is_set_stats;
+#define timed_is_set(fn) (bool (*)(void *, pgno_t)) __stats_is_set, .is_set_stats.is_set = fn
 
-/** Allocate an IDL.
- * Allocates memory for an IDL of the given size.
- * @return	IDL on success, NULL on failure.
- */
-MDB_IDL mdb_midl_alloc(int num);
+  /* remove pg from the container */
+  pgno_t (*clear)(void **handle, pgno_t pg);
+  struct {
+    td_histogram_t *td;
+    pgno_t (*clear)(void **handle, pgno_t pg);
+  } clear_stats;
+#define timed_clear(fn) (pgno_t(*)(void **, pgno_t)) __stats_clear, .clear_stats.clear = fn
 
-/** Free an IDL.
- * @param[in] ids	The IDL to free.
- */
-void mdb_midl_free(MDB_IDL ids);
+  /* find a set of contigious page of len and return the smallest pgno */
+  pgno_t (*find_span)(void *handle, unsigned len);
+  struct {
+    td_histogram_t *td;
+    pgno_t (*find_span)(void *handle, unsigned len);
+  } find_span_stats;
+#define timed_find_span(fn) (pgno_t(*)(void *, unsigned)) __stats_find_span, .find_span_stats.find_span = fn
 
-/** Shrink an IDL.
- * Return the IDL to the default size if it has grown larger.
- * @param[in,out] idp	Address of the IDL to shrink.
- */
-void mdb_midl_shrink(MDB_IDL *idp);
+  /* remove the span [pg, pg + len) from the container */
+  bool (*take_span)(void **handle, pgno_t pg, unsigned len);
+  struct {
+    td_histogram_t *td;
+    bool (*take_span)(void **handle, pgno_t pg, unsigned len);
+  } take_span_stats;
+#define timed_take_span(fn) (bool (*)(void **, pgno_t, unsigned)) __stats_take_span, .take_span_stats.take_span = fn
 
-/** Shrink an IDL to a specific size.
- * Resize the IDL to \b size if it is larger.
- * @param[in,out] idp	Address of the IDL to shrink.
- * @param[in] size	Capacity to have once resized.
- */
-void mdb_midl_shrink(MDB_IDL *idp);
+  /* add the span [pg, pg + len) into the container */
+  bool (*release_span)(void **handle, pgno_t pg, unsigned len);
+  struct {
+    td_histogram_t *td;
+    bool (*release_span)(void **handle, pgno_t pg, unsigned len);
+  } release_span_stats;
+#define timed_release_span(fn) (bool (*)(void **, pgno_t, unsigned)) __stats_release_span, .release_span_stats.release_span = fn
 
-/** Make room for num additional elements in an IDL.
- * @param[in,out] idp	Address of the IDL.
- * @param[in] num	Number of elements to make room for.
- * @return	0 on success, ENOMEM on failure.
- */
-int mdb_midl_need(MDB_IDL *idp, unsigned num);
+  /* are the pgno in the span [pg, pg+ len) in the container? */
+  bool (*is_span)(void *handle, pgno_t pg, unsigned len);
+  struct {
+    td_histogram_t *td;
+    bool (*is_span)(void *handle, pgno_t pg, unsigned len);
+  } is_span_stats;
+#define timed_is_span(fn) (bool (*)(void *, pgno_t, unsigned)) __stats_is_span, .is_span_stats.is_span = fn
 
-/** Append an ID onto an IDL.
- * @param[in,out] idp	Address of the IDL to append to.
- * @param[in] id	The ID to append.
- * @return	0 on success, ENOMEM if the IDL is too large.
- */
-int mdb_midl_append(MDB_IDL *idp, MDB_ID id);
+  /* are the pgno in the span [pg, pg+ len) notn in the container? */
+  bool (*is_empty)(void *handle, pgno_t pg, unsigned len);
+  struct {
+    td_histogram_t *td;
+    bool (*is_empty)(void *handle, pgno_t pg, unsigned len);
+  } is_empty_stats;
+#define timed_is_empty(fn) (bool (*)(void *, pgno_t, unsigned)) __stats_is_empty, .is_empty_stats.is_empty = fn
 
-/** Append an IDL onto an IDL.
- * @param[in,out] idp	Address of the IDL to append to.
- * @param[in] app	The IDL to append.
- * @return	0 on success, ENOMEM if the IDL is too large.
- */
-int mdb_midl_append_list(MDB_IDL *idp, MDB_IDL app);
+  /* is the span the first one (brute force check) */
+  bool (*is_first)(void *handle, pgno_t pg, unsigned len);
+  struct {
+    td_histogram_t *td;
+    bool (*is_first)(void *handle, pgno_t pg, unsigned len);
+  } is_first_stats;
+#define timed_is_first(fn) (bool (*)(void *, pgno_t, unsigned)) __stats_is_first, .is_first_stats.is_first = fn
 
-/** Append an ID range onto an IDL.
- * @param[in,out] idp	Address of the IDL to append to.
- * @param[in] id	The lowest ID to append.
- * @param[in] n		Number of IDs to append.
- * @return	0 on success, ENOMEM if the IDL is too large.
- */
-int mdb_midl_append_range(MDB_IDL *idp, MDB_ID id, unsigned n);
+  /* ensure that all pgno contained in other_handle are also in handle */
+  bool (*merge)(void **handle, void *other_handle);
+  struct {
+    td_histogram_t *td;
+    bool (*merge)(void **handle, void *other_handle);
+  } merge_stats;
+#define timed_merge(fn) (bool (*)(void **, void *)) __stats_merge, .merge_stats.merge = fn
 
-/** Merge an IDL onto an IDL. The destination IDL must be big enough.
- * @param[in] idl	The IDL to merge into.
- * @param[in] merge	The IDL to merge.
- */
-void mdb_midl_xmerge(MDB_IDL idl, MDB_IDL merge);
+  /* the bytes size of the container */
+  size_t (*size)(void *handle);
+  td_histogram_t *size_stats;
 
-/** Sort an IDL.
- * @param[in,out] ids	The IDL to sort.
- */
-void mdb_midl_sort(MDB_IDL ids);
+  /* the number of items in the container */
+  size_t (*count)(void *handle);
+  td_histogram_t *count_stats;
 
-/* midl.c ------------------------------------------------------------------ */
-/** @defgroup idls	ID List Management
- *	@{
- */
-#define CMP(x, y) ((x) < (y) ? -1 : (x) > (y))
+  /* perform internal validation on the container (optional) */
+  bool (*validate)(void *handle);
+  td_histogram_t *validate_stats;
 
-unsigned
-mdb_midl_search(MDB_IDL ids, MDB_ID id)
-{
-  /*
-   * binary search of id in ids
-   * if found, returns position of id
-   * if not found, returns first position greater than id
-   */
-  unsigned base = 0;
-  unsigned cursor = 1;
-  int val = 0;
-  unsigned n = ids[0];
+} container_t;
 
-  while (0 < n) {
-    unsigned pivot = n >> 1;
-    cursor = base + pivot + 1;
-    val = CMP(ids[cursor], id);
-
-    if (val < 0) {
-      n = pivot;
-
-    } else if (val > 0) {
-      base = cursor;
-      n -= pivot + 1;
-
-    } else {
-      return cursor;
-    }
-  }
-
-  if (val > 0) {
-    ++cursor;
-  }
-  return cursor;
-}
-
-int
-mdb_midl_insert(MDB_IDL ids, MDB_ID id)
-{
-  unsigned x, i;
-
-  x = mdb_midl_search(ids, id);
-  assert(x > 0);
-
-  if (x < 1) {
-    /* internal error */
-    return -2;
-  }
-
-  if (x <= ids[0] && ids[x] == id) {
-    /* duplicate */
-    assert(0);
-    return -1;
-  }
-
-  if (++ids[0] >= MDB_IDL_DB_MAX) {
-    /* no room */
-    --ids[0];
-    return -2;
-
-  } else {
-    /* insert id */
-    for (i = ids[0]; i > x; i--)
-      ids[i] = ids[i - 1];
-    ids[x] = id;
-  }
-
-  return 0;
-}
-
-inline void
-mdb_midl_pop_n(MDB_IDL ids, unsigned n)
-{
-  ids[0] = ids[0] - n;
-}
-
-void
-mdb_midl_remove_at(MDB_IDL ids, unsigned idx)
-{
-  for (int i = idx - 1; idx < ids[0] - 1;)
-    ids[++i] = ids[++idx];
-  ids[0] = ids[0] - 1;
-}
-
-void
-mdb_midl_remove(MDB_IDL ids, MDB_ID id)
-{
-  unsigned idx = mdb_midl_search(ids, id);
-  if (idx <= ids[0] && ids[idx] == id)
-    mdb_midl_remove_at(ids, idx);
-}
-
-MDB_IDL
-mdb_midl_alloc(int num)
-{
-  MDB_IDL ids = malloc((num + 2) * sizeof(MDB_ID));
-  if (ids) {
-    *ids++ = num;
-    *ids = 0;
-  }
-  return ids;
-}
-
-void
-mdb_midl_free(MDB_IDL ids)
-{
-  if (ids)
-    free(ids - 1);
-}
-
-void
-mdb_midl_shrink(MDB_IDL *idp)
-{
-  MDB_IDL ids = *idp;
-  if (*(--ids) > MDB_IDL_UM_MAX && (ids = realloc(ids, (MDB_IDL_UM_MAX + 2) * sizeof(MDB_ID)))) {
-    *ids++ = MDB_IDL_UM_MAX;
-    *idp = ids;
-  }
-}
-
-void
-mdb_midl_shrink_to(MDB_IDL *idp, size_t size)
-{
-  MDB_IDL ids = *idp;
-  if (*(--ids) > size && (ids = realloc(ids, (size + 2) * sizeof(MDB_ID)))) {
-    *ids++ = size;
-    *idp = ids;
-    *idp[0] = *idp[0] > size ? size : *idp[0];
-  }
-}
-
-static int
-mdb_midl_grow(MDB_IDL *idp, int num)
-{
-  MDB_IDL idn = *idp - 1;
-  /* grow it */
-  idn = realloc(idn, (*idn + num + 2) * sizeof(MDB_ID));
-  if (!idn)
-    return ENOMEM;
-  *idn++ += num;
-  *idp = idn;
-  return 0;
-}
-
-int
-mdb_midl_need(MDB_IDL *idp, unsigned num)
-{
-  MDB_IDL ids = *idp;
-  num += ids[0];
-  if (num > ids[-1]) {
-    num = (num + num / 4 + (256 + 2)) & -256;
-    if (!(ids = realloc(ids - 1, num * sizeof(MDB_ID))))
-      return ENOMEM;
-    *ids++ = num - 2;
-    *idp = ids;
-  }
-  return 0;
-}
-
-int
-mdb_midl_append(MDB_IDL *idp, MDB_ID id)
-{
-  MDB_IDL ids = *idp;
-  /* Too big? */
-  if (ids[0] >= ids[-1]) {
-    if (mdb_midl_grow(idp, MDB_IDL_UM_MAX))
-      return ENOMEM;
-    ids = *idp;
-  }
-  ids[0]++;
-  ids[ids[0]] = id;
-  return 0;
-}
-
-int
-mdb_midl_append_list(MDB_IDL *idp, MDB_IDL app)
-{
-  MDB_IDL ids = *idp;
-  /* Too big? */
-  if (ids[0] + app[0] >= ids[-1]) {
-    if (mdb_midl_grow(idp, app[0]))
-      return ENOMEM;
-    ids = *idp;
-  }
-  memcpy(&ids[ids[0] + 1], &app[1], app[0] * sizeof(MDB_ID));
-  ids[0] += app[0];
-  return 0;
-}
-
-int
-mdb_midl_append_range(MDB_IDL *idp, MDB_ID id, unsigned n)
-{
-  MDB_ID *ids = *idp, len = ids[0];
-  /* Too big? */
-  if (len + n > ids[-1]) {
-    if (mdb_midl_grow(idp, n | MDB_IDL_UM_MAX))
-      return ENOMEM;
-    ids = *idp;
-  }
-  ids[0] = len + n;
-  ids += len;
-  while (n)
-    ids[n--] = id++;
-  return 0;
-}
-
-void
-mdb_midl_xmerge(MDB_IDL idl, MDB_IDL merge)
-{
-  MDB_ID old_id, merge_id, i = merge[0], j = idl[0], k = i + j, total = k;
-  idl[0] = (MDB_ID)-1; /* delimiter for idl scan below */
-  old_id = idl[j];
-  while (i) {
-    merge_id = merge[i--];
-    for (; old_id < merge_id; old_id = idl[--j])
-      idl[k--] = old_id;
-    idl[k--] = merge_id;
-  }
-  idl[0] = total;
-}
-
-/* Quicksort + Insertion sort for small arrays */
-
-#define SMALL 8
-#define MIDL_SWAP(a, b) \
-  {                     \
-    itmp = (a);         \
-    (a) = (b);          \
-    (b) = itmp;         \
-  }
-
-void
-mdb_midl_sort(MDB_IDL ids)
-{
-  /* Max possible depth of int-indexed tree * 2 items/level */
-  int istack[sizeof(int) * CHAR_BIT * 2];
-  int i, j, k, l, ir, jstack;
-  MDB_ID a, itmp;
-
-  ir = (int)ids[0];
-  l = 1;
-  jstack = 0;
-  for (;;) {
-    if (ir - l < SMALL) { /* Insertion sort */
-      for (j = l + 1; j <= ir; j++) {
-        a = ids[j];
-        for (i = j - 1; i >= 1; i--) {
-          if (ids[i] >= a)
-            break;
-          ids[i + 1] = ids[i];
-        }
-        ids[i + 1] = a;
-      }
-      if (jstack == 0)
-        break;
-      ir = istack[jstack--];
-      l = istack[jstack--];
-    } else {
-      k = (l + ir) >> 1; /* Choose median of left, center, right */
-      MIDL_SWAP(ids[k], ids[l + 1]);
-      if (ids[l] < ids[ir]) {
-        MIDL_SWAP(ids[l], ids[ir]);
-      }
-      if (ids[l + 1] < ids[ir]) {
-        MIDL_SWAP(ids[l + 1], ids[ir]);
-      }
-      if (ids[l] < ids[l + 1]) {
-        MIDL_SWAP(ids[l], ids[l + 1]);
-      }
-      i = l + 1;
-      j = ir;
-      a = ids[l + 1];
-      for (;;) {
-        do
-          i++;
-        while (ids[i] > a);
-        do
-          j--;
-        while (ids[j] < a);
-        if (j < i)
-          break;
-        MIDL_SWAP(ids[i], ids[j]);
-      }
-      ids[l + 1] = ids[j];
-      ids[j] = a;
-      jstack += 2;
-      if (ir - i + 1 >= j - l) {
-        istack[jstack] = ir;
-        istack[jstack - 1] = i;
-        ir = j - 1;
-      } else {
-        istack[jstack] = j - 1;
-        istack[jstack - 1] = l;
-        l = i;
-      }
-    }
-  }
-}
-/* ------------------------------------------------------------------------- */
-
-typedef MDB_ID pgno_t;
+#define digest(name) containers[type].name##_stats.td
 
 char *
 bytes_as(double bytes, char *s, size_t size)
@@ -467,65 +167,316 @@ toss(size_t max)
   return level;
 }
 
-bool
-verify_midl_contains(MDB_IDL list, pgno_t pg)
+static size_t
+b64_encoded_size(size_t inlen)
 {
-  unsigned idx = mdb_midl_search(list, pg);
-  return idx <= list[0] && list[idx] == pg;
+  size_t ret;
+
+  ret = inlen;
+  if (inlen % 3 != 0)
+    ret += 3 - (inlen % 3);
+  ret /= 3;
+  ret *= 4;
+
+  return ret;
 }
 
-bool
-verify_midl_nodups(MDB_IDL list)
-{
-  pgno_t id = 1;
-  while (id < list[0]) {
-    if (list[id] == list[id + 1])
-      return false;
-    id++;
-  }
-  return true;
-}
+static const char b64chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
-bool
-verify_span_midl(MDB_IDL list, pgno_t pg, unsigned len)
+static char *
+b64_encode(const unsigned char *in, size_t len)
 {
-  pgno_t idx = mdb_midl_search(list, pg);
-  bool found = idx <= list[0] && list[idx] == pg;
-  if (!found)
-    return false;
-  if (len == 1)
-    return true;
-  if (list[len] + 1 != list[len - 1])
-    return false;
-  return true;
-}
+  char *out;
+  size_t elen;
+  size_t i;
+  size_t j;
+  size_t v;
 
-bool
-verify_empty_midl(MDB_IDL list, pgno_t pg, unsigned len)
-{
-  for (pgno_t i = pg; i < pg + len; i++) {
-    pgno_t idx = mdb_midl_search(list, pg);
-    bool found = idx <= list[0] && list[idx] == pg;
-    if (found)
-      return false;
-  }
-  return true;
-}
+  if (in == NULL || len == 0)
+    return NULL;
 
-bool
-verify_span_roaring(roaring_bitmap_t *rbm, pgno_t pg, unsigned len)
-{
-  for (pgno_t i = pg; i < pg + len; i++) {
-    if (roaring_bitmap_contains(rbm, i) != true) {
-      return false;
+  elen = b64_encoded_size(len);
+  out = malloc(elen + 1);
+  out[elen] = '\0';
+
+  for (i = 0, j = 0; i < len; i += 3, j += 4) {
+    v = in[i];
+    v = i + 1 < len ? v << 8 | in[i + 1] : v << 8;
+    v = i + 2 < len ? v << 8 | in[i + 2] : v << 8;
+
+    out[j] = b64chars[(v >> 18) & 0x3F];
+    out[j + 1] = b64chars[(v >> 12) & 0x3F];
+    if (i + 1 < len) {
+      out[j + 2] = b64chars[(v >> 6) & 0x3F];
+    } else {
+      out[j + 2] = '=';
+    }
+    if (i + 2 < len) {
+      out[j + 3] = b64chars[v & 0x3F];
+    } else {
+      out[j + 3] = '=';
     }
   }
+
+  return out;
+}
+
+static size_t
+b64_decoded_size(const char *in)
+{
+  size_t len;
+  size_t ret;
+  size_t i;
+
+  if (in == NULL)
+    return 0;
+
+  len = strlen(in);
+  ret = len / 4 * 3;
+
+  for (i = len; i-- > 0;) {
+    if (in[i] == '=') {
+      ret--;
+    } else {
+      break;
+    }
+  }
+
+  return ret;
+}
+
+#if 0
+static void
+b64_generate_decode_table()
+{
+  int inv[80];
+  size_t i;
+
+  memset(inv, -1, sizeof(inv));
+  for (i = 0; i < sizeof(b64chars) - 1; i++) {
+    inv[b64chars[i] - 43] = i;
+  }
+}
+#endif
+
+static int b64invs[] = { 62, -1, -1, -1, 63, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, -1, -1, -1, -1, -1, -1, -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,
+  14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, -1, -1, -1, -1, -1, -1, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46,
+  47, 48, 49, 50, 51 };
+
+static int
+b64_isvalidchar(char c)
+{
+  if (c >= '0' && c <= '9')
+    return 1;
+  if (c >= 'A' && c <= 'Z')
+    return 1;
+  if (c >= 'a' && c <= 'z')
+    return 1;
+  if (c == '+' || c == '/' || c == '=')
+    return 1;
+  return 0;
+}
+
+static int
+b64_decode(const char *in, unsigned char *out, size_t outlen)
+{
+  size_t len;
+  size_t i;
+  size_t j;
+  int v;
+
+  if (in == NULL || out == NULL)
+    return 0;
+
+  len = strlen(in);
+  if (outlen < b64_decoded_size(in) || len % 4 != 0)
+    return 0;
+
+  for (i = 0; i < len; i++) {
+    if (!b64_isvalidchar(in[i])) {
+      return 0;
+    }
+  }
+
+  for (i = 0, j = 0; i < len; i += 4, j += 3) {
+    v = b64invs[in[i] - 43];
+    v = (v << 6) | b64invs[in[i + 1] - 43];
+    v = in[i + 2] == '=' ? v << 6 : (v << 6) | b64invs[in[i + 2] - 43];
+    v = in[i + 3] == '=' ? v << 6 : (v << 6) | b64invs[in[i + 3] - 43];
+
+    out[j] = (v >> 16) & 0xFF;
+    if (in[i + 2] != '=')
+      out[j + 1] = (v >> 8) & 0xFF;
+    if (in[i + 3] != '=')
+      out[j + 2] = v & 0xFF;
+  }
+
+  return 1;
+}
+
+/* recording ------------------------------------------------------------- */
+
+bool recording = false;
+
+static void
+record_set_mutation(FILE *out, pgno_t pg)
+{
+  if (recording) {
+    fprintf(out, "set %lu\n", pg);
+  }
+}
+
+static void
+record_clear_mutation(FILE *out, pgno_t pg)
+{
+  if (recording) {
+    fprintf(out, "clear %lu\n", pg);
+  }
+}
+
+static void
+record_take_span_mutation(FILE *out, pgno_t pg, unsigned len)
+{
+  if (recording) {
+    fprintf(out, "take %lu %u\n", pg, len);
+  }
+}
+
+static void
+record_release_span_mutation(FILE *out, pgno_t pg, unsigned len)
+{
+  if (recording) {
+    fprintf(out, "release %lu %u\n", pg, len);
+  }
+}
+
+static void
+__scan_record_offsets(sm_idx_t v[], size_t n, void *aux)
+{
+  FILE *out = (FILE *)aux;
+  for (size_t i = 0; i < n; i++) {
+    fprintf(out, "%u ", v[i]);
+  }
+}
+
+static void
+record_merge_mutation(FILE *out, void *handle)
+{
+  if (recording) {
+    sparsemap_t *map = (sparsemap_t *)handle;
+    fprintf(out, "merge %zu ", sparsemap_get_ending_offset(map));
+    sparsemap_scan(map, __scan_record_offsets, 0, (void *)out);
+    fprintf(out, "\n");
+  }
+}
+
+static void
+record_checkpoint(FILE *out, void *handle)
+{
+  if (recording) {
+    sparsemap_t *map = (sparsemap_t *)handle;
+    size_t capacity = sparsemap_get_capacity(map);
+    size_t buffer_size = sparsemap_get_size(map);
+    size_t encoded_size = b64_encoded_size(buffer_size);
+    char *encoded = b64_encode(sparsemap_get_data(map), buffer_size);
+    fprintf(out, "checkpoint %zu %zu %zu ", capacity, buffer_size, encoded_size);
+    fprintf(out, "%s", encoded);
+    fprintf(out, "\n");
+  }
+}
+
+/* sparsemap ------------------------------------------------------------- */
+
+static sparsemap_idx_t
+_sparsemap_set(sparsemap_t **_map, sparsemap_idx_t idx, bool value)
+{
+  sparsemap_t *map = *_map, *new_map = NULL;
+  do {
+    sparsemap_idx_t l = sparsemap_set(map, idx, value);
+    if (l != idx) {
+      if (errno == ENOSPC) {
+        size_t capacity = sparsemap_get_capacity(map) + 64;
+        new_map = sparsemap_set_data_size(map, NULL, capacity);
+        assert(new_map != NULL);
+        errno = 0;
+        *_map = new_map;
+      } else {
+        perror("Unable to grow sparsemap");
+      }
+    } else {
+      return l;
+    }
+  } while (true);
+}
+
+static void *
+__sm_alloc(size_t capacity)
+{
+  sparsemap_t *map = sparsemap(capacity);
+  assert(map != NULL);
+  return map;
+}
+
+static void
+__sm_free(void *handle)
+{
+  sparsemap_t *map = (sparsemap_t *)handle;
+  free(map);
+}
+
+static pgno_t
+__sm_set(void **handle, pgno_t pg)
+{
+  sparsemap_t **map = (sparsemap_t **)handle;
+  return (pgno_t)_sparsemap_set(map, pg, true);
+}
+
+static bool
+__sm_is_set(void *handle, pgno_t pg)
+{
+  sparsemap_t *map = (sparsemap_t *)handle;
+  return sparsemap_is_set(map, pg);
+}
+
+static pgno_t
+__sm_clear(void **handle, pgno_t pg)
+{
+  sparsemap_t **map = (sparsemap_t **)handle;
+  return (pgno_t)_sparsemap_set(map, pg, false);
+}
+
+static pgno_t
+__sm_find_span(void *handle, unsigned len)
+{
+  sparsemap_t *map = (sparsemap_t *)handle;
+  pgno_t pgno = (pgno_t)sparsemap_span(map, 0, len, true);
+  return SPARSEMAP_NOT_FOUND(pgno) ? -1 : pgno;
+}
+
+static bool
+__sm_take_span(void **handle, pgno_t pg, unsigned len)
+{
+  sparsemap_t **map = (sparsemap_t **)handle;
+  for (pgno_t i = pg; i < pg + len; i++) {
+    assert(_sparsemap_set(map, i, false) == i);
+  }
   return true;
 }
 
-bool
-verify_span_sparsemap(sparsemap_t *map, pgno_t pg, unsigned len)
+static bool
+__sm_release_span(void **handle, pgno_t pg, unsigned len)
 {
+  sparsemap_t **map = (sparsemap_t **)handle;
+  for (pgno_t i = pg; i < pg + len; i++) {
+    assert(_sparsemap_set(map, i, true) == i);
+  }
+  return true;
+}
+
+static bool
+__sm_is_span(void *handle, pgno_t pg, unsigned len)
+{
+  sparsemap_t *map = (sparsemap_t *)handle;
   for (pgno_t i = pg; i < pg + len; i++) {
     if (sparsemap_is_set(map, i) != true) {
       return false;
@@ -534,9 +485,10 @@ verify_span_sparsemap(sparsemap_t *map, pgno_t pg, unsigned len)
   return true;
 }
 
-bool
-verify_empty_sparsemap(sparsemap_t *map, pgno_t pg, unsigned len)
+static bool
+__sm_is_empty(void *handle, pgno_t pg, unsigned len)
 {
+  sparsemap_t *map = (sparsemap_t *)handle;
   for (pgno_t i = 0; i < len; i++) {
     if (sparsemap_is_set(map, pg + i) != false) {
       return false;
@@ -545,93 +497,27 @@ verify_empty_sparsemap(sparsemap_t *map, pgno_t pg, unsigned len)
   return true;
 }
 
-bool
-verify_empty_roaring(roaring_bitmap_t *rbm, pgno_t pg, unsigned len)
+static bool
+__sm_is_first(void *handle, pgno_t pg, unsigned len)
 {
-  for (pgno_t i = 0; i < len; i++) {
-    if (roaring_bitmap_contains(rbm, pg + i) != false) {
-      return false;
-    }
-  }
-  return true;
-}
-
-bool
-verify_sm_is_first_available_span(sparsemap_t *map, sparsemap_idx_t idx, size_t len, bool value)
-{
-  for (sparsemap_idx_t i = 0; i < idx + len; i++) {
+  sparsemap_t *map = (sparsemap_t *)handle;
+  for (sparsemap_idx_t i = 0; i < pg + len; i++) {
     sparsemap_idx_t j = 0;
-    while (sparsemap_is_set(map, i + j) == value && j < len) {
+    while (sparsemap_is_set(map, i + j) == true && j < len) {
       j++;
     }
     if (j == len) {
-      return i == idx;
+      return i == pg;
     }
   }
   return false;
 }
 
-bool
-verify_sm_eq_rm(sparsemap_t *map, roaring_bitmap_t *rbm)
+static bool
+__sm_merge(void **handle, void *other_handle)
 {
-  uint64_t max = roaring_bitmap_maximum(rbm);
-  roaring_uint32_iterator_t iter;
-  roaring_iterator_init(rbm, &iter);
-  for (uint64_t i = 0; i <= max; i++) {
-    if (i == iter.current_value) {
-      assert(sparsemap_is_set(map, i) == true);
-      roaring_uint32_iterator_advance(&iter);
-    } else {
-      assert(sparsemap_is_set(map, i) == false);
-    }
-  }
-  return true;
-}
-
-bool
-verify_sm_eq_ml(sparsemap_t *map, MDB_IDL list)
-{
-  for (MDB_ID i = 1; i <= list[0]; i++) {
-    pgno_t pg = list[i];
-    unsigned skipped = i == 1 ? 0 : list[i - 1] - list[i] - 1;
-    if (skipped) {
-      for (MDB_ID j = list[i - 1]; j > list[i]; j--) {
-        if (sparsemap_is_set(map, pg - j) != false) {
-          __diag("%zu\n", pg - j);
-          return false;
-        }
-      }
-    }
-    if (sparsemap_is_set(map, pg) != true) {
-      __diag("%zu\n", pg);
-      return false;
-    }
-  }
-  return true;
-}
-
-sparsemap_idx_t
-_sparsemap_set(sparsemap_t **map, sparsemap_idx_t idx, bool value)
-{
-  do {
-    sparsemap_idx_t l = sparsemap_set(*map, idx, value);
-    if (l != idx) {
-      if (errno == ENOSPC) {
-        *map = sparsemap_set_data_size(*map, NULL, sparsemap_get_capacity(*map) + 64);
-        assert(*map != NULL);
-        errno = 0;
-      } else {
-        assert(false);
-      }
-    } else {
-      return l;
-    }
-  } while (true);
-}
-
-sparsemap_idx_t
-_sparsemap_merge(sparsemap_t **map, sparsemap_t *other)
-{
+  sparsemap_t **map = (sparsemap_t **)handle;
+  sparsemap_t *other = (sparsemap_t *)other_handle;
   do {
     int retval = sparsemap_merge(*map, other);
     if (retval != 0) {
@@ -644,367 +530,1002 @@ _sparsemap_merge(sparsemap_t **map, sparsemap_t *other)
         assert(false);
       }
     } else {
-      return retval;
+      break;
     }
   } while (true);
+  return true;
 }
 
-td_histogram_t *l_span_loc;
-td_histogram_t *b_span_loc;
-td_histogram_t *l_span_take;
-td_histogram_t *b_span_take;
-td_histogram_t *l_span_merge;
-td_histogram_t *b_span_merge;
-
-void
-stats_header(void)
+static size_t
+__sm_size(void *handle)
 {
-  printf(
-    "timestamp,iterations,idl_cap,idl_used,idl_bytes,sm_cap,sm_used,idl_loc_p50,idl_loc_p75,idl_loc_p90,idl_loc_p99,idl_loc_p999,sm_loc_p50,sm_loc_p75,sm_loc_p90,sm_loc_p99,sm_loc_p999,idl_take_p50,idl_take_p75,idl_take_p90,idl_take_p99,idl_take_p999,sm_take_p50,sm_take_p75,sm_take_p90,sm_take_p99,sm_take_p999,idl_merge_p50,idl_merge_p75,idl_merge_p90,idl_merge_p99,idl_merge_p999,sm_merge_p50,sm_merge_p75,sm_merge_p90,sm_merge_p99,sm_merge_p999\n");
+  sparsemap_t *map = (sparsemap_t *)handle;
+  return sparsemap_get_size(map);
 }
 
-void
-stats(size_t iterations, sparsemap_t *map, MDB_IDL list)
+static size_t
+__sm_count(void *handle)
 {
-  if (iterations < 10)
-    return;
-
-  td_compress(l_span_loc);
-  td_compress(b_span_loc);
-  td_compress(l_span_take);
-  td_compress(b_span_take);
-  td_compress(l_span_merge);
-  td_compress(b_span_merge);
-
-  printf(
-    "%f,%zu,%zu,%zu,%zu,%zu,%zu,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f,%.10f\n",
-    nsts(), iterations, list[-1], list[0], MDB_IDL_SIZEOF(list), sparsemap_get_capacity(map), sparsemap_get_size(map), td_quantile(l_span_loc, .5),
-    td_quantile(l_span_loc, .75), td_quantile(l_span_loc, .90), td_quantile(l_span_loc, .99), td_quantile(l_span_loc, .999), td_quantile(b_span_loc, .5),
-    td_quantile(b_span_loc, .75), td_quantile(b_span_loc, .90), td_quantile(b_span_loc, .99), td_quantile(b_span_loc, .999), td_quantile(l_span_take, .5),
-    td_quantile(l_span_take, .75), td_quantile(l_span_take, .90), td_quantile(l_span_take, .99), td_quantile(l_span_take, .999), td_quantile(b_span_take, .5),
-    td_quantile(b_span_take, .75), td_quantile(b_span_take, .90), td_quantile(b_span_take, .99), td_quantile(b_span_take, .999), td_quantile(l_span_merge, .5),
-    td_quantile(l_span_merge, .75), td_quantile(l_span_merge, .90), td_quantile(l_span_merge, .99), td_quantile(l_span_merge, .999),
-    td_quantile(b_span_merge, .5), td_quantile(b_span_merge, .75), td_quantile(b_span_merge, .90), td_quantile(b_span_merge, .99),
-    td_quantile(b_span_merge, .999));
+  sparsemap_t *map = (sparsemap_t *)handle;
+  return sparsemap_rank(map, 0, SPARSEMAP_IDX_MAX, true);
 }
 
-#define INITIAL_AMOUNT 1024 * 2
+/* midl ------------------------------------------------------------------ */
 
-/*
- * A "soak test" that tries to replicate behavior in LMDB for page allocation.
- */
-int
-main(void)
+//static bool __midl_validate(void *handle);
+
+static void *
+__midl_alloc(size_t capacity)
 {
-  size_t replenish = 0, iterations = 0;
+  MDB_IDL list = mdb_midl_alloc(capacity);
+  assert(list != NULL);
+  return (void *)list;
+}
 
-  // disable buffering
-#ifdef DEBUG
-  setvbuf(stdout, NULL, _IONBF, 0);
-  setvbuf(stderr, NULL, _IONBF, 0);
+static void
+__midl_free(void *handle)
+{
+  MDB_IDL list = (MDB_IDL)handle;
+  mdb_midl_free(list);
+}
+
+static pgno_t
+__midl_set(void **handle, pgno_t pg)
+{
+  // assert(__midl_validate(*handle));
+  MDB_IDL *_list = (MDB_IDL *)handle, list = *_list;
+  if (list[0] + 1 == list[-1]) {
+    assert(mdb_midl_need(_list, list[-1] + 1) == 0);
+    list = *_list;
+  }
+  mdb_midl_xappend(list, pg);
+  mdb_midl_sort(list);
+  // assert(mdb_midl_insert(list, pg) == 0);
+  // assert(__midl_validate(*handle));
+  return pg;
+}
+
+static bool
+__midl_is_set(void *handle, pgno_t pg)
+{
+  MDB_IDL list = (MDB_IDL)handle;
+  pgno_t i = mdb_midl_search(list, pg);
+  return i <= list[0] && list[i] == pg;
+}
+
+static pgno_t
+__midl_clear(void **handle, pgno_t pg)
+{
+  // assert(__midl_validate(*handle));
+  MDB_IDL list = *(MDB_IDL *)handle;
+  unsigned len = list[0];
+  list[0] = len -= 1;
+  for (unsigned j = pg - 1; j < len;)
+    list[++j] = list[++pg];
+#ifdef MDB_DEBUG
+  for (unsigned j = len + 1; j <= list[-1]; j++)
+    list[j] = 0;
 #endif
+  // assert(__midl_validate(*handle));
+  return pg;
+}
 
-  l_span_loc = td_new(100);
-  b_span_loc = td_new(100);
-  l_span_take = td_new(100);
-  b_span_take = td_new(100);
-  l_span_merge = td_new(100);
-  b_span_merge = td_new(100);
+static pgno_t
+__midl_find_span(void *handle, unsigned len)
+{
+  MDB_IDL list = (MDB_IDL)handle;
 
-  stats_header();
+  /* Seek a big enough contiguous page range. Prefer
+     pages at the tail, just truncating the list. */
+  int retry = 1;
+  unsigned i = 0;
+  pgno_t pgno = 0, *mop = list;
+  unsigned n2 = len, mop_len = mop[0];
+  do {
+    if (mop_len > n2) {
+      i = mop_len;
+      do {
+        pgno = mop[i];
+        if (mop[i - n2] == pgno + n2)
+          goto search_done;
+      } while (--i > n2);
+      if (--retry < 0)
+        break;
+    } else {
+      return -1;
+    }
+  } while (1);
+search_done:;
+  return retry < 0 ? -1 : pgno;
+}
 
-  sparsemap_idx_t amt = INITIAL_AMOUNT;
-  MDB_IDL list = mdb_midl_alloc(amt);
-  sparsemap_t *map = sparsemap(INITIAL_AMOUNT);
-  roaring_bitmap_t *rbm = roaring_bitmap_create();
+static bool
+__midl_take_span(void **handle, pgno_t pg, unsigned len)
+{
+  // assert(__midl_validate(*handle));
+  MDB_IDL list = *(MDB_IDL *)handle;
+  int i = list[list[0]] == pg ? list[0] : mdb_midl_search(list, pg);
+  unsigned j, num = len;
+  pgno_t *mop = list;
+  unsigned mop_len = mop[0];
 
-  // start with 2GiB of 4KiB free pages to track:
-  //  - MDB_IDL requires one int for each free page
-  //  - Sparsemap will compress the set bits using less memory
-  mdb_midl_need(&list, amt);
-  for (sparsemap_idx_t pg = 0; pg < amt; pg++) {
-    // We list every free (unallocated) page in the IDL, while...
-    mdb_midl_xappend(list, pg);
-    // ... true (unset in the bitmap) indicates free in the bitmap, ...
-    assert(_sparsemap_set(&map, pg, true) == pg);
-    assert(roaring_bitmap_add_checked(rbm, pg));
+  mop[0] = mop_len -= num;
+  /* Move any stragglers down */
+  for (j = i - num; j < mop_len;)
+    mop[++j] = mop[++i];
+#ifdef MDB_DEBUG
+  for (j = mop_len + 1; j <= mop[-1]; j++)
+    mop[j] = 0;
+#endif
+  // assert(__midl_validate(*handle));
+  return true;
+}
+
+static bool
+__midl_release_span(void **handle, pgno_t pg, unsigned len)
+{
+  // assert(__midl_validate(*handle));
+  MDB_IDL *_list = (MDB_IDL *)handle, list = *_list;
+  if (list[0] + len >= list[-1]) {
+    assert(mdb_midl_need(_list, list[-1] + len) == 0);
+    list = *_list;
+  }
+  for (size_t i = pg; i < pg + len; i++) {
+    mdb_midl_xappend(list, i);
+    // assert(mdb_midl_insert(list, i) == 0);
   }
   mdb_midl_sort(list);
+  // assert(__midl_validate(*handle));
+  return true;
+}
+
+static bool
+__midl_is_span(void *handle, pgno_t pg, unsigned len)
+{
+  MDB_IDL list = (MDB_IDL)handle;
+  pgno_t idx = mdb_midl_search(list, pg);
+  bool found = idx <= list[0] && list[idx] == pg;
+  if (!found)
+    return false;
+  if (len == 1)
+    return true;
+  if (list[idx] + len - 1 != list[idx - len + 1])
+    return false;
+  return true;
+}
+
+static bool
+__midl_is_empty(void *handle, pgno_t pg, unsigned len)
+{
+  MDB_IDL list = (MDB_IDL)handle;
+  for (pgno_t i = pg; i < pg + len; i++) {
+    pgno_t idx = mdb_midl_search(list, pg);
+    bool found = idx <= list[0] && list[idx] == pg;
+    if (found)
+      return false;
+  }
+  return true;
+}
+
+static bool
+__midl_merge(void **handle, void *other_handle)
+{
+  // assert(__midl_validate(*handle));
+  MDB_IDL *_list = (MDB_IDL *)handle, list = *_list, other = (MDB_IDL)other_handle;
+  if (list[0] + other[0] >= list[-1]) {
+    assert(mdb_midl_need(_list, list[-1] + other[0]) == 0);
+    list = *_list;
+  }
+  mdb_midl_xmerge(list, other_handle);
+  mdb_midl_sort(*_list);
+  // assert(__midl_validate(*handle));
+  return true;
+}
+
+static size_t
+__midl_size(void *handle)
+{
+  MDB_IDL list = (MDB_IDL)handle;
+  return list[0] * sizeof(pgno_t);
+}
+
+static size_t
+__midl_count(void *handle)
+{
+  MDB_IDL list = (MDB_IDL)handle;
+  return list[0];
+}
+
+static bool
+__midl_validate(void *handle)
+{
+  MDB_IDL list = (MDB_IDL)handle;
+  if (list[0] > list[-1]) {
+    return false;
+  }
+  if (list[0] > 1) {
+    // check for duplicates
+    for (pgno_t i = 2; i < list[0]; i++) {
+      if (list[i] == list[i - 1]) {
+        return false;
+      }
+      // ensure ordering
+      if (list[i] > list[i - 1])
+        return false;
+    }
+  }
+  return true;
+}
+
+/* roaring --------------------------------------------------------------- */
+
+static void *
+__roar_alloc(size_t capacity)
+{
+  roaring_bitmap_t *map = roaring_bitmap_create();
+  assert(map != NULL);
+  return map;
+}
+
+static void
+__roar_free(void *handle)
+{
+  roaring_bitmap_t *rbm = (roaring_bitmap_t *)handle;
+  roaring_free(rbm);
+}
+
+static pgno_t
+__roar_set(void **handle, pgno_t pg)
+{
+  roaring_bitmap_t **_rbm = (roaring_bitmap_t **)handle, *rbm = *_rbm;
+  assert(roaring_bitmap_add_checked(rbm, pg) == true);
+  return pg;
+}
+
+static bool
+__roar_is_set(void *handle, pgno_t pg)
+{
+  roaring_bitmap_t *rbm = (roaring_bitmap_t *)handle;
+  return roaring_bitmap_contains(rbm, pg);
+}
+
+static pgno_t
+__roar_clear(void **handle, pgno_t pg)
+{
+  roaring_bitmap_t **_rbm = (roaring_bitmap_t **)handle, *rbm = *_rbm;
+  roaring_bitmap_remove(rbm, pg);
+  return pg;
+}
+
+static pgno_t
+__roar_find_span(void *handle, unsigned len)
+{
+  roaring_bitmap_t *rbm = (roaring_bitmap_t *)handle;
+  uint64_t max = roaring_bitmap_maximum(rbm);
+  uint64_t offset = roaring_bitmap_minimum(rbm);
+  do {
+    if (len == 1 || roaring_bitmap_range_cardinality(rbm, offset, offset + len) == len) {
+      break;
+    }
+    offset++;
+  } while (offset <= max);
+  return offset > max ? -1 : offset;
+}
+
+static bool
+__roar_take_span(void **handle, pgno_t pg, unsigned len)
+{
+  roaring_bitmap_t **_rbm = (roaring_bitmap_t **)handle, *rbm = *_rbm;
+  roaring_bitmap_remove_range(rbm, pg, pg + len);
+  return true;
+}
+
+static bool
+__roar_release_span(void **handle, pgno_t pg, unsigned len)
+{
+  roaring_bitmap_t **_rbm = (roaring_bitmap_t **)handle, *rbm = *_rbm;
+  for (size_t i = pg; i < pg + len; i++) {
+    assert(roaring_bitmap_add_checked(rbm, i) == true);
+  }
+  return true;
+}
+
+static bool
+__roar_is_span(void *handle, pgno_t pg, unsigned len)
+{
+  roaring_bitmap_t *rbm = (roaring_bitmap_t *)handle;
+  return roaring_bitmap_contains_range(rbm, pg, pg + len);
+}
+
+static bool
+__roar_is_empty(void *handle, pgno_t pg, unsigned len)
+{
+  roaring_bitmap_t *rbm = (roaring_bitmap_t *)handle;
+  return !roaring_bitmap_contains_range(rbm, pg, pg + len);
+}
+
+static bool
+__roar_merge(void **handle, void *other_handle)
+{
+  roaring_bitmap_t **_rbm = (roaring_bitmap_t **)handle, *rbm = *_rbm;
+  roaring_bitmap_t *other = (roaring_bitmap_t *)other_handle;
+  roaring_bitmap_or_inplace(rbm, other);
+  return true;
+}
+
+static size_t
+__roar_size(void *handle)
+{
+  return roaring_bitmap_frozen_size_in_bytes((roaring_bitmap_t *)handle);
+}
+
+static size_t
+__roar_count(void *handle)
+{
+  return roaring_bitmap_get_cardinality((roaring_bitmap_t *)handle);
+}
+
+static bool
+__roar_validate(void *handle)
+{
+  roaring_bitmap_t *rbm = (roaring_bitmap_t *)handle;
   roaring_bitmap_run_optimize(rbm);
-  assert(verify_sm_eq_ml(map, list));
-  assert(verify_sm_eq_rm(map, rbm));
+  return true;
+}
 
-  double b, e;
-  while (1) {
-    unsigned mi;
-    pgno_t ml, sl, rl;
+/* statistics ------------------------------------------------------------ */
 
-    // get an amount [1, 16] of pages to find preferring smaller sizes
-    unsigned n = toss(15) + 1;
+bool statistics = false;
 
-    // find a set of pages using the MDB_IDL
-    {
-      b = nsts();
-      /* Seek a big enough contiguous page range. Prefer
-       * pages at the tail, just truncating the list.
-       */
-      int retry = 1;
-      unsigned i = 0;
-      pgno_t pgno = 0, *mop = list;
-      unsigned n2 = n, mop_len = mop[0];
-      if (mop_len > n2) {
-        i = mop_len;
-        do {
-          pgno = mop[i];
-          if (mop[i - n2] == pgno + n2)
-            goto search_done;
-        } while (--i > n2);
-        if (--retry < 0)
-          break;
+typedef struct sw {
+  struct timespec t1; /* start time */
+  struct timespec t2; /* stop time */
+} sw_t;
+
+void
+ts(struct timespec *ts)
+{
+  if (clock_gettime(CLOCK_REALTIME, ts) == -1) {
+    perror("clock_gettime");
+  }
+}
+
+static double
+elapsed(struct timespec *s, struct timespec *e)
+{
+  long sec, nanos;
+
+  sec = e->tv_sec - s->tv_sec;
+  nanos = e->tv_nsec - s->tv_nsec;
+  if (nanos < 0) {
+    nanos += 1e9;
+    sec--;
+  }
+  return ((double)nanos / 1e9 + (double)sec);
+}
+
+static pgno_t
+__stats_set(td_histogram_t *stats, void *fn, void **handle, pgno_t pg)
+{
+  if (statistics && stats) {
+    struct timespec s, e;
+    ts(&s);
+    pgno_t retval = ((pgno_t(*)(void **, pgno_t))fn)(handle, pg);
+    ts(&e);
+    td_add(stats, elapsed(&s, &e), 1);
+    return retval;
+  }
+  return ((pgno_t(*)(void **, pgno_t))fn)(handle, pg);
+}
+
+static bool
+__stats_is_set(td_histogram_t *stats, void *fn, void *handle, pgno_t pg)
+{
+  if (statistics && stats) {
+    struct timespec s, e;
+    ts(&s);
+    bool retval = ((bool (*)(void *, pgno_t))fn)(handle, pg);
+    ts(&e);
+    td_add(stats, elapsed(&s, &e), 1);
+    return retval;
+  }
+  return ((bool (*)(void *, pgno_t))fn)(handle, pg);
+}
+
+static pgno_t
+__stats_clear(td_histogram_t *stats, void *fn, void **handle, pgno_t pg)
+{
+  if (statistics && stats) {
+    struct timespec s, e;
+    ts(&s);
+    pgno_t retval = ((pgno_t(*)(void **, pgno_t))fn)(handle, pg);
+    ts(&e);
+    td_add(stats, elapsed(&s, &e), 1);
+    return retval;
+  }
+  return ((pgno_t(*)(void **, pgno_t))fn)(handle, pg);
+}
+
+static pgno_t
+__stats_find_span(td_histogram_t *stats, void *fn, void *handle, unsigned len)
+{
+  if (statistics && stats) {
+    struct timespec s, e;
+    ts(&s);
+    pgno_t retval = ((pgno_t(*)(void *, unsigned))fn)(handle, len);
+    ts(&e);
+    td_add(stats, elapsed(&s, &e), 1);
+    return retval;
+  }
+  return ((pgno_t(*)(void *, unsigned))fn)(handle, len);
+}
+
+static bool
+__stats_take_span(td_histogram_t *stats, void *fn, void **handle, pgno_t pg, unsigned len)
+{
+  if (statistics && stats) {
+    struct timespec s, e;
+    ts(&s);
+    bool retval = ((bool (*)(void *, pgno_t, unsigned))fn)(handle, pg, len);
+    ts(&e);
+    td_add(stats, elapsed(&s, &e), 1);
+    return retval;
+  }
+  return ((bool (*)(void *, pgno_t, unsigned))fn)(handle, pg, len);
+}
+
+static bool
+__stats_release_span(td_histogram_t *stats, void *fn, void **handle, pgno_t pg, unsigned len)
+{
+  if (statistics && stats) {
+    struct timespec s, e;
+    ts(&s);
+    bool retval = ((bool (*)(void *, pgno_t, unsigned))fn)(handle, pg, len);
+    ts(&e);
+    td_add(stats, elapsed(&s, &e), 1);
+    return retval;
+  }
+  return ((bool (*)(void *, pgno_t, unsigned))fn)(handle, pg, len);
+}
+
+static bool
+__stats_is_span(td_histogram_t *stats, void *fn, void *handle, pgno_t pg, unsigned len)
+{
+  if (statistics && stats) {
+    struct timespec s, e;
+    ts(&s);
+    bool retval = ((bool (*)(void *, pgno_t, unsigned))fn)(handle, pg, len);
+    ts(&e);
+    td_add(stats, elapsed(&s, &e), 1);
+    return retval;
+  }
+  return ((bool (*)(void *, pgno_t, unsigned))fn)(handle, pg, len);
+}
+
+static bool
+__stats_is_empty(td_histogram_t *stats, void *fn, void *handle, pgno_t pg, unsigned len)
+{
+  if (statistics && stats) {
+    struct timespec s, e;
+    ts(&s);
+    bool retval = ((bool (*)(void *, pgno_t, unsigned))fn)(handle, pg, len);
+    ts(&e);
+    td_add(stats, elapsed(&s, &e), 1);
+    return retval;
+  }
+  return ((bool (*)(void *, pgno_t, unsigned))fn)(handle, pg, len);
+}
+
+static bool
+__stats_is_first(td_histogram_t *stats, void *fn, void *handle, pgno_t pg, unsigned len)
+{
+  if (statistics && stats) {
+    struct timespec s, e;
+    ts(&s);
+    bool retval = ((bool (*)(void *, pgno_t, unsigned))fn)(handle, pg, len);
+    ts(&e);
+    td_add(stats, elapsed(&s, &e), 1);
+    return retval;
+  }
+  return ((bool (*)(void *, pgno_t, unsigned))fn)(handle, pg, len);
+}
+
+static bool
+__stats_merge(td_histogram_t *stats, void *fn, void **handle, void *other_handle)
+{
+  if (statistics && stats) {
+    struct timespec s, e;
+    ts(&s);
+    bool retval = ((bool (*)(void **, void *))fn)(handle, other_handle);
+    ts(&e);
+    td_add(stats, elapsed(&s, &e), 1);
+    return retval;
+  }
+  return ((bool (*)(void **, void *))fn)(handle, other_handle);
+}
+
+/* ----------------------------------------------------------------------- */
+
+// clang-format off
+container_t containers[] = {
+  { "sparsemap",
+    .alloc = __sm_alloc,
+    .free = __sm_free,
+    .set = timed_set(__sm_set),
+    .is_set = timed_is_set(__sm_is_set),
+    .clear = timed_clear(__sm_clear),
+    .find_span = timed_find_span(__sm_find_span),
+    .take_span = timed_take_span(__sm_take_span),
+    .release_span = timed_release_span(__sm_release_span),
+    .is_span = timed_is_span(__sm_is_span),
+    .is_empty = timed_is_empty(__sm_is_empty),
+    .is_first = timed_is_first(__sm_is_first),
+    .merge = timed_merge(__sm_merge),
+    .size = __sm_size,
+    .count = __sm_count,
+    .validate = NULL
+  },
+  { "midl",
+    .alloc = __midl_alloc,
+    .free = __midl_free,
+    .set = timed_set(__midl_set),
+    .is_set = timed_is_set(__midl_is_set),
+    .clear = timed_clear(__midl_clear),
+    .find_span = timed_find_span(__midl_find_span),
+    .take_span = timed_take_span(__midl_take_span),
+    .release_span = timed_release_span(__midl_release_span),
+    .is_span = timed_is_span(__midl_is_span),
+    .is_empty = timed_is_empty(__midl_is_empty),
+    .is_first = timed_is_first(NULL),
+    .merge = timed_merge(__midl_merge),
+    .size = __midl_size,
+    .count = __midl_count,
+    .validate = __midl_validate
+  },
+  { "roaring",
+    .alloc = __roar_alloc,
+    .free = __roar_free,
+    .set = timed_set(__roar_set),
+    .is_set = timed_is_set(__roar_is_set),
+    .clear = timed_clear(__roar_clear),
+    .find_span = timed_find_span(__roar_find_span),
+    .take_span = timed_take_span(__roar_take_span),
+    .release_span = timed_release_span(__roar_release_span),
+    .is_span = timed_is_span(__roar_is_span),
+    .is_empty = timed_is_empty(__roar_is_empty),
+    .is_first = timed_is_first(NULL),
+    .merge = timed_merge(__roar_merge),
+    .size = __roar_size,
+    .count = __roar_count,
+    .validate = __roar_validate,
+  },
+};
+// clang-format on
+
+/* ----------------------------------------------------------------------- */
+
+void *handles[(sizeof((containers)) / sizeof((containers)[0]))];
+void *new_handles[(sizeof((containers)) / sizeof((containers)[0]))];
+FILE *record_fp;
+FILE *stats_fp;
+
+#define alloc(type, size) containers[type].alloc(size);
+#define cast(type, fn, ...) \
+  if (containers[type].fn)  \
+  containers[type].fn(handles[type], ##__VA_ARGS__)
+
+#define invoke(type, fn, ...) __stats_##fn(containers[type].fn##_stats.td, containers[type].fn##_stats.fn, handles[type], __VA_ARGS__)
+#define mutate(type, fn, ...)                                             \
+  (type == 0) ? record_##fn##_mutation(record_fp, __VA_ARGS__) : (void)0, \
+    __stats_##fn(containers[type].fn##_stats.td, containers[type].fn##_stats.fn, &handles[type], __VA_ARGS__)
+#define foreach(set) for (unsigned type = 0; type < (sizeof((set)) / sizeof((set)[0])); type++)
+#define checkpoint(set)                                                        \
+  for (unsigned type = 1; type < (sizeof((set)) / sizeof((set)[0])); type++) { \
+    verify_eq(0, handles[0], type, handles[type]);                             \
+  }                                                                            \
+  record_checkpoint(record_fp, handles[0])
+
+bool
+verify_sm_eq_rb(sparsemap_t *map, roaring_bitmap_t *rbm)
+{
+  bool ret = true;
+  uint64_t max = roaring_bitmap_maximum(rbm);
+  roaring_uint32_iterator_t iter;
+  roaring_iterator_init(rbm, &iter);
+  for (uint64_t i = 0; i <= max; i++) {
+    if (i == iter.current_value) {
+      if (sparsemap_is_set(map, i) == false) {
+        fprintf(stdout, "- %zu ", i);
+        ret = false;
       }
-    search_done:;
-      ml = pgno;
-      mi = i;
-      e = nsts();
-      td_add(l_span_loc, e - b, 1);
+      roaring_uint32_iterator_advance(&iter);
+    } else {
+      if (sparsemap_is_set(map, i) == true) {
+        fprintf(stdout, "+ %zu ", i);
+        ret = false;
+      }
     }
-    assert(verify_span_midl(list, ml, n));
-    assert(verify_span_sparsemap(map, ml, n));
-    assert(verify_span_roaring(rbm, ml, n));
+  }
+  return ret;
+}
 
-    // find a set of pages using the Sparsemap
-    {
-      b = nsts();
-      pgno_t pgno = sparsemap_span(map, 0, n, true);
-      assert(SPARSEMAP_NOT_FOUND(pgno) == false);
-      sl = pgno;
-      e = nsts();
-      td_add(b_span_loc, e - b, 1);
-      assert(verify_sm_is_first_available_span(map, pgno, n, true));
-    }
-    assert(verify_span_midl(list, sl, n));
-    assert(verify_span_sparsemap(map, sl, n));
-    assert(verify_span_roaring(rbm, sl, n));
-
-    // find a set of pages using the Roaring Bitmap
-    {
-      b = nsts();
-      uint64_t max = roaring_bitmap_maximum(rbm);
-      uint64_t offset = roaring_bitmap_minimum(rbm);
-      do {
-        if (n == 1 || roaring_bitmap_range_cardinality(rbm, offset, offset + n) == n) {
-          break;
+bool
+verify_sm_eq_ml(sparsemap_t *map, MDB_IDL list)
+{
+  bool ret = true;
+  for (MDB_ID i = 1; i <= list[0]; i++) {
+    pgno_t pg = list[i];
+    unsigned skipped = i == 1 ? 0 : list[i - 1] - list[i] - 1;
+    if (skipped) {
+      for (MDB_ID j = list[i - 1]; j > list[i]; j--) {
+        if (sparsemap_is_set(map, pg - j) != false) {
+          fprintf(stdout, "+ %zu ", pg - j);
+          ret = false;
         }
-        offset++;
-      } while (offset <= max);
-      rl = offset;
-      e = nsts();
-    }
-    /*
-    if (rl != sl) {
-      assert(verify_span_midl(list, rl, n));
-      assert(verify_span_sparsemap(map, rl, n));
-      assert(verify_span_roaring(rbm, rl, n));
-    }
-    */
-    assert(rl == sl);
-
-    bool prefer_mdb_idl_loc = (bool)xorshift32() % 2;
-
-    // acquire the set of pages within the list
-    if (prefer_mdb_idl_loc) {
-      b = nsts();
-      unsigned j, num = n;
-      int i = mi;
-      pgno_t *mop = list;
-      unsigned mop_len = mop[0];
-
-      mop[0] = mop_len -= num;
-      /* Move any stragglers down */
-      for (j = i - num; j < mop_len;)
-        mop[++j] = mop[++i];
-      e = nsts();
-      for (j = mop_len + 1; j <= mop[-1]; j++)
-        mop[j] = 0;
-      td_add(l_span_take, e - b, 1);
-    } else {
-      b = nsts();
-      unsigned j, num = n;
-      int i = mdb_midl_search(list, sl) + num;
-      pgno_t *mop = list;
-      unsigned mop_len = mop[0];
-
-      mop[0] = mop_len -= num;
-      /* Move any stragglers down */
-      for (j = i - num; j < mop_len;)
-        mop[++j] = mop[++i];
-      e = nsts();
-      for (j = mop_len + 1; j <= mop[-1]; j++)
-        mop[j] = 0;
-      td_add(l_span_take, e - b, 1);
-    }
-
-    // acquire the set of pages within the sparsemap
-    if (prefer_mdb_idl_loc) {
-      b = nsts();
-      for (pgno_t i = ml; i < ml + n; i++) {
-        assert(_sparsemap_set(&map, i, false) == i);
       }
-      e = nsts();
-      td_add(b_span_take, e - b, 1);
-    } else {
-      b = nsts();
-      for (pgno_t i = sl; i <= sl + n; i++) {
-        assert(_sparsemap_set(&map, i, false) == i);
+    }
+    if (sparsemap_is_set(map, pg) != true) {
+      fprintf(stdout, "- %zu ", pg);
+      ret = false;
+    }
+  }
+  return ret;
+}
+
+bool
+verify_eq(unsigned a, void *ad, unsigned b, void *bd)
+{
+  bool ret = true;
+
+  // 'a' should always be a Sparsemap
+  switch (b) {
+  case ML:
+    assert((ret = verify_sm_eq_ml((sparsemap_t *)ad, (MDB_IDL)bd)) == true);
+    break;
+  case RB:
+    assert((ret = verify_sm_eq_rb((sparsemap_t *)ad, (roaring_bitmap_t *)bd)) == true);
+    break;
+  default:
+    break;
+  }
+  return ret;
+}
+
+void
+print_usage(const char *program_name)
+{
+  printf("Usage: %s [OPTIONS]\n", program_name);
+  printf("  -r <file>    Path to the file for recording (optional)\n");
+  printf("  -s <file>    Path to the file for statistics (optional)\n");
+  printf("  -f           Force overwrite of existing file (optional)\n");
+  printf("  -b           Disable buffering writes to stdout/err (optional)\n");
+  printf("  -a <number>  Specify the number of entries to record (must be positive, optional)\n");
+  printf("  -h           Print this help message\n");
+}
+#define SHORT_OPT "r:s:fa:bh"
+
+int
+main(int argc, char *argv[])
+{
+  int opt;
+  const char *record_file = NULL;
+  const char *stats_file = NULL;
+  int force_flag = 0;
+  size_t left, iteration = 0, amt = INITIAL_AMOUNT;
+  bool buffer = true;
+
+  while ((opt = getopt(argc, argv, SHORT_OPT)) != -1) {
+    switch (opt) {
+    case 'r':
+      recording = true;
+      record_file = optarg;
+      break;
+    case 's':
+      statistics = true;
+      stats_file = optarg;
+      break;
+    case 'f':
+      force_flag = 1;
+      break;
+    case 'b':
+      buffer = false;
+      break;
+    case 'a':
+      amt = atoi(optarg);
+      if (amt <= 0) {
+        fprintf(stderr, "Error: Invalid amount. Amount must be a positive number.\n");
+        return 1;
       }
-      e = nsts();
-      td_add(b_span_take, e - b, 1);
+      break;
+    case 'h':
+      print_usage(argv[0]);
+      return 0;
+    case '?':
+      fprintf(stderr, "Unknown option: %c\n", optopt);
+      return 1;
+    default:
+      break;
+    }
+  }
+
+  if (recording) {
+    record_fp = stdout;
+
+    // Check for existing file without force flag
+    if (access(record_file, F_OK) == 0 && !force_flag) {
+      fprintf(stderr, "Warning: File '%s' already exists. Use -f or --force to overwrite.\n", record_file);
+      return 1;
     }
 
-    // acquire the set of pages within the roaring bitmap
-    if (prefer_mdb_idl_loc) {
-      b = nsts();
-      roaring_bitmap_remove_range(rbm, ml, ml + n);
-      e = nsts();
+    // Open the file for writing (truncate if force flag is set)
+    record_fp = fopen(record_file, force_flag ? "w" : "a");
+    if (record_fp == NULL) {
+      perror("Error opening file");
+      return 1;
+    }
+  }
+
+  // Check if statistics file is specified
+  if (statistics) {
+    if (stats_file[0] == '-') {
+      stats_fp = stdout;
+      setvbuf(stdout, NULL, _IONBF, 0);
     } else {
-      b = nsts();
-      roaring_bitmap_remove_range(rbm, sl, sl + n);
-      e = nsts();
+      // Check for existing file without force flag
+      if (access(stats_file, F_OK) == 0 && !force_flag) {
+        fprintf(stderr, "Warning: File '%s' already exists. Use -f or --force to overwrite.\n", stats_file);
+        return 1;
+      }
+
+      // Open the file for writing (truncate if force flag is set)
+      stats_fp = fopen(stats_file, force_flag ? "w" : "a");
+      if (stats_fp == NULL) {
+        perror("Error opening file");
+        return 1;
+      }
     }
-    roaring_bitmap_run_optimize(rbm);
+  }
 
-    assert(verify_sm_eq_ml(map, list));
-    assert(verify_sm_eq_rm(map, rbm));
+  // disable buffering
+  if (!buffer) {
+    setvbuf(record_fp, NULL, _IONBF, 0);
+    setvbuf(stats_fp, NULL, _IONBF, 0);
+  }
+  unsigned types[] = { SM, ML, RB };
+  unsigned num_types = (sizeof((types)) / sizeof((types)[0]));
 
-    // Once we've used a tenth of the free list, let's replenish it a bit.
-    if (list[0] < amt / 10) {
+  foreach(types)
+  {
+    containers[type].alloc_stats.td = NULL;
+    containers[type].free_stats.td = NULL;
+    containers[type].set_stats.td = td_new(100);
+    containers[type].is_set_stats.td = td_new(100);
+    containers[type].clear_stats.td = td_new(100);
+    containers[type].find_span_stats.td = td_new(100);
+    containers[type].take_span_stats.td = td_new(100);
+    containers[type].release_span_stats.td = td_new(100);
+    containers[type].is_span_stats.td = NULL;
+    containers[type].is_empty_stats.td = NULL;
+    containers[type].is_first_stats.td = NULL;
+    containers[type].merge_stats.td = td_new(100);
+  }
+
+  /* Setup: add an amt of bits to each container. */
+  foreach(types)
+  {
+    handles[type] = alloc(type, amt);
+    for (size_t i = 0; i < amt; i++) {
+      assert(invoke(type, is_set, i) == false);
+      assert(mutate(type, set, i) == i);
+      assert(invoke(type, is_set, i) == true);
+    }
+    cast(type, validate);
+  }
+  checkpoint(types);
+  left = amt;
+
+  if (statistics) {
+    const char *names[] = { "sm", "ml", "rb" };
+    const char *dists[] = { "p50", "p75", "p90", "p99", "p999" };
+    fprintf(stats_fp, "timestamp,iterations,");
+    foreach(types)
+    {
+      fprintf(stats_fp, "%s_size,%s_bytes,", names[type], names[type]);
+      if (digest(alloc) != NULL) {
+        for (int i = 0; i < 5; i++) {
+          fprintf(stats_fp, "%s_alloc_%s,", names[type], dists[i]);
+        }
+      }
+      if (digest(free) != NULL) {
+        for (int i = 0; i < 5; i++) {
+          fprintf(stats_fp, "%s_free_%s,", names[type], dists[i]);
+        }
+      }
+      if (digest(set) != NULL) {
+        for (int i = 0; i < 5; i++) {
+          fprintf(stats_fp, "%s_set_%s,", names[type], dists[i]);
+        }
+      }
+      if (digest(is_set) != NULL) {
+        for (int i = 0; i < 5; i++) {
+          fprintf(stats_fp, "%s_is_set_%s,", names[type], dists[i]);
+        }
+      }
+      if (digest(clear) != NULL) {
+        for (int i = 0; i < 5; i++) {
+          fprintf(stats_fp, "%s_clear_%s,", names[type], dists[i]);
+        }
+      }
+      if (digest(find_span) != NULL) {
+        for (int i = 0; i < 5; i++) {
+          fprintf(stats_fp, "%s_find_span_%s,", names[type], dists[i]);
+        }
+      }
+      if (digest(take_span) != NULL) {
+        for (int i = 0; i < 5; i++) {
+          fprintf(stats_fp, "%s_take_span_%s,", names[type], dists[i]);
+        }
+      }
+      if (digest(release_span) != NULL) {
+        for (int i = 0; i < 5; i++) {
+          fprintf(stats_fp, "%s_release_span_%s,", names[type], dists[i]);
+        }
+      }
+      if (digest(is_span) != NULL) {
+        for (int i = 0; i < 5; i++) {
+          fprintf(stats_fp, "%s_is_span_%s,", names[type], dists[i]);
+        }
+      }
+      if (digest(is_empty) != NULL) {
+        for (int i = 0; i < 5; i++) {
+          fprintf(stats_fp, "%s_is_empty_%s,", names[type], dists[i]);
+        }
+      }
+      if (digest(is_first) != NULL) {
+        for (int i = 0; i < 5; i++) {
+          fprintf(stats_fp, "%s_is_first_%s,", names[type], dists[i]);
+        }
+      }
+      if (digest(merge) != NULL) {
+        for (int i = 0; i < 5; i++) {
+          fprintf(stats_fp, "%s_merge_%s,", names[type], dists[i]);
+        }
+      }
+    }
+    fprintf(stats_fp, "\n");
+  }
+
+  while (true) {
+    iteration++;
+    // the an amount [1, 16] of pages to find preferring smaller sizes
+    unsigned len = toss(15) + 1;
+    pgno_t loc[num_types];
+    foreach(types)
+    {
+      loc[type] = invoke(type, find_span, len);
+      if (loc[type] == -1) {
+        goto larger_please;
+      }
+    }
+    for (unsigned n = 0; n < num_types; n++) {
+      foreach(types)
+      {
+        assert(invoke(type, is_span, loc[n], len));
+      }
+    }
+    foreach(types)
+    {
+      cast(type, validate);
+    }
+
+    unsigned which_loc = (unsigned)xorshift32() % num_types;
+    foreach(types)
+    {
+      assert(mutate(type, take_span, loc[which_loc], len));
+      cast(type, validate);
+    }
+    checkpoint(types);
+    left -= len;
+
+    if (toss(7) == 6) {
       do {
         pgno_t pgno;
-        size_t len, retries = amt;
+        size_t len, retries = amt / 10;
+        // Find a hole in the map to replenish.
         do {
           len = toss(15) + 1;
-          pgno = sparsemap_span(map, 0, len, false);
-          assert(verify_sm_is_first_available_span(map, pgno, n, false));
-          //__diag("%zu\t%zu,%zu\n", iterations, replenish, retries);
+          pgno = sparsemap_span(handles[SM], 0, len, false);
         } while (SPARSEMAP_NOT_FOUND(pgno) && --retries);
         if (retries == 0) {
           goto larger_please;
         }
         if (SPARSEMAP_FOUND(pgno)) {
-          assert(verify_empty_midl(list, pgno, len));
-          assert(verify_empty_sparsemap(map, pgno, len));
-          assert(verify_empty_roaring(rbm, pgno, len));
-          assert(verify_sm_eq_ml(map, list));
-          assert(verify_sm_eq_rm(map, rbm));
-          if (list[-1] - list[0] < len) {
-            mdb_midl_need(&list, list[-1] + len);
+          foreach(types)
+          {
+            assert(invoke(type, is_empty, pgno, len));
           }
-          for (size_t i = pgno; i < pgno + len; i++) {
-            assert(verify_midl_contains(list, i) == false);
-            assert(sparsemap_is_set(map, i) == false);
-            mdb_midl_insert(list, i);
-            assert(verify_midl_contains(list, i) == true);
-            assert(_sparsemap_set(&map, i, true) == i);
-            assert(sparsemap_is_set(map, i) == true);
-            assert(roaring_bitmap_add_checked(rbm, i) == true);
+          checkpoint(types);
+          foreach(types)
+          {
+            assert(invoke(type, is_empty, pgno, len));
+            assert(mutate(type, release_span, pgno, len));
+            assert(invoke(type, is_span, pgno, len));
+            cast(type, validate);
           }
-          mdb_midl_sort(list);
-          assert(verify_midl_nodups(list));
-          assert(verify_span_midl(list, pgno, len));
-          assert(verify_span_sparsemap(map, pgno, len));
-          assert(verify_span_roaring(rbm, pgno, len));
+          checkpoint(types);
+          left += len;
         }
-        assert(verify_sm_eq_ml(map, list));
-        assert(verify_sm_eq_rm(map, rbm));
-        replenish++;
-      } while (list[0] < amt - 32);
+      } while (toss(4) < 3);
     }
-    replenish = 0;
 
-    // every so often, either ...
-    if (iterations % 1000 == 0) {
-    larger_please:;
-      size_t COUNT = xorshift32() % 3586 + 513;
-      // ... add some amount of 4KiB pages, or
-      size_t len = COUNT;
-      // The largest page is at list[1] because this is a reverse sorted list.
-      pgno_t pg = list[0] ? list[1] + 1 : 0;
-      if (true) { // disable shrinking for now... (toss(6) + 1 < 7)
-        MDB_IDL new_list = mdb_midl_alloc(len);
-        sparsemap_t *new_map = sparsemap(INITIAL_AMOUNT);
-        roaring_bitmap_t *new_rbm = roaring_bitmap_create();
-        for (size_t i = 0; i < len; i++) {
-          pgno_t gp = (pg + len) - i;
-          new_list[i + 1] = gp;
-          new_list[0]++;
-          assert(verify_midl_contains(new_list, gp) == true);
-          assert(_sparsemap_set(&new_map, gp, true) == gp);
-          assert(sparsemap_is_set(new_map, gp));
-          assert(roaring_bitmap_add_checked(new_rbm, gp));
-          assert(roaring_bitmap_contains(new_rbm, gp));
-        }
-        assert(verify_sm_eq_ml(new_map, new_list));
-        assert(verify_sm_eq_rm(new_map, new_rbm));
-        {
-          b = nsts();
-          mdb_midl_append_list(&list, new_list);
-          mdb_midl_sort(list);
-          e = nsts();
-          td_add(l_span_merge, e - b, 1);
-        }
-        for (size_t i = 0; i < len; i++) {
-          pgno_t gp = (pg + len) - i;
-          assert(verify_midl_contains(list, gp) == true);
-        }
-        {
-          b = nsts();
-          _sparsemap_merge(&map, new_map);
-          e = nsts();
-          td_add(b_span_merge, e - b, 1);
-        }
-        for (size_t i = 0; i < len; i++) {
-          pgno_t gp = (pg + len) - i;
-          assert(sparsemap_is_set(map, gp));
-        }
-        free(new_map);
-        {
-          b = nsts();
-          roaring_bitmap_or_inplace(rbm, new_rbm);
-          e = nsts();
-        }
-        for (size_t i = 0; i < len; i++) {
-          pgno_t gp = (pg + len) - i;
-          assert(roaring_bitmap_contains(rbm, gp));
-        }
-        roaring_free(new_rbm);
-      } else {
-        if (list[-1] > INITIAL_AMOUNT) {
-          // ... a fraction of the time, remove COUNT / 2 of 4KiB pages.
-          {
-            pgno_t pg;
-            for (size_t i = 0; i < COUNT; i++) {
-              pg = list[list[0] - i];
-              assert(sparsemap_is_set(map, pg) == true);
-              assert(_sparsemap_set(&map, pg, false) == pg);
-            }
-          }
-          {
-            roaring_bitmap_remove_range_closed(rbm, list[list[0] - COUNT], list[list[0]]);
-          }
-          {
-            mdb_midl_shrink_to(&list, list[0] - COUNT);
-          }
-          assert(list[list[0]] != pg);
-          assert(verify_midl_nodups(list));
-          verify_sm_eq_ml(map, list);
-          verify_sm_eq_rm(map, rbm);
+    // if (toss(10) > 8) {
+    if (0) {
+      size_t new_offset, new_amt;
+      pgno_t max;
+    larger_please:
+      new_amt = 1024 + (xorshift32() % 2048) + toss(1024);
+      new_offset = sparsemap_get_ending_offset(handles[SM]) + 1;
+
+      // Build a new container to merge with the existing one.
+      foreach(types)
+      {
+        new_handles[type] = alloc(type, new_amt);
+        for (size_t i = 0; i < new_amt; i++) {
+          // We don't want to record and we're using new_handles not
+          // handles, so call fn directly.
+          assert(containers[type].is_set_stats.is_set(handles[type], i + new_offset) == false);
+          assert(containers[type].is_set_stats.is_set(new_handles[type], i + new_offset) == false);
+          containers[type].set_stats.set(&new_handles[type], i + new_offset);
+          assert(containers[type].is_set_stats.is_set(new_handles[type], i + new_offset) == true);
         }
       }
+      foreach(types)
+      {
+        assert(mutate(type, merge, new_handles[type]));
+        cast(type, validate);
+      }
+      checkpoint(types);
+      left += new_amt;
+      amt += new_amt;
+      foreach(types)
+      {
+        containers[type].free(new_handles[type]);
+      }
     }
-    stats(iterations, map, list);
-    // printf("\033[K%zu\r", iterations);
-    iterations++;
-  }
 
+    if (statistics) {
+      const float dists[] = { 0.5, 0.75, 0.90, 0.99, 0.999 };
+      fprintf(stats_fp, "%f,%zu,", nsts(), iteration);
+      foreach(types)
+      {
+        fprintf(stats_fp, "%zu,%zu,", containers[type].count(handles[type]), containers[type].size(handles[type]));
+        // clang-format off
+        td_histogram_t *td[] = {
+          digest(alloc),
+          digest(free),
+          digest(set),
+          digest(is_set),
+          digest(clear),
+          digest(find_span),
+          digest(take_span),
+          digest(release_span),
+          digest(is_span),
+          digest(is_empty),
+          digest(is_first),
+          digest(merge)
+        };
+        // clang-format on
+        for (int i = 0; i < 12; i++) {
+          if (td[i] != NULL) {
+            td_compress(td[i]);
+            for (int j = 0; j < 5; j++) {
+              fprintf(stats_fp, "%.10f,", td_quantile(td[i], dists[j]));
+            }
+          }
+        }
+      }
+      fprintf(stats_fp, "\n");
+    }
+  }
   return 0;
 }

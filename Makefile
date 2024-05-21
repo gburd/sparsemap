@@ -60,7 +60,7 @@ clean:
 	rm -f $(EXAMPLES) examples/*.o
 
 format:
-	clang-format -i src/sparsemap.c include/sparsemap.h examples/ex_*.c tests/soak.c tests/test.c lib/common.c include/common.h
+	clang-format -i src/sparsemap.c include/sparsemap.h examples/ex_*.c tests/soak.c tests/test.c tests/midl.c lib/common.c include/common.h
 #	clang-format -i include/*.h src/*.c tests/*.c tests/*.h examples/*.c
 
 %.o: src/%.c

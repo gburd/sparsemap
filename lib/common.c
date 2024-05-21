@@ -51,6 +51,29 @@ tsc(void)
 return 0;
 }
 
+// get microsecond timestamp
+uint64_t
+msts()
+{
+#ifdef _SC_MONOTONIC_CLOCK
+  struct timespec ts;
+  if (sysconf(_SC_MONOTONIC_CLOCK) > 0) {
+    /* A monotonic clock presents */
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0)
+      return (uint64_t)(ts.tv_sec * 1000000 + ts.tv_nsec / 1000);
+    else
+      return 0;
+  }
+  return 0;
+#else
+  struct timeval tv;
+  if (gettimeofday(&tv, NULL) == 0)
+    return (uint64_t)(tv.tv_sec * 1000000 + tv.tv_usec);
+  else
+    return 0;
+#endif
+}
+
 double
 nsts(void)
 {
