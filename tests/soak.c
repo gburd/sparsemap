@@ -95,7 +95,7 @@ typedef struct container {
   } is_span_stats;
 #define timed_is_span(fn) (bool (*)(void *, pgno_t, unsigned)) __stats_is_span, .is_span_stats.is_span = fn
 
-  /* are the pgno in the span [pg, pg+ len) notn in the container? */
+  /* are the pgno in the span [pg, pg+ len) not in the container? */
   bool (*is_empty)(void *handle, pgno_t pg, unsigned len);
   struct {
     td_histogram_t *td;
