@@ -49,6 +49,9 @@ test: tests
 soak: tests
 	env ASAN_OPTIONS=detect_leaks=1 LSAN_OPTIONS=verbosity=1:log_threads=1 ./tests/soak
 
+fuzzer: tests
+	env ASAN_OPTIONS=detect_leaks=1 LSAN_OPTIONS=verbosity=1:log_threads=1 ./tests/fuzzer ./crash.case
+
 tests/test: $(TEST_OBJS) $(LIB_OBJS) $(STATIC_LIB)
 	$(CC) $^ $(LIBS) -o $@ $(TEST_FLAGS)
 
@@ -89,6 +92,9 @@ examples/ex_4: $(LIB_OBJS) examples/ex_4.o $(STATIC_LIB)
 
 tests/soak: $(LIB_OBJS) tests/soak.o $(STATIC_LIB)
 	$(CC) $^ $(LIBS) -o $@ $(TEST_FLAGS)
+
+tests/fuzzer: $(LIB_OBJS) tests/fuzzer.o $(STATIC_LIB)
+	$(CC) $^ $(LIBS) -o $@ $(TEST_FLAGS) -DFUZZ_DEBUG
 
 todo:
 	rg -i 'todo|gsb|abort'

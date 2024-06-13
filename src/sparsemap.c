@@ -1705,6 +1705,10 @@ sparsemap_select(sparsemap_t *map, sparsemap_idx_t n, bool value)
   sm_idx_t start;
   size_t count = __sm_get_chunk_count(map);
 
+  if (count == 0 && value == false) {
+    return n;
+  }
+
   uint8_t *p = __sm_get_chunk_data(map, 0);
 
   for (size_t i = 0; i < count; i++) {
@@ -1847,6 +1851,9 @@ sparsemap_span(sparsemap_t *map, sparsemap_idx_t idx, size_t len, bool value)
      many selects we can avoid by taking the rank of the range and starting
      at that bit. */
   nth = (idx == 0) ? 0 : sparsemap_rank(map, 0, idx - 1, value);
+  if (SPARSEMAP_NOT_FOUND(nth)) {
+    return nth;
+  }
   /* Find the first bit that matches value, then... */
   offset = sparsemap_select(map, nth, value);
   do {
