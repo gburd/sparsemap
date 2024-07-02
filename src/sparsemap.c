@@ -292,23 +292,21 @@ __sm_chunk_increase_capacity(__sm_chunk_t *chunk, size_t capacity)
 static bool
 __sm_chunk_is_empty(__sm_chunk_t *chunk)
 {
-  /* The __sm_chunk_t is empty if all flags (in m_data[0]) are zero. */
-  if (chunk->m_data[0] == 0) {
-    return true;
-  }
-
-  /* It's also empty if all flags are Zero or None. */
-  register uint8_t *p = (uint8_t *)chunk->m_data;
-  for (size_t i = 0; i < sizeof(sm_bitvec_t); i++, p++) {
-    if (*p) {
-      for (int j = 0; j < SM_FLAGS_PER_INDEX_BYTE; j++) {
-        size_t flags = SM_CHUNK_GET_FLAGS(*p, j);
-        if (flags != SM_PAYLOAD_NONE && flags != SM_PAYLOAD_ZEROS) {
-          return false;
+  if (chunk->m_data[0] != 0) {
+    /* A chunk is considered empty if all flags are SM_PAYLOAD_ZERO or _NONE. */
+    register uint8_t *p = (uint8_t *)chunk->m_data;
+    for (size_t i = 0; i < sizeof(sm_bitvec_t); i++, p++) {
+      if (*p) {
+        for (int j = 0; j < SM_FLAGS_PER_INDEX_BYTE; j++) {
+          size_t flags = SM_CHUNK_GET_FLAGS(*p, j);
+          if (flags != SM_PAYLOAD_NONE && flags != SM_PAYLOAD_ZEROS) {
+            return false;
+          }
         }
       }
     }
   }
+  /* The __sm_chunk_t is empty if all flags (in m_data[0]) are zero. */
   return true;
 }
 
@@ -1307,11 +1305,10 @@ sparsemap_get_starting_offset(sparsemap_t *map)
     return 0;
   }
   uint8_t *p = __sm_get_chunk_data(map, 0);
-  sm_idx_t start = *(sm_idx_t *)p;
+  sparsemap_idx_t relative_position = *(sm_idx_t *)p;
   p += sizeof(sm_idx_t);
   __sm_chunk_t chunk;
   __sm_chunk_init(&chunk, p);
-  sparsemap_idx_t relative_position = start;
   for (size_t m = 0; m < sizeof(sm_bitvec_t); m++, p++) {
     for (int n = 0; n < SM_FLAGS_PER_INDEX_BYTE; n++) {
       size_t flags = SM_CHUNK_GET_FLAGS(*p, n);

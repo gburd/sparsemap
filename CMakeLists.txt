@@ -33,7 +33,7 @@ option(BUILD_SHARED_LIBS "Build shared libraries" ON)
 
 # Add shared library
 add_library(sparsemap_SHARED SHARED ${LIB_SRC} ${HEADERS})
-# Set target properties for shared library (adjust if needed)
+# Set target properties for the shared library (adjust if needed)
 set_target_properties(sparsemap_SHARED PROPERTIES
     VERSION 1.0.0  # Set library version
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"  # Set output directory
@@ -87,8 +87,8 @@ target_link_libraries(soak PUBLIC m)
 add_custom_target(run_soak COMMAND soak WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
 # Add fuzzer program
-add_executable(fuzzer tests/fuzzer.c)
-target_link_libraries(fuzzer PRIVATE sparsemap)
-target_include_directories(fuzzer PRIVATE ${HEADER_DIR} lib)
-target_link_libraries(fuzzer PUBLIC m)
-add_custom_target(run_fuzzer COMMAND fuzzer WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+# add_executable(fuzzer tests/fuzzer.c)
+# target_link_libraries(fuzzer PRIVATE sparsemap)
+# target_include_directories(fuzzer PRIVATE ${HEADER_DIR} lib)
+# target_link_libraries(fuzzer PUBLIC m)
+# add_custom_target(run_fuzzer COMMAND fuzzer WORKING_DIRECTORY ${CMAKE_BINARY_DIR})

@@ -653,6 +653,39 @@ test_api_get_ending_offset(const MunitParameter params[], void *data)
 }
 
 static void *
+test_api_get_starting_offset_rolling_setup(const MunitParameter params[], void *user_data)
+{
+  (void)params;
+  (void)user_data;
+  sparsemap_t *map = sparsemap(10 * 1024);
+  assert_ptr_not_null(map);
+  return (void *)map;
+}
+static void
+test_api_get_starting_offset_rolling_tear_down(void *fixture)
+{
+  sparsemap_t *map = (sparsemap_t *)fixture;
+  assert_ptr_not_null(map);
+  munit_free(map);
+}
+static MunitResult
+test_api_get_starting_offset_rolling(const MunitParameter params[], void *data)
+{
+  sparsemap_t *map = (sparsemap_t *)data;
+  (void)params;
+
+  for (sparsemap_idx_t i = 0; i < 10 * 2048; i++) {
+    sparsemap_set(map, i, true);
+    if (i > 2047) {
+      sparsemap_set(map, i - 2048, false);
+      assert_true(sparsemap_get_starting_offset(map) == i - 2047);
+      // printf("%d\t%d\t%zu\n", i, i - 2047, sparsemap_get_starting_offset(map));
+    }
+  }
+  return MUNIT_OK;
+}
+
+static void *
 test_api_scan_setup(const MunitParameter params[], void *user_data)
 {
   uint8_t *buf = munit_calloc(1024, sizeof(uint8_t));
@@ -1214,6 +1247,7 @@ static MunitTest api_test_suite[] = {
   { (char *)"/count", test_api_count, test_api_count_setup, test_api_count_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
   { (char *)"/get_data", test_api_get_data, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
   { (char *)"/get_starting_offset", test_api_get_starting_offset, test_api_get_starting_offset_setup, test_api_get_starting_offset_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
+  { (char *)"/get_starting_offset/rolling", test_api_get_starting_offset_rolling, test_api_get_starting_offset_rolling_setup, test_api_get_starting_offset_rolling_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
   { (char *)"/get_ending_offset", test_api_get_ending_offset, test_api_get_ending_offset_setup, test_api_get_ending_offset_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
   { (char *)"/scan", test_api_scan, test_api_scan_setup, test_api_scan_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
   { (char *)"/split", test_api_split, test_api_split_setup, test_api_split_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
@@ -1345,6 +1379,40 @@ test_scale_fuzz(const MunitParameter params[], void *data)
   sparsemap_t *map = (sparsemap_t *)data;
   (void)params;
   (void)map; // TODO...
+  return MUNIT_OK;
+}
+
+static void *
+test_scale_alternating_setup(const MunitParameter params[], void *user_data)
+{
+  (void)params;
+  (void)user_data;
+  sparsemap_t *map = sparsemap(10 * 1024);
+  assert_ptr_not_null(map);
+  return (void *)map;
+}
+static void
+test_scale_alternating_tear_down(void *fixture)
+{
+  sparsemap_t *map = (sparsemap_t *)fixture;
+  assert_ptr_not_null(map);
+  munit_free(map);
+}
+extern char *bytes_as(double bytes, char *s, size_t size);
+static MunitResult
+test_scale_alternating(const MunitParameter params[], void *data)
+{
+  sparsemap_t *map = (sparsemap_t *)data;
+  (void)params;
+
+  for (sparsemap_idx_t i = 0; i < (1000 * 8192); i++) {
+    if (i % 2) {
+      if (sparsemap_set(map, i, true) != i) {
+        // printf("%zu\n", i);
+        break;
+      }
+    }
+  }
   return MUNIT_OK;
 }
 
@@ -1595,6 +1663,7 @@ static MunitTest scale_test_suite[] = {
 { (char *)"/ondrej", test_scale_ondrej, test_scale_ondrej_setup, test_scale_ondrej_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
 #endif
   { (char *)"/fuzz", test_scale_fuzz, test_scale_fuzz_setup, test_scale_fuzz_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
+  { (char *)"/alternating", test_scale_alternating, test_scale_alternating_setup, test_scale_alternating_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
   { (char *)"/spans_come_spans_go", test_scale_spans_come_spans_go, test_scale_spans_come_spans_go_setup, test_scale_spans_come_spans_go_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
   { (char *)"/best-case", test_scale_best_case, test_scale_best_case_setup, test_scale_best_case_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
   { (char *)"/worst-case", test_scale_worst_case, test_scale_worst_case_setup, test_scale_worst_case_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
