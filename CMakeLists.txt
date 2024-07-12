@@ -87,7 +87,7 @@ target_link_libraries(soak PUBLIC m)
 add_custom_target(run_soak COMMAND soak WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
 # Add fuzzer program
-# add_executable(fuzzer tests/fuzzer.c)
+# add_executable(fuzzer EXCLUDE_FROM_ALL tests/fuzzer.c)
 # target_link_libraries(fuzzer PRIVATE sparsemap)
 # target_include_directories(fuzzer PRIVATE ${HEADER_DIR} lib)
 # target_link_libraries(fuzzer PUBLIC m)

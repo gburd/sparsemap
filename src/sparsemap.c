@@ -149,7 +149,7 @@ __sm_chunk_calc_vector_size(uint8_t b)
   return (size_t)lookup[b];
 }
 
-/** @brief Returns the position of a sm_bitvec_t in m_data.
+/** @brief Returns the offset of a sm_bitvec_t in m_data.
  *
  * Each chunk has a set of bitvec that are sometimes abbreviated due to
  * compression (e.g. when a bitvec is all zeros or ones there is no need
@@ -157,7 +157,7 @@ __sm_chunk_calc_vector_size(uint8_t b)
  *
  * @param[in] chunk The chunk in question.
  * @param[in] bv The index of the vector to find in the chunk.
- * @returns the position of a sm_bitvec_t in m_data
+ * @returns the offset of a sm_bitvec_t within m_data
  */
 static size_t
 __sm_chunk_get_position(__sm_chunk_t *chunk, size_t bv)
