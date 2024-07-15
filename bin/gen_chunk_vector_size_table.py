@@ -7,8 +7,8 @@
 # The 2 bit patters are:
 #  00 -> 0 additional sm_bitvec_t (ZEROS)
 #  11 -> 0 additional sm_bitvec_t (ONES)
-#  10 -> 0 additional sm_bitvec_t (NONE, or RLE if at the start)
-#  01 -> 1 additional sm_bitvec_t (MIXED, requires additional space)
+#  10 -> 1 additional sm_bitvec_t (MIXED)
+#  01 -> 0 additional sm_bitvec_t (NONE)
 
 # The goal is to output this:
 
@@ -42,15 +42,13 @@
 #   return (size_t)lookup[b];
 # }
 
-# TODO: fix this... :)
-
 def create_lookup_table_c_format():
   """Creates a lookup table in C-style format."""
   lookup_table = []
   for byte in range(256):
     count = 0
     for i in range(3):
-      if (byte >> (i * 2)) & 3 == 1:
+      if (byte >> (i * 2)) & 3 == 2:
         count += 1
     lookup_table.append(count)
 

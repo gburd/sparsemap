@@ -29,31 +29,31 @@
  *
  * The implementation is separated into tiers.
  *
- * Tier 0 (lowest): bits are stored in a sm_bitvec_t (uint64_t).
+ * Tier 0 (lowest): bits are stored in a __sm_bitvec_t (uint64_t).
  *
- * Tier 1 (middle): multiple sm_bitvec_t are managed in a chunk map. The chunk
- *    map only stores those sm_bitvec_t that have a mixed payload of bits (i.e.
- *    some bits are 1, some are 0). As soon as ALL bits in a sm_bitvec_t are
- *    identical, this sm_bitvec_t is no longer stored, it is compressed.
+ * Tier 1 (middle): multiple __sm_bitvec_t are managed in a chunk map. The chunk
+ *    map only stores those __sm_bitvec_t that have a mixed payload of bits (i.e.
+ *    some bits are 1, some are 0). As soon as ALL bits in a __sm_bitvec_t are
+ *    identical, this __sm_bitvec_t is no longer stored, it is compressed.
  *
- *    The chunk maps store additional flags (2 bit) for each sm_bitvec_t in an
- *    additional word (same size as the sm_bitvec_t itself).
+ *    The chunk maps store additional flags (2 bit) for each __sm_bitvec_t in an
+ *    additional word (same size as the __sm_bitvec_t itself).
  *
  *     00 11 22 33
- *     ^-- descriptor for sm_bitvec_t 1
- *        ^-- descriptor for sm_bitvec_t 2
- *           ^-- descriptor for sm_bitvec_t 3
- *              ^-- descriptor for sm_bitvec_t 4
+ *     ^-- descriptor for __sm_bitvec_t 1
+ *        ^-- descriptor for __sm_bitvec_t 2
+ *           ^-- descriptor for __sm_bitvec_t 3
+ *              ^-- descriptor for __sm_bitvec_t 4
  *
  *    Those flags (*) can have one of the following values:
  *
- *     00   The sm_bitvec_t is all zero -> sm_bitvec_t is not stored
- *     11   The sm_bitvec_t is all one -> sm_bitvec_t is not stored
- *     10   The sm_bitvec_t contains a bitmap -> sm_bitvec_t is stored
- *     01   The sm_bitvec_t is not used (**)
+ *     00   The __sm_bitvec_t is all zero -> __sm_bitvec_t is not stored
+ *     11   The __sm_bitvec_t is all one -> __sm_bitvec_t is not stored
+ *     10   The __sm_bitvec_t contains a bitmap -> __sm_bitvec_t is stored
+ *     01   The __sm_bitvec_t is not used (**)
  *
  *    The serialized size of a chunk map in memory therefore is at least
- *    one sm_bitvec_t for the flags, and (optionally) additional sm_bitvec_ts
+ *    one __sm_bitvec_t for the flags, and (optionally) additional __sm_bitvec_ts
  *    if they are required.
  *
  *    (*) The code comments often use the Erlang format for binary
@@ -82,7 +82,7 @@ extern "C" {
  * The public interface for a sparse bit-mapped index, a "sparse map".
  *
  * |sm_idx_t| is the user's numerical data type which is mapped to a single bit
- * in the bitmap. Usually this is uint32_t or uint64_t.  |sm_bitvec_t| is the
+ * in the bitmap. Usually this is uint32_t or uint64_t.  |__sm_bitvec_t| is the
  * storage type for a bit vector used by the __sm_chunk_t internal maps.
  * Usually this is an uint64_t.
  */
@@ -93,7 +93,6 @@ typedef size_t sparsemap_idx_t;
 #define SPARSEMAP_FOUND(x) ((x) != SPARSEMAP_IDX_MAX)
 #define SPARSEMAP_NOT_FOUND(x) ((x) == SPARSEMAP_IDX_MAX)
 typedef uint32_t sm_idx_t;
-typedef uint64_t sm_bitvec_t;
 
 /** @brief Allocate a new, empty sparsemap_t with a buffer of \b size on the
  * heap to use for storage of bitmap data.
