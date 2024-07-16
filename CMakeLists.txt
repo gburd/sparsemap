@@ -11,12 +11,11 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_C_OUTPUT_EXTENSION .o)
 
-# Set source and header file locations
-set(SOURCE_DIR src)
-set(HEADER_DIR include)
+set(SOURCE_DIR .)
+set(HEADER_DIR . test)
 
 set(COMMON_CMAKE_C_FLAGS "-Wall -Wextra -Wpedantic")
-set(CMAKE_C_FLAGS_DEBUG "-DSPARSEMAP_DIAGNOSTIC -DDEBUG -g -O0")
+set(CMAKE_C_FLAGS_DEBUG "-DSPARSEMAP_DIAGNOSTIC -DDEBUG -g -Og")
 set(CMAKE_C_FLAGS_PROFILE "-DSPARSEMAP_DIAGNOSTIC -DDEBUG -g -Og -fsanitize=address,leak,object-size,pointer-compare,pointer-subtract,null,return,bounds,pointer-overflow,undefined -fsanitize-address-use-after-scope")
 set(CMAKE_C_FLAGS_RELEASE "-Ofast")
 
@@ -50,37 +49,37 @@ set_target_properties(sparsemap PROPERTIES
 target_include_directories(sparsemap PRIVATE ${HEADER_DIR})
 
 # Add ex_1 program
-add_executable(ex_1 examples/ex_1.c tests/munit.c lib/common.c)
+add_executable(ex_1 test/ex_1.c test/munit.c test/common.c)
 target_link_libraries(ex_1 PRIVATE sparsemap)
 target_include_directories(ex_1 PRIVATE ${HEADER_DIR})
 add_custom_target(run_ex_1 COMMAND ex_1 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
 # Add ex_2 program
-add_executable(ex_2 examples/ex_2.c tests/munit.c lib/common.c)
+add_executable(ex_2 test/ex_2.c test/munit.c test/common.c)
 target_link_libraries(ex_2 PRIVATE sparsemap)
 target_include_directories(ex_2 PRIVATE ${HEADER_DIR})
 add_custom_target(run_ex_2 COMMAND ex_2 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
 # Add ex_3 program
-add_executable(ex_3 examples/ex_3.c tests/munit.c lib/common.c)
+add_executable(ex_3 test/ex_3.c test/munit.c test/common.c)
 target_link_libraries(ex_3 PRIVATE sparsemap)
 target_include_directories(ex_3 PRIVATE ${HEADER_DIR})
 add_custom_target(run_ex_3 COMMAND ex_3 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
 # Add ex_4 program
-add_executable(ex_4 examples/ex_4.c tests/munit.c lib/common.c)
+add_executable(ex_4 test/ex_4.c test/munit.c test/common.c)
 target_link_libraries(ex_4 PRIVATE sparsemap)
 target_include_directories(ex_4 PRIVATE ${HEADER_DIR})
 add_custom_target(run_ex_4 COMMAND ex_4 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
 # Add test program
-add_executable(test tests/test.c tests/munit.c lib/common.c)
+add_executable(test test/test.c test/munit.c test/common.c)
 target_link_libraries(test PRIVATE sparsemap)
 target_include_directories(test PRIVATE ${HEADER_DIR})
 add_custom_target(run_test COMMAND test WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
 # Add soak program
-add_executable(soak tests/soak.c lib/common.c lib/tdigest.c lib/roaring.c)
+add_executable(soak test/soak.c test/common.c test/tdigest.c test/roaring.c)
 target_link_libraries(soak PRIVATE sparsemap)
 target_include_directories(soak PRIVATE ${HEADER_DIR} lib)
 target_link_libraries(soak PUBLIC m)

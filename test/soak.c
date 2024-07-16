@@ -10,10 +10,10 @@
 #include <time.h>
 #include <unistd.h>
 
-#include "../include/common.h"
-#include "../include/roaring.h"
-#include "../include/sparsemap.h"
-#include "../include/tdigest.h"
+#include <common.h>
+#include <roaring.h>
+#include <sparsemap.h>
+#include <tdigest.h>
 
 #include "midl.c"
 

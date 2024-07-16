@@ -1,5 +1,5 @@
 
-#include "../include/sparsemap.h"
+#include <sparsemap.h>
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wvariadic-macros"

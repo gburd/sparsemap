@@ -1,106 +1,68 @@
+# Build type (debug, sanitize, or release)
+BUILD_TYPE := debug
 
-OBJS = sparsemap.o
+COMMON_CFLAGS = -Wall -Wextra -Wpedantic -std=c11 -fPIC -I.
+CFLAGS_DEBUG =  $(COMMON_CFLAGS) -Og -g -DSPARSEMAP_DIAGNOSTIC -DDEBUG
+CFLAGS_SANITIZE = $(COMMON_CFLAGS) -Og -g -DSPARSEMAP_DIAGNOSTIC -DDEBUG -fsanitize=address,leak,object-size,pointer-compare,pointer-subtract,null,return,bounds,pointer-overflow,undefined -fsanitize-address-use-after-scope -std=c11
+CFLAGS_RELEASE = $(COMMON_CFLAGS) -Ofast
+CFLAGS_TEST = $(COMMON_CFLAGS) -Og -g -DDEBUG -I. -Itest
+CFLAGS := $(if $(filter debug,$(BUILD_TYPE)),$(CFLAGS_DEBUG), \
+            $(if $(filter release,$(BUILD_TYPE)),$(CFLAGS_RELEASE), \
+            $(if $(filter sanitize,$(BUILD_TYPE)),$(CFLAGS_SANITIZE), \
+            $(error Unknown build type: $(BUILD_TYPE)))))
+
+LDFLAGS = -lm
+LDFLAGS_VERBOSE = -Wl,-v
+
+SRCS = $(wildcard *.c)
+OBJS = $(SRCS:.c=.o)
 STATIC_LIB = libsparsemap.a
 SHARED_LIB = libsparsemap.so
+TEST_TARGETS = test/test test/soak test/ex_1 test/ex_2 test/ex_3 test/ex_4
+TEST_SRCS = $(filter-out $(wildcard test/ex_*) test/midl.c $(TEST_TARGETS:=.c), $(wildcard test/*.c))
+TEST_OBJS = $(TEST_SRCS:.c=.o)
+TEST_DEPS = $(filter-out $(TEST_TARGETS:=.h), $(TEST_SRCS:.c=.h))
 
-LIBS =  -lm
-#CFLAGS = -Wall -Wextra -Wpedantic -Of -std=c11 -Iinclude/ -fPIC
-#CFLAGS = -Wall -Wextra -Wpedantic -Og -g -std=c11 -Iinclude/ -fPIC
-CFLAGS = -DSPARSEMAP_DIAGNOSTIC -DDEBUG -Wall -Wextra -Wpedantic -O0 -g -std=c11 -Iinclude/ -fPIC
-#CFLAGS = -DSPARSEMAP_DIAGNOSTIC -DDEBUG -Wall -Wextra -Ofast -g -std=c11 -Iinclude/ -fPIC
-#CFLAGS = -Wall -Wextra -Wpedantic -Og -g -std=c11 -Iinclude/ -fPIC
-#CFLAGS = -Wall -Wextra -Wpedantic -Ofast -g -std=c11 -Iinclude/ -fPIC
-#CFLAGS = -DSPARSEMAP_DIAGNOSTIC -DDEBUG -Wall -Wextra -Wpedantic -Og -g -fsanitize=address,leak,object-size,pointer-compare,pointer-subtract,null,return,bounds,pointer-overflow,undefined -fsanitize-address-use-after-scope -std=c11 -Iinclude/ -fPIC
-#CFLAGS = -Wall -Wextra -Wpedantic -Og -g -fsanitize=all -fhardened -std=c11 -Iinclude/ -fPIC
+# Targets
+all: $(STATIC_LIB) $(SHARED_LIB)
 
-TEST_FLAGS = -DDEBUG -Wall -Wextra -Wpedantic -O0 -g -std=c11 -Iinclude/ -Itests/ -fPIC
-#TEST_FLAGS = -Wall -Wextra -Wpedantic -Ofast -g -std=c11 -Iinclude/ -Itests/ -fPIC
-#TEST_FLAGS = -Wall -Wextra -Wpedantic -Og -g -std=c11 -Iinclude/ -Itests/ -fPIC
-#TEST_FLAGS = -DDEBUG -Wall -Wextra -Wpedantic -Og -g -fsanitize=address,leak,object-size,pointer-compare,pointer-subtract,null,return,bounds,pointer-overflow,undefined -fsanitize-address-use-after-scope -std=c11 -Iinclude/ -fPIC
-
-TESTS = tests/test tests/soak
-TEST_OBJS = tests/test.o lib/munit.o lib/tdigest.o lib/common.o
-LIB_OBJS = lib/munit.o lib/tdigest.o lib/common.o lib/roaring.o
-EXAMPLES = examples/ex_1 examples/ex_2 examples/ex_3 examples/ex_4
-
-.PHONY: all shared static clean test examples mls
-
-all: static shared
-
-static: $(STATIC_LIB)
-
-shared: $(SHARED_LIB)
+info:
+	$(info TEST_SRCS: $(TEST_SRCS))
+	$(info TEST_OBJS: $(TEST_OBJS))
+	$(info TEST_DEPS: $(TEST_DEPS))
 
 $(STATIC_LIB): $(OBJS)
-	ar rcs $(STATIC_LIB) $?
+	ar rcs libsparsemap.a $(OBJS)
 
 $(SHARED_LIB): $(OBJS)
-	$(CC) $(CFLAGS) -o $@ $? -shared
+	$(CC) -shared -o libsparsemap.so $(OBJS) $(LDFLAGS)
 
-examples: $(STATIC_LIB) $(EXAMPLES) $(TEST_OBJS)
+check: $(TEST_TARGETS)
 
-mls: examples/mls
+test/test: $(TEST_OBJS) $(STATIC_LIB) test/test.o
+	$(CC) $^ $(LDFLAGS) -o $@
 
-tests: $(TESTS)
+test/soak: $(TEST_OBJS) $(STATIC_LIB) test/soak.o
+	$(CC) $^ $(LDFLAGS) -o $@
 
-test: tests
-	env ASAN_OPTIONS=detect_leaks=1 LSAN_OPTIONS=verbosity=1:log_threads=1 ./tests/test
+test/ex_1: test/ex_1.o $(STATIC_LIB)
+	$(CC) $^ $(LDFLAGS) -o $@
 
-soak: tests
-	env ASAN_OPTIONS=detect_leaks=1 LSAN_OPTIONS=verbosity=1:log_threads=1 ./tests/soak
+test/ex_2: test/ex_2.o $(STATIC_LIB)
+	$(CC) $^ $(LDFLAGS) -o $@
 
-fuzzer: tests
-	env ASAN_OPTIONS=detect_leaks=1 LSAN_OPTIONS=verbosity=1:log_threads=1 ./tests/fuzzer ./crash.case
+test/ex_3: test/ex_3.o $(STATIC_LIB)
+	$(CC) $^ $(LDFLAGS) -o $@
 
-tests/test: $(TEST_OBJS) $(LIB_OBJS) $(STATIC_LIB)
-	$(CC) $^ $(LIBS) -o $@ $(TEST_FLAGS)
+test/ex_4: test/ex_4.o $(STATIC_LIB)
+	$(CC) $^ $(LDFLAGS) -o $@
+
+$(TEST_OBJS): $(TEST_SRCS) $(TEST_DEPS)
+	$(CC) $(CFLAGS_TEST) -c $(subst .o,.c,$@) -o $@
+
+$(OBJS): $(SRCS)
+	$(CC) $(CFLAGS) -c $< -o $@
 
 clean:
-	rm -f $(OBJS)
-	rm -f examples/main.c
-	rm -f $(STATIC_LIB) $(SHARED_LIB)
-	rm -f $(TESTS) tests/*.o
-	rm -f $(EXAMPLES) examples/*.o
-
-format:
-	clang-format -i src/sparsemap.c include/sparsemap.h examples/ex_*.c tests/soak.c tests/test.c tests/midl.c lib/common.c include/common.h
-#	clang-format -i include/*.h src/*.c tests/*.c tests/*.h examples/*.c
-
-%.o: src/%.c
-	$(CC) $(CFLAGS) -c -o $@ $^
-
-lib/%.o: tests/%.c
-	$(CC) $(CFLAGS) -c -o $@ $^
-
-tests/%.o: tests/%.c
-	$(CC) $(CFLAGS) -c -o $@ $^
-
-examples/%.o: examples/%.c
-	$(CC) $(CFLAGS) -c -o $@ $^
-
-examples/ex_1:  $(LIB_OBJS) examples/ex_1.o $(STATIC_LIB)
-	$(CC) $^ $(LIBS) -o $@ $(TEST_FLAGS)
-
-examples/ex_2: $(LIB_OBJS) examples/ex_2.o $(STATIC_LIB)
-	$(CC) $^ $(LIBS) -o $@ $(TEST_FLAGS)
-
-examples/ex_3: $(LIB_OBJS) examples/ex_3.o $(STATIC_LIB)
-	$(CC) $^ $(LIBS) -o $@ $(TEST_FLAGS)
-
-examples/ex_4: $(LIB_OBJS) examples/ex_4.o $(STATIC_LIB)
-	$(CC) $^ $(LIBS) -o $@ $(TEST_FLAGS)
-
-tests/soak: $(LIB_OBJS) tests/soak.o $(STATIC_LIB)
-	$(CC) $^ $(LIBS) -o $@ $(TEST_FLAGS)
-
-tests/fuzzer: $(LIB_OBJS) tests/fuzzer.o $(STATIC_LIB)
-	$(CC) $^ $(LIBS) -o $@ $(TEST_FLAGS) -DFUZZ_DEBUG
-
-todo:
-	rg -i 'todo|gsb|abort'
-
-# cp src/sparsemap.c /tmp && clang-tidy src/sparsemap.c -fix -fix-errors -checks="readability-braces-around-statements" -- -DDEBUG -DSPARSEMAP_DIAGNOSTIC -DSPARSEMAP_ASSERT -Wall -Wextra -Wpedantic -Og -g -std=c11 -Iinclude/ -fPIC
-
-# clear; make clean examples test && env ASAN_OPTIONS=detect_leaks=1 LSAN_OPTIONS=verbosity=1:log_threads=1 ./tests/test
-
-# clear; make clean examples test && env ASAN_OPTIONS=detect_leaks=1 LSAN_OPTIONS=verbosity=1:log_threads=1 ./examples/soak
+	rm -f libsparsemap.a libsparsemap.so $(OBJS) $(TEST_OBJS) \
+		test/test test/soak test/ex_1 test/ex_2 test/ex_3 test/ex_4

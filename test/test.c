@@ -15,9 +15,10 @@
 #include <stdlib.h>
 #include <unistd.h>
 
-#include "../include/sparsemap.h"
-#include "common.h"
-#include "munit.h"
+#include <sparsemap.h>
+#include <common.h>
+#include <munit.h>
+#include <qc.h>
 
 #define munit_free free
 

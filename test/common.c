@@ -18,8 +18,8 @@
 #endif
 #endif
 
-#include "../include/common.h"
-#include "../include/sparsemap.h"
+#include <common.h>
+#include <sparsemap.h>
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wvariadic-macros"
@@ -122,7 +122,7 @@ shuffle(int *array, size_t n)
   }
 }
 
-int
+static int
 compare_ints(const void *a, const void *b)
 {
   return *(const int *)a - *(const int *)b;
