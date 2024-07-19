@@ -15,7 +15,7 @@ set(SOURCE_DIR .)
 set(HEADER_DIR . test)
 
 set(COMMON_CMAKE_C_FLAGS "-Wall -Wextra -Wpedantic")
-set(CMAKE_C_FLAGS_DEBUG "-DSPARSEMAP_DIAGNOSTIC -DDEBUG -g -Og")
+set(CMAKE_C_FLAGS_DEBUG "-DSPARSEMAP_DIAGNOSTIC -DSPARSEMAP_TESTING -DDEBUG -g -O0")
 set(CMAKE_C_FLAGS_PROFILE "-DSPARSEMAP_DIAGNOSTIC -DDEBUG -g -Og -fsanitize=address,leak,object-size,pointer-compare,pointer-subtract,null,return,bounds,pointer-overflow,undefined -fsanitize-address-use-after-scope")
 set(CMAKE_C_FLAGS_RELEASE "-Ofast")
 
@@ -73,9 +73,10 @@ target_include_directories(ex_4 PRIVATE ${HEADER_DIR})
 add_custom_target(run_ex_4 COMMAND ex_4 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
 # Add test program
-add_executable(test test/test.c test/munit.c test/common.c)
+add_executable(test test/test.c test/munit.c test/qc.c test/common.c)
 target_link_libraries(test PRIVATE sparsemap)
 target_include_directories(test PRIVATE ${HEADER_DIR})
+set_source_files_properties(test/test.c PROPERTIES COMPILE_FLAGS "-DDEBUG -DDIAGNOSTIC -DSPARSEMAP_TESTING" )
 add_custom_target(run_test COMMAND test WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
 # Add soak program

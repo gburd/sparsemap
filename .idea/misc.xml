@@ -4,29 +4,8 @@
     <option name="executionMode" value="BINARY" />
     <option name="pathToExecutable" value="$USER_HOME$/.nix-profile/bin/black" />
   </component>
-  <component name="CidrRootsConfiguration">
-    <sourceRoots>
-      <file path="$PROJECT_DIR$/examples" />
-      <file path="$PROJECT_DIR$/include" />
-      <file path="$PROJECT_DIR$/lib" />
-      <file path="$PROJECT_DIR$/src" />
-      <file path="$PROJECT_DIR$/test" />
-      <file path="$PROJECT_DIR$/tests" />
-    </sourceRoots>
+  <component name="CMakePythonSetting">
+    <option name="pythonIntegrationState" value="YES" />
   </component>
-  <component name="ExternalStorageConfigurationManager" enabled="true" />
-  <component name="MakefileSettings">
-    <option name="linkedExternalProjectsSettings">
-      <MakefileProjectSettings>
-        <option name="externalProjectPath" value="$PROJECT_DIR$" />
-        <option name="modules">
-          <set>
-            <option value="$PROJECT_DIR$" />
-          </set>
-        </option>
-        <option name="version" value="2" />
-      </MakefileProjectSettings>
-    </option>
-  </component>
-  <component name="MakefileWorkspace" PROJECT_DIR="$PROJECT_DIR$" />
+  <component name="CMakeWorkspace" PROJECT_DIR="$PROJECT_DIR$" />
 </project>

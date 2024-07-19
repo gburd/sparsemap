@@ -1,5 +1,5 @@
 /*
- * smartmap is MIT-licensed, but for this file:
+ * sparsemap is MIT-licensed, but for this file:
  *
  * To the extent possible under law, the author(s) of this file have
  * waived all copyright and related or neighboring rights to this
@@ -10,15 +10,14 @@
 #define MUNIT_NO_FORK (1)
 #define MUNIT_ENABLE_ASSERT_ALIASES (1)
 
+#include <common.h>
 #include <errno.h>
+#include <munit.h>
+#include <qc.h>
+#include <sparsemap.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
-
-#include <sparsemap.h>
-#include <common.h>
-#include <munit.h>
-#include <qc.h>
 
 #define munit_free free
 
@@ -89,7 +88,7 @@ test_api_new(const MunitParameter params[], void *data)
   assert_ptr_not_null(map);
   assert_true(map->m_capacity == 1024);
   assert_true(map->m_data_used == sizeof(uint32_t));
-  assert_true((((uint8_t)map->m_data[0]) & 0x03) ==0x00);
+  assert_true((((uint8_t)map->m_data[0]) & 0x03) == 0x00);
 
   munit_free(map);
 
@@ -1268,6 +1267,39 @@ static MunitTest api_test_suite[] = {
 };
 // clang-format on
 
+/* -------------------------- Quickcheck, Property Based Tests */
+
+extern QCC_TestStatus _tst_chunk_calc_vector_size_equality(QCC_GenValue **vals, int len, QCC_Stamp **stamp);
+
+static MunitResult
+qc__sm_chunk_calc_vector_size(const MunitParameter params[], void *data)
+{
+  (void)params;
+  (void)data;
+
+  return QCC_testForAll(1000, 1000, _tst_chunk_calc_vector_size_equality, 1, QCC_genInt);
+}
+
+extern QCC_GenValue *QCC_genChunk();
+extern QCC_TestStatus _tst_chunk_get_position(QCC_GenValue **vals, int len, QCC_Stamp **stamp);
+
+static MunitResult
+qc__sm_chunk_get_position(const MunitParameter params[], void *data)
+{
+  (void)params;
+  (void)data;
+
+  return QCC_testForAll(100, 1000, _tst_chunk_get_position, 1, QCC_genChunk);
+}
+
+// clang-format off
+static MunitTest qc_test_suite[] = {
+  { (char *)"/__sm_chunk_calc_vector_size", qc__sm_chunk_calc_vector_size, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+  { (char *)"/__sm_chunk_get_position", qc__sm_chunk_get_position, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+  { NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
+};
+// clang-format off
+
 /* -------------------------- Scale Tests */
 
 static void *
@@ -1682,6 +1714,7 @@ static MunitTest perf_test_suite[] = {
 // clang-format off
 static MunitSuite other_test_suite[] = {
   { "/api", api_test_suite, NULL, 1, MUNIT_SUITE_OPTION_NONE },
+  { "/qc", qc_test_suite, NULL, 1, MUNIT_SUITE_OPTION_NONE },
   { "/perf", perf_test_suite, NULL, 1, MUNIT_SUITE_OPTION_NONE },
   { "/scale", scale_test_suite, NULL, 1, MUNIT_SUITE_OPTION_NONE },
   { NULL, NULL, NULL, 0, MUNIT_SUITE_OPTION_NONE } };
@@ -1703,6 +1736,8 @@ main(int argc, char *argv[MUNIT_ARRAY_PARAM(argc + 1)])
   /* Disable buffering on std{out,err} to avoid having to call fflush(). */
   setvbuf(stdout, NULL, _IONBF, 0);
   setvbuf(stderr, NULL, _IONBF, 0);
+
+  QCC_init(0);
 
   return munit_suite_main(&main_test_suite, (void *)&info, argc, argv);
 }

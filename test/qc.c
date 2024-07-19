@@ -37,7 +37,7 @@ typedef struct QCC_Result {
   int argumentsN;
 } QCC_Result;
 
-enum QCC_deref_type { NONE, LONG, INT, FLOAT, DOUBLE, CHAR };
+enum QCC_deref_type { NONE, LONG, INT, FLOAT, DOUBLE, BYTE, CHAR };
 
 void
 QCC_init(int seed)
@@ -72,6 +72,9 @@ QCC_showSimpleValue(void *value, enum QCC_deref_type dt, int maxsize, const char
     break;
   case CHAR:
     snprintf(vc, maxsize + 1, format, *(char *)value);
+    break;
+  case BYTE:
+    snprintf(vc, maxsize + 1, format, *(uint8_t *)value);
     break;
   default:
     snprintf(vc, maxsize + 1, format, *(int *)value);
@@ -378,6 +381,49 @@ QCC_showSimpleArray(void *value, size_t elemSize, QCC_showValue showValue, int l
   sprintf(str + currLen, "]");
   free(valStr);
   return str;
+}
+
+static char *
+QCC_showByte(void *value, int len)
+{
+  return QCC_showSimpleValue(value, BYTE, 3, "'%x'");
+}
+
+static char *
+QCC_showArrayByte(void *value, int n)
+{
+  return QCC_showSimpleArray(value, sizeof(long), QCC_showByte, n);
+}
+
+void
+QCC_genByteAtR(uint8_t *b, uint8_t *from, uint8_t *to)
+{
+  uint8_t r = (uint8_t)random() / (uint8_t)RAND_MAX;
+  *b = *from + (*to - *from) * r;
+}
+
+void
+QCC_genByteAt(uint8_t *b)
+{
+  *b = ((uint8_t)random() / (uint8_t)RAND_MAX) % UINT8_MAX;
+}
+
+QCC_GenValue *
+QCC_genArrayByteLR(int len, long from, long to)
+{
+  return QCC_genArrayOfR(len, (QCC_genRawR)QCC_genByteAtR, &from, &to, sizeof(long), QCC_showArrayByte, QCC_freeSimpleValue);
+}
+
+QCC_GenValue *
+QCC_genArrayByteL(int len)
+{
+  return QCC_genArrayOf(len, (QCC_genRaw)QCC_genByteAt, sizeof(long), QCC_showArrayByte, QCC_freeSimpleValue);
+}
+
+QCC_GenValue *
+QCC_genArrayByte()
+{
+  return QCC_genArrayOf(50, (QCC_genRaw)QCC_genByteAt, sizeof(long), QCC_showArrayByte, QCC_freeSimpleValue);
 }
 
 static char *
@@ -760,7 +806,7 @@ QCC_testForAll(int num, int maxFail, QCC_property prop, int genNum, ...)
   }
 
   if (succ == num) {
-    printf("%d test passed (%d)!\n", succ, fail);
+    //printf("%d test passed (%d)!\n", succ, fail);
     QCC_printStamps(stamps, succ);
     if (stamps)
       QCC_freeStamp(stamps);

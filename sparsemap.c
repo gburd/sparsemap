@@ -68,6 +68,10 @@ void __attribute__((format(printf, 4, 5))) __sm_diag_(const char *file, int line
 
 typedef uint64_t __sm_bitvec_t;
 
+typedef struct {
+  __sm_bitvec_t *m_data;
+} __sm_chunk_t;
+
 enum __SM_CHUNK_INFO {
   /* metadata overhead: 4 bytes for __sm_chunk_t count */
   SM_SIZEOF_OVERHEAD = sizeof(uint32_t),
@@ -85,7 +89,7 @@ enum __SM_CHUNK_INFO {
   SM_CHUNK_MAX_CAPACITY = (SM_BITS_PER_VECTOR * SM_FLAGS_PER_INDEX),
 
   /* minimum capacity of a __sm_chunk_t (in bits) */
-  SM_CHUNK_MIN_CAPACITY = SM_BITS_PER_VECTOR,
+  SM_CHUNK_MIN_CAPACITY = (SM_BITS_PER_VECTOR - 2),
 
   /* __sm_bitvec_t payload is all zeros (2#00) */
   SM_PAYLOAD_ZEROS = 0,
@@ -113,12 +117,9 @@ enum __SM_CHUNK_INFO {
 };
 
 #define SM_CHUNK_GET_FLAGS(from, at) ((((from)) & ((__sm_bitvec_t)SM_FLAG_MASK << ((at)*2))) >> ((at)*2))
-#define SM_IS_CHUNK_RLE(chunk) ((*((__sm_bitvec_t *)(chunk)->m_data) & (((__sm_bitvec_t)0x3) << (SM_BITS_PER_VECTOR - 2))) == SM_PAYLOAD_NONE)
+#define SM_IS_CHUNK_RLE(chunk) \
+  (((*((__sm_bitvec_t *)(chunk)->m_data) & (((__sm_bitvec_t)0x3) << (SM_BITS_PER_VECTOR - 2))) >> (SM_BITS_PER_VECTOR - 2)) == SM_PAYLOAD_NONE)
 #define SM_CHUNK_RLE_LENGTH(chunk) (size_t)(*((__sm_bitvec_t *)(chunk)->m_data) & ~(((__sm_bitvec_t)0x3) << (SM_BITS_PER_VECTOR - 2)))
-
-typedef struct {
-  __sm_bitvec_t *m_data;
-} __sm_chunk_t;
 
 struct __attribute__((aligned(8))) sparsemap {
   size_t m_capacity;  /* The total size of m_data */
@@ -141,7 +142,6 @@ struct __attribute__((aligned(8))) sparsemap {
  * @return The calculated number of vectors.
  * @see bin/gen_chunk_vector_size_table.py
  */
-#if 1
 static size_t
 __sm_chunk_calc_vector_size(uint8_t b)
 {
@@ -167,22 +167,6 @@ __sm_chunk_calc_vector_size(uint8_t b)
   // clang-format on
   return (size_t)lookup[b];
 }
-#else
-/* Alternative, non-lookup table, implementation. */
-static size_t
-__sm_chunk_calc_vector_size(uint8_t b)
-{
-    int count = 0;
-
-    for (int i = 0; i < 4; i++) {
-        if (((b >> (i * 2)) & 0x03) == 0x02) {
-            count++;
-        }
-    }
-
-    return count;
-}
-#endif
 
 /** @brief Calculates the byte offset of a vector within a chunk.
  *
@@ -192,11 +176,11 @@ __sm_chunk_calc_vector_size(uint8_t b)
  * additional vectors are stored.
  *
  * @param[in] chunk Pointer to the chunk containing the vector.
- * @param[in] nth Index of the desired vector within the chunk (0-based).
+ * @param[in] bv Index of the desired vector within the chunk (0-based).
  * @return Byte offset of the vector within the chunk's data.
  */
 static size_t
-__sm_chunk_get_position(__sm_chunk_t *chunk, size_t nth)
+__sm_chunk_get_position(__sm_chunk_t *chunk, size_t bv)
 {
   /* Handle 4 indices (1 byte) at a time. */
   size_t num_bytes;
@@ -208,13 +192,13 @@ __sm_chunk_get_position(__sm_chunk_t *chunk, size_t nth)
     return position;
   }
 
-  num_bytes = nth / ((size_t)SM_FLAGS_PER_INDEX_BYTE * SM_BITS_PER_VECTOR);
+  num_bytes = bv / ((size_t)SM_FLAGS_PER_INDEX_BYTE * SM_BITS_PER_VECTOR);
   for (size_t i = 0; i < num_bytes; i++, p++) {
     position += __sm_chunk_calc_vector_size(*p);
   }
 
-  nth -= num_bytes * SM_FLAGS_PER_INDEX_BYTE;
-  for (size_t i = 0; i < nth; i++) {
+  bv -= num_bytes * SM_FLAGS_PER_INDEX_BYTE;
+  for (size_t i = 0; i < bv; i++) {
     size_t flags = SM_CHUNK_GET_FLAGS(*chunk->m_data, i);
     if (flags == SM_PAYLOAD_MIXED) {
       position++;
@@ -316,6 +300,7 @@ __sm_chunk_reduce_capacity(__sm_chunk_t *chunk, size_t capacity)
     }
   }
   __sm_assert(__sm_chunk_get_capacity(chunk) == capacity);
+  __sm_assert(SM_IS_CHUNK_RLE(chunk) == false);
   return 0;
 }
 
@@ -1281,10 +1266,10 @@ sparsemap_set(sparsemap_t *map, sparsemap_idx_t idx, bool value)
       __sm_chunk_t chunk;
       __sm_chunk_init(&chunk, p + sizeof(sm_idx_t));
       if (__sm_chunk_reduce_capacity(&chunk, start - aligned_idx)) {
-	/* The __sm_chunk_t is empty then remove it.
-	__sm_remove_data(map, offset, sizeof(sm_idx_t) + sizeof(__sm_bitvec_t) * 2);
-	__sm_set_chunk_count(map, __sm_get_chunk_count(map) - 1);
-	*/
+        /* TODO: The __sm_chunk_t is empty then remove it.
+        __sm_remove_data(map, offset, sizeof(sm_idx_t) + sizeof(__sm_bitvec_t) * 2);
+        __sm_set_chunk_count(map, __sm_get_chunk_count(map) - 1);
+        */
       }
     }
     *(sm_idx_t *)p = start = aligned_idx;
@@ -1714,7 +1699,7 @@ sparsemap_split(sparsemap_t *map, sparsemap_idx_t offset, sparsemap_t *other)
     __sm_chunk_t d_chunk;
     __sm_chunk_init(&d_chunk, dst);
     if (__sm_chunk_reduce_capacity(&d_chunk, __sm_get_vector_aligned_offset(capacity - (offset % capacity)))) {
-      /* The __sm_chunk_t is empty then remove it.
+      /* TODO: The __sm_chunk_t is empty then remove it.
       __sm_remove_data(map, offset, sizeof(sm_idx_t) + sizeof(__sm_bitvec_t) * 2);
       __sm_set_chunk_count(map, __sm_get_chunk_count(map) - 1);
       */
@@ -1741,7 +1726,7 @@ sparsemap_split(sparsemap_t *map, sparsemap_idx_t offset, sparsemap_t *other)
     /* Reduce the capacity of the source-chunk effectively erases bits. */
     size_t r = __sm_get_vector_aligned_offset(((offset - start) % capacity) + SM_BITS_PER_VECTOR);
     if (__sm_chunk_reduce_capacity(&s_chunk, r)) {
-      /* The __sm_chunk_t is empty then remove it.
+      /* TODO: The __sm_chunk_t is empty then remove it.
       __sm_remove_data(map, offset, sizeof(sm_idx_t) + sizeof(__sm_bitvec_t) * 2);
       __sm_set_chunk_count(map, __sm_get_chunk_count(map) - 1);
       */
@@ -1964,3 +1949,188 @@ sparsemap_span(sparsemap_t *map, sparsemap_idx_t idx, size_t len, bool value)
 
   return offset;
 }
+
+#ifdef SPARSEMAP_TESTING
+
+#include <qc.h>
+
+static double
+_tst_pow(double base, int exponent)
+{
+  if (exponent == 0) {
+    return 1.0; // 0^0 is 1
+  } else if (base == 0.0) {
+    return 0.0; // 0 raised to any positive exponent is 0 (except 0^0)
+  } else if (base < 0.0 && (exponent & 1) != 0) {
+    // negative base with odd exponent, results in a negative
+    return -_tst_pow(-base, exponent);
+  }
+
+  double result = base;
+  for (unsigned int i = 1; i < exponent; i++) {
+    result *= base;
+  }
+  return result;
+}
+
+static char *
+QCC_showChunk(void *value, int len)
+{
+  static char buffer[(SM_FLAGS_PER_INDEX * 16) + (SM_BITS_PER_VECTOR * 64) + 16];
+
+  __sm_chunk_t *chunk = (__sm_chunk_t *)value;
+  __sm_bitvec_t desc = chunk->m_data[0];
+
+  if (!SM_IS_CHUNK_RLE(chunk)) {
+    char desc_str[SM_FLAGS_PER_INDEX + 1] = { 0 };
+    char *str = desc_str;
+    int mixed = 0;
+    for (int i = 0; i < SM_FLAGS_PER_INDEX; i++) {
+      uint8_t flag = SM_CHUNK_GET_FLAGS(desc, i);
+      switch (flag) {
+      case SM_PAYLOAD_NONE:
+        str += sprintf(str, "Ø");
+        break;
+      case SM_PAYLOAD_ONES:
+        str += sprintf(str, "1");
+        break;
+      case SM_PAYLOAD_ZEROS:
+        str += sprintf(str, "0");
+        break;
+      case SM_PAYLOAD_MIXED:
+        str += sprintf(str, "≡");
+        mixed++;
+        break;
+      default:
+      }
+    }
+    str = buffer + snprintf(buffer, sizeof(buffer), "%s :: ", desc_str);
+    for (int i = 0; i < mixed; i++) {
+      str += sprintf(str, "0x%lx%s", chunk->m_data[1 + i], i + 1 < mixed ? " " : "");
+    }
+  } else {
+    sprintf(buffer, "1»%zu", SM_CHUNK_RLE_LENGTH(chunk));
+  }
+  return buffer;
+}
+
+static void
+QCC_freeChunkValue(void *value)
+{
+  free(value);
+}
+
+QCC_GenValue *
+QCC_genChunk()
+{
+  bool rle = ((double)random() / (double)RAND_MAX) > 0.5;
+
+  if (rle) {
+    // Generate a chunk with the offset equal to the encoded run length.
+    sparsemap_idx_t from = 1, to = (sparsemap_idx_t)1ULL << (SM_BITS_PER_VECTOR - 2);
+    unsigned int len = ((unsigned int)random() % (to - from)) + from;
+    __sm_chunk_t *chunk = malloc(sizeof(__sm_chunk_t) + (sizeof(__sm_bitvec_t) * 2));
+    __sm_bitvec_t *v = (__sm_bitvec_t *)(chunk + sizeof(__sm_chunk_t));
+    chunk->m_data = v;
+    *v = ((((__sm_bitvec_t)1) << (SM_BITS_PER_VECTOR - 2)) | len);
+    assert(SM_IS_CHUNK_RLE(chunk));
+    assert(SM_CHUNK_RLE_LENGTH(chunk) == (unsigned int)len);
+    QCC_showChunk(chunk, len);
+    return QCC_initGenValue(chunk, 1, QCC_showChunk, QCC_freeChunkValue);
+  } else {
+    // Generate a chunk with the offset equal to the number of additional
+    // vectors (len) and a descriptor that matches that with random data.
+    unsigned int from = 0, to = SM_FLAGS_PER_INDEX;
+    unsigned int len = ((unsigned int)random() % (to - from)) + from;
+    unsigned int cut = ((unsigned int)random() % ((SM_FLAGS_PER_INDEX - len) - from)) + from;
+    __sm_chunk_t *chunk = malloc(sizeof(__sm_chunk_t) + (sizeof(__sm_bitvec_t) * (len + 2)));
+    chunk->m_data = (__sm_bitvec_t *)((uintptr_t)chunk + sizeof(__sm_chunk_t));
+    __sm_bitvec_t *desc = &chunk->m_data[0];
+    *desc = 0;
+    // Run through the flags (2 bits), we know that exactly `len` many flags
+    // must be SM_PAYLOAD_MIXED.
+    for (size_t i = 0, n = len; (i < SM_FLAGS_PER_INDEX - cut) && n; i++) {
+      size_t left = SM_FLAGS_PER_INDEX - cut - i;
+      double prob = (double)n / (double)left;
+      double dice = (double)random() / RAND_MAX;
+      if (dice < prob || left == n) {
+        *desc |= ((__sm_bitvec_t)SM_PAYLOAD_MIXED) << i;
+        size_t pos = (len - n);
+        chunk->m_data[1 + pos] = (uintptr_t)chunk + pos;
+        n--;
+      }
+    }
+    for (int i = 1; i < SM_FLAGS_PER_INDEX - cut; i++) {
+      uint8_t flag = SM_CHUNK_GET_FLAGS(*desc, i);
+      if (flag != SM_PAYLOAD_MIXED && ((double)random() / (double)RAND_MAX) > 0.5) {
+        *desc ^= ~((__sm_bitvec_t)SM_PAYLOAD_ONES << (i * 2));
+      }
+    }
+    //TODO: __sm_chunk_reduce_capacity(chunk, SM_CHUNK_MAX_CAPACITY - (cut * SM_BITS_PER_VECTOR));
+    assert(SM_IS_CHUNK_RLE(chunk) == false);
+    return QCC_initGenValue(chunk, 1, QCC_showChunk, QCC_freeChunkValue);
+  }
+}
+
+static size_t
+_tst_sm_chunk_calc_vector_size(uint8_t b)
+{
+  int count = 0;
+
+  for (int i = 0; i < 4; i++) {
+    if (((b >> (i * 2)) & 0x03) == 0x02) {
+      count++;
+    }
+  }
+
+  return count;
+}
+
+QCC_TestStatus
+_tst_chunk_calc_vector_size_equality(QCC_GenValue **vals, int len, QCC_Stamp **stamp)
+{
+  unsigned int a = *QCC_getValue(vals, 0, unsigned int *) % 256;
+  return _tst_sm_chunk_calc_vector_size(a) == __sm_chunk_calc_vector_size(a);
+}
+
+QCC_TestStatus
+_tst_chunk_get_position(QCC_GenValue **vals, int len, QCC_Stamp **stamp)
+{
+  size_t pos;
+  __sm_chunk_t *chunk = QCC_getValue(vals, 0, __sm_chunk_t *);
+  if (SM_IS_CHUNK_RLE(chunk)) {
+    for (size_t i = 0; i < SM_FLAGS_PER_INDEX; i++) {
+      pos = __sm_chunk_get_position(chunk, i);
+      if (pos != 0) {
+        return QCC_FAIL;
+      }
+    }
+  } else {
+    size_t mixed = 0;
+    for (size_t i = 0; i < SM_FLAGS_PER_INDEX; i++) {
+      uint8_t flag = SM_CHUNK_GET_FLAGS(*chunk->m_data, i);
+      switch (flag) {
+      case SM_PAYLOAD_MIXED:
+        pos = __sm_chunk_get_position(chunk, i);
+        if (chunk->m_data[1 + pos] != (uintptr_t)chunk + pos) {
+          return QCC_FAIL;
+        }
+        mixed++;
+        break;
+      case SM_PAYLOAD_ONES:
+      case SM_PAYLOAD_ZEROS:
+        pos = __sm_chunk_get_position(chunk, i);
+        if (pos != mixed) {
+          return QCC_FAIL;
+        }
+        break;
+      case SM_PAYLOAD_NONE:
+      default:
+        break;
+      }
+    }
+  }
+  return QCC_OK;
+}
+
+#endif

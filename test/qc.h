@@ -253,6 +253,10 @@ QCC_GenValue *QCC_genChar();
 QCC_GenValue *QCC_genString();
 QCC_GenValue *QCC_genStringL(int len);
 
+QCC_GenValue *QCC_genArrayByte();
+QCC_GenValue *QCC_genArrayByteL(int len);
+QCC_GenValue *QCC_genArrayByteLR(int len, long from, long to);
+
 QCC_GenValue *QCC_genArrayLong();
 QCC_GenValue *QCC_genArrayLongL(int len);
 QCC_GenValue *QCC_genArrayLongLR(int len, long from, long to);
