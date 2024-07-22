@@ -812,14 +812,14 @@ QCC_testForAll(int num, int maxFail, QCC_property prop, int genNum, ...)
       QCC_freeStamp(stamps);
     return 0;
   } else if (res.status == QCC_FAIL) {
-    printf("Falsifiable after %d test\n", succ + 1);
+    printf("\nFalsifiable after %d test\n", succ + 1);
     QCC_printArguments(res.arguments, res.argumentsN);
     QCC_freeResult(&res);
     if (stamps)
       QCC_freeStamp(stamps);
     return 1;
   } else if (fail >= maxFail) {
-    printf("Gave up after %d tests!\n", succ);
+    printf("\nGave up after %d tests!\n", succ);
     QCC_printStamps(stamps, succ);
     if (stamps)
       QCC_freeStamp(stamps);

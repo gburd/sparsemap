@@ -92,7 +92,6 @@ typedef size_t sparsemap_idx_t;
 #define SPARSEMAP_IDX_MAX SIZE_MAX
 #define SPARSEMAP_FOUND(x) ((x) != SPARSEMAP_IDX_MAX)
 #define SPARSEMAP_NOT_FOUND(x) ((x) == SPARSEMAP_IDX_MAX)
-typedef uint32_t sm_idx_t;
 
 /** @brief Allocate a new, empty sparsemap_t with a buffer of \b size on the
  * heap to use for storage of bitmap data.
@@ -301,7 +300,7 @@ double sparsemap_fill_factor(sparsemap_t *map);
  * @param[in] skip Start the scan after \b skip position in the map.
  * @param[in] aux Auxiliary information passed to the scanner.
  */
-void sparsemap_scan(sparsemap_t *map, void (*scanner)(sm_idx_t vec[], size_t n, void *aux), size_t skip, void *aux);
+void sparsemap_scan(sparsemap_t *map, void (*scanner)(uint32_t vec[], size_t n, void *aux), size_t skip, void *aux);
 
 /** @brief Merges the values from \b source into \b destination, \b source is unchanged.
  *

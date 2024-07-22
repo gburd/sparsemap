@@ -336,7 +336,7 @@ record_release_span_mutation(FILE *out, pgno_t pg, unsigned len)
 }
 
 static void
-__scan_record_offsets(sm_idx_t v[], size_t n, void *aux)
+__scan_record_offsets(uint32_t v[], size_t n, void *aux)
 {
   FILE *out = (FILE *)aux;
   for (size_t i = 0; i < n; i++) {

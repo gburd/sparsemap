@@ -704,7 +704,7 @@ test_api_scan_tear_down(void *fixture)
   test_api_tear_down(fixture);
 }
 void
-scan_for_0xfeedfacebadcoffee(sm_idx_t v[], size_t n, void *aux)
+scan_for_0xfeedfacebadcoffee(uint32_t v[], size_t n, void *aux)
 {
   size_t bit_pos[] = { 1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 22, 23, 24, 26, 27, 29, 31, 32, 33, 34, 35, 38, 39, 41, 43, 44, 45, 46, 47, 48, 50, 51,
     53, 54, 55, 57, 58, 59, 60, 61, 62, 63 };
@@ -794,11 +794,11 @@ test_api_split(const MunitParameter params[], void *data)
 
   sparsemap_idx_t offset = sparsemap_split(map, SPARSEMAP_IDX_MAX, &portion);
 
-  for (size_t i = 0; i < offset; i++) {
+  for (sparsemap_idx_t i = 0; i < offset; i++) {
     assert_true(sparsemap_is_set(map, i));
     assert_false(sparsemap_is_set(&portion, i));
   }
-  for (int i = offset; i < 100; i++) {
+  for (sparsemap_idx_t i = offset + 1; i < sparsemap_get_ending_offset(&portion); i++) {
     assert_false(sparsemap_is_set(map, i));
     assert_true(sparsemap_is_set(&portion, i));
   }
@@ -812,6 +812,10 @@ test_api_split(const MunitParameter params[], void *data)
   }
 
   offset = sparsemap_split(map, SPARSEMAP_IDX_MAX, &portion);
+  assert_true(sparsemap_get_ending_offset(map) < offset);
+  assert_true(sparsemap_get_starting_offset(&portion) >= offset);
+  assert_true(sparsemap_count(map) == 6);
+  assert_true(sparsemap_count(&portion) == 7);
 
   for (sparsemap_idx_t i = 0; i < offset - 24; i++) {
     assert_true(sparsemap_is_set(map, i + 24));
@@ -1269,7 +1273,12 @@ static MunitTest api_test_suite[] = {
 
 /* -------------------------- Quickcheck, Property Based Tests */
 
+extern QCC_GenValue *QCC_genChunk();
+extern QCC_GenValue *QCC_genSparsemap();
 extern QCC_TestStatus _tst_chunk_calc_vector_size_equality(QCC_GenValue **vals, int len, QCC_Stamp **stamp);
+extern QCC_TestStatus _tst_chunk_get_position(QCC_GenValue **vals, int len, QCC_Stamp **stamp);
+extern QCC_TestStatus _tst_chunk_get_capacity(QCC_GenValue **vals, int len, QCC_Stamp **stamp);
+extern QCC_TestStatus _tst_get_chunk_offset(QCC_GenValue **vals, int len, QCC_Stamp **stamp);
 
 static MunitResult
 qc__sm_chunk_calc_vector_size(const MunitParameter params[], void *data)
@@ -1280,9 +1289,6 @@ qc__sm_chunk_calc_vector_size(const MunitParameter params[], void *data)
   return QCC_testForAll(1000, 1000, _tst_chunk_calc_vector_size_equality, 1, QCC_genInt);
 }
 
-extern QCC_GenValue *QCC_genChunk();
-extern QCC_TestStatus _tst_chunk_get_position(QCC_GenValue **vals, int len, QCC_Stamp **stamp);
-
 static MunitResult
 qc__sm_chunk_get_position(const MunitParameter params[], void *data)
 {
@@ -1292,10 +1298,30 @@ qc__sm_chunk_get_position(const MunitParameter params[], void *data)
   return QCC_testForAll(100, 1000, _tst_chunk_get_position, 1, QCC_genChunk);
 }
 
+static MunitResult
+qc__sm_chunk_get_capacity(const MunitParameter params[], void *data)
+{
+  (void)params;
+  (void)data;
+
+  return QCC_testForAll(100, 1000, _tst_chunk_get_capacity, 1, QCC_genChunk);
+}
+
+static MunitResult
+qc__sm_get_chunk_offset(const MunitParameter params[], void *data)
+{
+  (void)params;
+  (void)data;
+
+  return QCC_testForAll(100, 1000, _tst_get_chunk_offset, 2, QCC_genInt, QCC_genSparsemap);
+}
+
 // clang-format off
 static MunitTest qc_test_suite[] = {
   { (char *)"/__sm_chunk_calc_vector_size", qc__sm_chunk_calc_vector_size, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
   { (char *)"/__sm_chunk_get_position", qc__sm_chunk_get_position, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+  { (char *)"/__sm_chunk_get_capacity", qc__sm_chunk_get_capacity, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+  { (char *)"/__sm_get_chunk_offset", qc__sm_get_chunk_offset, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
   { NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 // clang-format off
