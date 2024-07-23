@@ -392,6 +392,59 @@ __sm_chunk_is_set(__sm_chunk_t *chunk, size_t idx)
  * TODO
  */
 static int
+__sm_chunk_clr_bit(__sm_chunk_t *chunk, sparsemap_idx_t idx, size_t *pos)
+{
+  /* Where in the descriptor does this idx fall, which flag should we examine? */
+  size_t bv = idx / SM_BITS_PER_VECTOR;
+  __sm_assert(bv < SM_FLAGS_PER_INDEX);
+
+  switch (SM_CHUNK_GET_FLAGS(*chunk->m_data, bv)) {
+  __sm_bitvec_t w;
+  case SM_PAYLOAD_ZEROS:
+    /* The bit is already clear, no-op. */
+    return SM_OK;
+    break;
+  case SM_PAYLOAD_ONES:
+    /* What was all ones transitions to mixed, which requires another vector. */
+    if (*pos == 0) {
+      *pos = (size_t)1 + __sm_chunk_get_position(chunk, bv);
+      return SM_NEEDS_TO_GROW;
+    }
+    SM_CHUNK_SET_FLAGS(*chunk->m_data, bv, SM_PAYLOAD_MIXED);
+    w = chunk->m_data[*pos];
+    w &= ~((__sm_bitvec_t)1 << (idx % SM_BITS_PER_VECTOR));
+    /* Update the mixed vector. */
+    chunk->m_data[*pos] = w;
+    return SM_OK;
+    break;
+  case SM_PAYLOAD_MIXED:
+    *pos = 1 + __sm_chunk_get_position(chunk, bv);
+    w = chunk->m_data[*pos];
+    w &= ~((__sm_bitvec_t)1 << (idx % SM_BITS_PER_VECTOR));
+    /* Did the vector transition from mixed to all zeros? Remove it if so. */
+    if (w == 0) {
+      SM_CHUNK_SET_FLAGS(*chunk->m_data, bv, SM_PAYLOAD_ZEROS);
+      return SM_NEEDS_TO_SHRINK;
+    }
+    /* Update the mixed vector. */
+    chunk->m_data[*pos] = w;
+    break;
+  case SM_PAYLOAD_NONE:
+    /* FALLTHROUGH */
+  default:
+    __sm_assert(!"shouldn't be here");
+#ifdef DEBUG
+    abort();
+#endif
+    break;
+  }
+  return SM_OK;
+}
+
+/*
+ * TODO
+ */
+static int
 __sm_chunk_set_bit(__sm_chunk_t *chunk, sparsemap_idx_t idx, size_t *pos)
 {
   /* Where in the descriptor does this idx fall, which flag should we examine? */
@@ -415,11 +468,6 @@ __sm_chunk_set_bit(__sm_chunk_t *chunk, sparsemap_idx_t idx, size_t *pos)
     *pos = 1 + __sm_chunk_get_position(chunk, bv);
     __sm_bitvec_t w = chunk->m_data[*pos];
     w |= (__sm_bitvec_t)1 << (idx % SM_BITS_PER_VECTOR);
-    /* Did the vector transition from mixed to all zeros? Remove it if so. */
-    if (w == 0) {
-      SM_CHUNK_SET_FLAGS(*chunk->m_data, bv, SM_PAYLOAD_ZEROS);
-      return SM_NEEDS_TO_SHRINK;
-    }
     /* Did the vector transition from mixed to all ones? Remove it if so. */
     if (w == (__sm_bitvec_t)-1) {
       SM_CHUNK_SET_FLAGS(*chunk->m_data, bv, SM_PAYLOAD_ONES);
@@ -1225,23 +1273,80 @@ sparsemap_is_set(sparsemap_t *map, sparsemap_idx_t idx)
   return __sm_chunk_is_set(&chunk, idx - start);
 }
 
-#if 0
 sparsemap_idx_t
 bidx_clear(sparsemap_t *map, sparsemap_idx_t idx)
 {
-}
+  __sm_assert(sparsemap_get_size(map) >= SM_SIZEOF_OVERHEAD);
 
-sparsemap_idx_t
-bidx_set_to(sparsemap_t *map, sparsemap_idx_t idx, bool value)
-{
-  if (value) {
-    return bidx_set(map, idx);
-  } else {
-    return bidx_clear(map, idx);
+  /* Clearing a bit could require an additional vector, let's ensure we have that
+     space available in the buffer first, or ENOMEM now. */
+  if (map->m_data_used + SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) > map->m_capacity) {
+    errno = ENOSPC;
+    return SPARSEMAP_IDX_MAX;
   }
-}
 
+  /* Determine if there is a chunk that could contain this index. */
+  size_t offset = (size_t)__sm_get_chunk_offset(map, idx);
+
+  if ((ssize_t)offset == -1) {
+    /* There are no chunks in the map, there is nothing to clear, this is a
+       no-op. */
+    return idx;
+  }
+
+  /* Try to locate a chunk for this idx.  We could find that:
+     - the first chunk's offset is greater than the index, or
+     - the index is beyond the end of the last chunk, or
+     - we found a chunk that can contain this index. */
+  uint8_t *p = __sm_get_chunk_data(map, offset);
+  __sm_idx_t start = *(__sm_idx_t *)p;
+  __sm_assert(start == __sm_get_chunk_aligned_offset(start));
+
+  if (idx < start) {
+    /* Our search resulted in the first chunk that starts after the index but
+       that means there is no chunk that contains this index, so again this is
+       a no-op. */
+    return idx;
+  }
+
+  __sm_chunk_t chunk;
+  __sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
+  if (idx - start >= __sm_chunk_get_capacity(&chunk)) {
+    /* Our search resulted in a chunk however it's capacity doesn't encompass
+       this index, so again a no-op. */
+    return idx;
+  }
+
+  size_t pos = 0;
+  switch (__sm_chunk_clr_bit(&chunk, idx - start, &pos)) {
+  case SM_OK:
+    break;
+  case SM_NEEDS_TO_GROW:
+    __sm_bitvec_t vec = (__sm_bitvec_t)-1;
+    offset += (SM_SIZEOF_OVERHEAD + pos * sizeof(__sm_bitvec_t));
+    __sm_insert_data(map, offset, (uint8_t *)&vec, sizeof(__sm_bitvec_t));
+    __sm_chunk_clr_bit(&chunk, idx - start, &pos);
+    break;
+  case SM_NEEDS_TO_SHRINK:
+    /* The vector is empty, perhaps the entire chunk is empty? */
+    if (__sm_chunk_is_empty(&chunk)) {
+      __sm_remove_data(map, offset, SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) * 2);
+      __sm_set_chunk_count(map, __sm_get_chunk_count(map) - 1);
+    } else {
+      offset += (SM_SIZEOF_OVERHEAD + pos * sizeof(__sm_bitvec_t));
+      __sm_remove_data(map, offset, sizeof(__sm_bitvec_t));
+    }
+    break;
+  default:
+    __sm_assert(!"shouldn't be here");
+#ifdef DEBUG
+    abort();
 #endif
+    break;
+  }
+
+  return idx;
+}
 
 /*
  * When v is non-NULL we've just added a new chunk and we knew in advance that a
@@ -1305,6 +1410,7 @@ bidx_set(sparsemap_t *map, sparsemap_idx_t idx)
 
   /* Determine if there is a chunk that could contain this index. */
   size_t offset = (size_t)__sm_get_chunk_offset(map, idx);
+
   if ((ssize_t)offset == -1) {
     /* No chunks exist, the map is empty, so we must append a new chunk to the
        end of the buffer and initialize it so that it can contain this index. */
@@ -1369,10 +1475,19 @@ bidx_set(sparsemap_t *map, sparsemap_idx_t idx)
 }
 
 sparsemap_idx_t
+bidx_set_to(sparsemap_t *map, sparsemap_idx_t idx, bool value)
+{
+  if (value) {
+    return bidx_set(map, idx);
+  } else {
+    return bidx_clear(map, idx);
+  }
+}
+
+sparsemap_idx_t
 sparsemap_set(sparsemap_t *map, sparsemap_idx_t idx, bool value)
 {
-  if (value)
-    return bidx_set(map, idx);
+  return bidx_set_to(map, idx, value);
   __sm_assert(sparsemap_get_size(map) >= SM_SIZEOF_OVERHEAD);
 
   /* Locate the __sm_chunk_t for this index */
