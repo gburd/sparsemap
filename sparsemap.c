@@ -120,7 +120,9 @@ enum __SM_CHUNK_INFO {
   SM_NEEDS_TO_SHRINK = 2
 };
 
-#define SM_CHUNK_GET_FLAGS(from, at) ((((from)) & ((__sm_bitvec_t)SM_FLAG_MASK << ((at)*2))) >> ((at)*2))
+#define SM_CHUNK_GET_FLAGS(data, at) ((((data)) & ((__sm_bitvec_t)SM_FLAG_MASK << ((at)*2))) >> ((at)*2))
+
+#define SM_CHUNK_SET_FLAGS(data, at, to) (data) = ((data) & ~((__sm_bitvec_t)SM_FLAG_MASK << ((at)*2))) | ((__sm_bitvec_t)(to) << ((at)*2))
 
 #define SM_IS_CHUNK_RLE(chunk) \
   (((*((__sm_bitvec_t *)(chunk)->m_data) & (((__sm_bitvec_t)0x3) << (SM_BITS_PER_VECTOR - 2))) >> (SM_BITS_PER_VECTOR - 2)) == SM_PAYLOAD_NONE)
@@ -1976,20 +1978,20 @@ _tst_pow(double base, int exponent)
 static char *
 _qcc_format_chunk(__sm_idx_t start, __sm_chunk_t *chunk)
 {
-  char *buf;
+  char *buf = NULL;
   __sm_bitvec_t desc = chunk->m_data[0];
 
-  buf = malloc(sizeof(char) * (SM_FLAGS_PER_INDEX * 16) + (SM_BITS_PER_VECTOR * 64) + 16);
+  buf = malloc(sizeof(char) * ((SM_FLAGS_PER_INDEX * 16) + (SM_BITS_PER_VECTOR * 64) + 16) * 2);
 
   if (!SM_IS_CHUNK_RLE(chunk)) {
-    char desc_str[SM_FLAGS_PER_INDEX + 1] = { 0 };
+    char desc_str[(20 * SM_FLAGS_PER_INDEX) + 1] = { 0 };
     char *str = desc_str;
     int mixed = 0;
     for (int i = SM_FLAGS_PER_INDEX - 1; i >= 0; i--) {
       uint8_t flag = SM_CHUNK_GET_FLAGS(desc, i);
       switch (flag) {
       case SM_PAYLOAD_NONE:
-        str += sprintf(str, "Ø");
+        str += sprintf(str, "∘");
         break;
       case SM_PAYLOAD_ONES:
         str += sprintf(str, "1");
@@ -2039,9 +2041,12 @@ QCC_showSparsemap(void *value, int len)
       __sm_chunk_init(&chunk, p + sizeof(__sm_idx_t));
       char *c = _qcc_format_chunk(start, &chunk);
       if (buf) {
-        buf = realloc(buf, strlen(buf) + strlen(c) + 2);
-        sprintf(str, "\n%s", c);
-        str += strlen(c);
+        char *new = realloc(buf, strlen(buf) + strlen(c) + 2);
+        if (new) {
+          buf = new;
+          sprintf(str, "\n%s", c);
+          str += strlen(c);
+        }
       } else {
         buf = c;
         str = buf + strlen(c);
@@ -2073,12 +2078,11 @@ QCC_genChunk()
     // Generate a run-length encoded (RLE) chunk:
     sparsemap_idx_t from = 1, to = SM_CHUNK_RLE_MAX_CAPACITY;
     unsigned int len = ((unsigned int)random() % (to - from)) + from;
-    size_t offset = ((size_t)random() % (SIZE_MAX - len));
     // First allocate enough room for the chunk data ...
     uint8_t *p = malloc(sizeof(__sm_idx_t) + sizeof(__sm_chunk_t) + (sizeof(__sm_bitvec_t) * 2));
     __sm_chunk_t *chunk;
-    // ... then set the offset to the random offset generated ...
-    *(__sm_idx_t *)p = offset;
+    // ... then set the offset to the length so we can test for that later ...
+    *(__sm_idx_t *)p = len;
     // ... next is the chunk begins after the offset ...
     chunk = (__sm_chunk_t *)((uintptr_t)p + sizeof(__sm_idx_t));
     // ... this contains a single vector ...
@@ -2091,7 +2095,7 @@ QCC_genChunk()
     // ... and set the RLE chunk's length of 1s to len.
     SM_CHUNK_RLE_SET_LENGTH(chunk, len);
     // Now, test what we've generated to ensure it's correct.
-    assert(*(__sm_idx_t *)p == offset);
+    assert(*(__sm_idx_t *)p == len);
     assert(SM_IS_CHUNK_RLE(chunk));
     assert(SM_CHUNK_RLE_CAPACITY(chunk) == SM_CHUNK_RLE_MAX_CAPACITY);
     assert(SM_CHUNK_RLE_LENGTH(chunk) == len);
@@ -2102,12 +2106,11 @@ QCC_genChunk()
     unsigned int from = 0, to = SM_FLAGS_PER_INDEX;
     unsigned int len = ((unsigned int)random() % (to - from)) + from;
     unsigned int cut = ((unsigned int)random() % ((SM_FLAGS_PER_INDEX - len) - from)) + from;
-    size_t offset = ((size_t)random() % (SIZE_MAX - len));
     // First allocate enough room for the chunk data ...
-    uint8_t *p = malloc(sizeof(__sm_idx_t) + sizeof(__sm_chunk_t) + (sizeof(__sm_bitvec_t) * (len + 2)));
+    uint8_t *p = malloc(sizeof(__sm_idx_t) + sizeof(__sm_chunk_t) + (sizeof(__sm_bitvec_t) * (len + 1)));
     __sm_chunk_t *chunk;
-    // ... then set the offset to the random offset generated ...
-    *(__sm_idx_t *)p = offset;
+    // ... then set the offset to the capacity ...
+    *(__sm_idx_t *)p = SM_CHUNK_MAX_CAPACITY - (cut * SM_BITS_PER_VECTOR);
     // ... next is the chunk begins after the offset ...
     chunk = (__sm_chunk_t *)((uintptr_t)p + sizeof(__sm_idx_t));
     // ... this contains a len + 1 vectors ...
@@ -2115,28 +2118,37 @@ QCC_genChunk()
     // ... the first is the descriptor with the flags ...
     __sm_bitvec_t *desc = chunk->m_data;
     *desc = 0;
-    // ... run through the flags (2 bits), we know that exactly `len` many flags
-    // must be SM_PAYLOAD_MIXED ...
-    for (size_t i = 0, n = len; (i < SM_FLAGS_PER_INDEX - cut) && n; i++) {
-      size_t left = SM_FLAGS_PER_INDEX - cut - i;
-      double prob = (double)n / (double)left;
-      double dice = (double)random() / RAND_MAX;
-      if (dice < prob || left == n) {
-        *desc |= ((__sm_bitvec_t)SM_PAYLOAD_MIXED) << i;
-        size_t pos = (len - n);
-        chunk->m_data[1 + pos] = (uintptr_t)chunk + pos;
-        n--;
+    // ... ensure that exactly `len` flags are set to SM_PAYLOAD_MIXED ...
+    for (size_t i = 0; i < len; i++) {
+      SM_CHUNK_SET_FLAGS(*desc, i, SM_PAYLOAD_MIXED);
+      chunk->m_data[1 + i] = (uintptr_t)chunk + i;
+    }
+    // ... and, on average, 50% of the rest are SM_PAYLOAD_ONES ...
+    for (size_t i = len; i < SM_FLAGS_PER_INDEX - cut; i++) {
+      double coin = (double)random() / (double)RAND_MAX;
+      if (SM_CHUNK_GET_FLAGS(*desc, i) != SM_PAYLOAD_MIXED && coin >= 0.5) {
+        SM_CHUNK_SET_FLAGS(*desc, i, SM_PAYLOAD_ONES);
       }
     }
-    // ... there are enough mixed flags, now let's add 1s and 0s flags
-    for (int i = 1; i < SM_FLAGS_PER_INDEX - cut; i++) {
-      uint8_t flag = SM_CHUNK_GET_FLAGS(*desc, i);
-      if (flag == SM_PAYLOAD_NONE) {
-        *desc ^= ~((__sm_bitvec_t)SM_PAYLOAD_ONES << (i * 2));
-      } else if (flag != SM_PAYLOAD_MIXED && ((double)random() / (double)RAND_MAX) > 0.5) {
-        *desc ^= ~((__sm_bitvec_t)SM_PAYLOAD_ONES << (i * 2));
-      }
+    // ... shuffle those around ...
+    for (size_t i = 0; i < SM_FLAGS_PER_INDEX - cut - 1; i++) {
+      size_t j = ((size_t)random() % ((SM_FLAGS_PER_INDEX - cut) - i)) + i;
+      int flags = SM_CHUNK_GET_FLAGS(*desc, j);
+      SM_CHUNK_SET_FLAGS(*desc, j, SM_CHUNK_GET_FLAGS(*desc, i));
+      SM_CHUNK_SET_FLAGS(*desc, i, flags);
     }
+    // ... reduce the capacity by setting trailing flags to SM_PAYLOAD_NONE ...
+    *desc <<= (cut * 2);
+    for (int i = 0; i < cut; i++) {
+      SM_CHUNK_SET_FLAGS(*desc, i, SM_PAYLOAD_NONE);
+    }
+#if 0
+    char *s = QCC_showChunk(p, 0);
+    fprintf(stdout, "\n%s\n", s);
+    fflush(stdout);
+    free(s);
+#endif
+    // ... and check that our franken-chunk appears to be correct.
     assert(SM_IS_CHUNK_RLE(chunk) == false);
     return QCC_initGenValue(p, 1, QCC_showChunk, QCC_freeChunkValue);
   }
@@ -2224,10 +2236,16 @@ _tst_chunk_get_capacity(QCC_GenValue **vals, int len, QCC_Stamp **stamp)
   uint8_t *p = (uint8_t *)QCC_getValue(vals, 0, void *);
   __sm_idx_t start = *(__sm_idx_t *)p;
   __sm_chunk_t *chunk = (__sm_chunk_t *)((uintptr_t)p + sizeof(__sm_idx_t));
-  // TODO...
-  // fprintf(stdout, "%s", QCC_showChunk(chunk, 0));
-  // fflush(stdout);
-  __sm_chunk_get_capacity(chunk);
+
+  if (SM_IS_CHUNK_RLE(chunk)) {
+    if (SM_CHUNK_RLE_LENGTH(chunk) != start) {
+      return QCC_FAIL;
+    }
+  } else {
+    if (__sm_chunk_get_capacity(chunk) != start) {
+      return QCC_FAIL;
+    }
+  }
   return QCC_OK;
 }
 
