@@ -1435,7 +1435,7 @@ bidx_clear(sparsemap_t *map, sparsemap_idx_t idx)
     pivot_chunk.m_data[1] |= ~(__sm_bitvec_t)0 >> (SM_CHUNK_MAX_CAPACITY - (remaining_bits % SM_BITS_PER_VECTOR));
     __sm_when_diag({
       /* Sanity check the chunk */
-      fprintf(stdout, "\n%s\n", QCC_showChunk(pivot_p, 0));
+      // fprintf(stdout, "\n%s\n", QCC_showChunk(pivot_p, 0));
       for (size_t i = aligned_idx; i < aligned_idx + SM_CHUNK_MAX_CAPACITY; i++) {
         __sm_assert(__sm_chunk_is_set(&pivot_chunk, i) == (i >= idx ? false : true));
       }
@@ -1478,17 +1478,12 @@ bidx_clear(sparsemap_t *map, sparsemap_idx_t idx)
       lr_start[1] = aligned_idx + SM_CHUNK_MAX_CAPACITY;
       lr_end[1] = length;
       /* Move the pivot chunk over to make room for the new left chunk. */
-      size_t amt;
-      if (lr_end[0] - lr_start[0] >= SM_CHUNK_MAX_CAPACITY) {
-        amt = SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t);
-      } else {
-        amt = SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) * 2;
-      }
+      size_t amt = SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) * 2;
       memmove((uint8_t *)((uintptr_t)buf + amt), buf, amt);
       memset(buf, 0, amt);
       /* Used later for constructing the remaining left and right chunks */
       lr[0] = buf;
-      lr[1] = (uint8_t *)((uintptr_t)buf + amt + SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) * 2);
+      lr[1] = (uint8_t *)((uintptr_t)buf + amt * 2);
       /* Calculate space needed in the buffer, reuse the left chunk bytes. */
       expand_by = amt + sizeof(__sm_bitvec_t);
     } while (0);
@@ -1501,7 +1496,7 @@ bidx_clear(sparsemap_t *map, sparsemap_idx_t idx)
         /* ... then, construct a chunk ... */
         __sm_chunk_init(&lrc, lr[i] + SM_SIZEOF_OVERHEAD);
         /* ... determine the type of chunk required ... */
-        if (lr_end[i] - lr_start[i] >= SM_CHUNK_MAX_CAPACITY) {
+        if (lr_end[i] - lr_start[i] - 1 >= SM_CHUNK_MAX_CAPACITY) {
           /* ... we need a run-length encoding (RLE), chunk ... */
           SM_CHUNK_SET_RLE(&lrc);
           /* ... now assign the length ... */
@@ -1520,7 +1515,7 @@ bidx_clear(sparsemap_t *map, sparsemap_idx_t idx)
           size_t lrl = lr_end[i] - lr_start[i];
           /* ... how many flags can we mark as all ones? ... */
           if (lrl > SM_BITS_PER_VECTOR) {
-            *lrc.m_data = ~(__sm_bitvec_t)0 >> (SM_FLAGS_PER_INDEX - (lrl / SM_BITS_PER_VECTOR)) * 2;
+            lrc.m_data[0] = ~(__sm_bitvec_t)0 >> (SM_FLAGS_PER_INDEX - (lrl / SM_BITS_PER_VECTOR)) * 2;
           }
           /* ... do we have a mixed flag to create and vector to assign? ... */
           if (lrl % SM_BITS_PER_VECTOR) {
@@ -1532,8 +1527,11 @@ bidx_clear(sparsemap_t *map, sparsemap_idx_t idx)
               /* ... slide the pivot chunk over a tad ... */
               size_t amt = SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t);
               uint8_t *loc = (uint8_t *)((uintptr_t)buf + amt);
-              memmove(loc, (uint8_t *)((uintptr_t)loc + sizeof(__sm_bitvec_t)), amt);
-              memset(((uint8_t *)(uintptr_t)buf + (2 * amt)), 0, sizeof(__sm_bitvec_t));
+              // fprintf(stdout, "\n%s\n", QCC_showChunk((uint8_t *)((uintptr_t)loc + sizeof(__sm_bitvec_t)), 0));
+              memmove(loc, (uint8_t *)((uintptr_t)loc + sizeof(__sm_bitvec_t)), amt + sizeof(__sm_bitvec_t));
+              // fprintf(stdout, "\n%s\n", QCC_showChunk(loc, 0));
+              memset(((uint8_t *)(uintptr_t)buf + (2 * amt) + sizeof(__sm_bitvec_t)), 0, sizeof(__sm_bitvec_t));
+              // fprintf(stdout, "\n%s\n", QCC_showChunk(loc, 0));
               lr[1] = (uint8_t *)((uintptr_t)lr[1] - sizeof(__sm_bitvec_t));
             }
             /* ... if not, our size estimate shrinks ... */
@@ -1541,22 +1539,28 @@ bidx_clear(sparsemap_t *map, sparsemap_idx_t idx)
           }
         }
       }
-      //__sm_when_diag({
+      __sm_when_diag({
         /* Sanity check the chunk */
-        fprintf(stdout, "\n%s\n", QCC_showChunk(pivot_p, 0));
-        for (size_t i = lr_start[i]; i < lr_end[i]; i++) {
-          __sm_assert(__sm_chunk_is_set(&pivot_chunk, i) == true);
+        // fprintf(stdout, "\n%s\n", QCC_showChunk(lr[i], 0));
+        for (size_t j = lr_start[i]; j < lr_end[i]; j++) {
+          __sm_assert(__sm_chunk_is_set(&pivot_chunk, j) == true);
         }
         if (!SM_IS_CHUNK_RLE(&lrc)) {
-          for (size_t i = lr_end[i]; i < SM_CHUNK_MAX_CAPACITY; i++) {
-            __sm_assert(__sm_chunk_is_set(&pivot_chunk, i) == false);
+          for (size_t j = lr_end[i]; j < SM_CHUNK_MAX_CAPACITY; j++) {
+            __sm_assert(__sm_chunk_is_set(&pivot_chunk, j) == false);
           }
         }
-      //});
+      });
     }
     /* Determine if we have room for this construct. */
     SM_ENOUGH_SPACE(expand_by);
 
+    __sm_when_diag({
+      /* Sanity check the region */
+      for (size_t j = start; j < length; j++) {
+        __sm_assert(__sm_chunk_is_set(&pivot_chunk, j) == (j == idx ? false : true));
+      }
+    });
     return idx;
   }
 
