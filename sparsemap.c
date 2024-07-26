@@ -1027,7 +1027,7 @@ __sm_get_size_impl(sparsemap_t *map)
 /** @brief Aligns to SM_CHUNK_CAPACITY a given index \b idx.
  *
  * Due to integer division discarding the remainder, the final return value is
- * rounded up to the nearest multiple of SM_CHUNK_MAX_CAPACITY.
+ * always rounded down to the nearest multiple of SM_CHUNK_MAX_CAPACITY.
  *
  * @param[in] idx The index to align.
  * @returns the aligned offset (aligned to __sm_chunk_t capacity)
@@ -1405,82 +1405,157 @@ bidx_clear(sparsemap_t *map, sparsemap_idx_t idx)
 
     /* Now that we've addressed (1) and (3) we have to work on (2) where the
      * index is within the body of this RLE chunk.  This will lead to:
-     *  - a) two chunks if the remainder is less than sparse chunk capacity
-     *  - b) two RLE chunks if the index happens to fall on a boundary
-     *  - c) three chunks when the RLE is sufficiently long and index is in the
-     *       middle
-     * Each chunk must have an aligned start, so we split above the aligned
-     * offset of the index.
+     *  - a) TODO...
+     *  - b) TODO...
+     *  - c) ...
+     *
+     * Chunks must have an aligned starting offset, so let's first find what
+     * we'll call the "pivot" chunk wherein we'll find the index we need to
+     * clear. That chunk will be sparse.
      */
     size_t pos = 0;
-    __sm_bitvec_t vec = ~(__sm_bitvec_t)0;
-    size_t split_at = __sm_get_chunk_aligned_offset(idx);
-    if (split_at < start + SM_CHUNK_MAX_CAPACITY) {
-      split_at = split_at + SM_CHUNK_MAX_CAPACITY;
-    }
-    size_t left_len = split_at - start;
-    size_t right_len = length - (split_at - start);
-    if (idx >= split_at) {
-      right_len--;
-    } else {
-      left_len--;
-    }
-    __sm_assert(left_len + right_len + 1 == length);
-    __sm_chunk_t right_chunk, center_chunk, *left_chunk = &chunk;
+    uint8_t buf[(SM_SIZEOF_OVERHEAD * 3) + (sizeof(__sm_bitvec_t) * 6)] = { 0 };
+    uint8_t *pivot_p;
+    __sm_chunk_t pivot_chunk;
+    size_t pivot_offset;
 
-    /* If we find that the left length is the max capacity then we know that
-     * we'll split in two and that the index falls in the left chunk. */
-    if (left_len <= SM_CHUNK_MAX_CAPACITY) {
-      if (right_len >= SM_CHUNK_MAX_CAPACITY) {
-        /* The right chunk will remain RLE encoded, but smaller and with a
-         * different starting offset. We need room for this new chunk and for
-         * the new vector for the left chunk below. */
-        uint8_t buf[SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) * 2] = { 0 };
-        size_t amt = sizeof(buf);
-        SM_ENOUGH_SPACE(amt);
-        size_t right_offset = offset + __sm_chunk_get_size(left_chunk) + sizeof(__sm_bitvec_t);
-        __sm_insert_data(map, right_offset, (uint8_t *)buf, amt);
-        uint8_t *rp = __sm_get_chunk_data(map, right_offset);
-        *(__sm_idx_t *)rp = split_at;
-        __sm_chunk_init(&right_chunk, rp + SM_SIZEOF_OVERHEAD);
-        SM_CHUNK_SET_RLE(&right_chunk);
-        __sm_chunk_rle_set_length(&right_chunk, right_len);
-        __sm_chunk_rle_set_capacity(&right_chunk, __sm_chunk_rle_capacity_limit(map, split_at, right_offset));
-        fprintf(stdout, "\n%s\n", _qcc_format_chunk(split_at, &right_chunk));
-      } else {
-        /* The right chunk will be sparse encoded and will have a single mixed
-         * vector like the left. We need room for this chunk, its mixed vector
-         * and for the new mixed vector below for the left chunk. */
-        uint8_t buf[SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) * 3] = { 0 };
-        size_t amt = sizeof(buf);
-        SM_ENOUGH_SPACE(amt);
-        size_t right_offset = offset + __sm_chunk_get_size(left_chunk) + sizeof(__sm_bitvec_t);
-        __sm_insert_data(map, right_offset, (uint8_t *)buf, amt);
-        uint8_t *rp = __sm_get_chunk_data(map, right_offset);
-        *(__sm_idx_t *)rp = split_at;
-        __sm_chunk_init(&right_chunk, rp + SM_SIZEOF_OVERHEAD);
-        if (right_len > SM_BITS_PER_VECTOR) {
-          *right_chunk.m_data = ~(__sm_bitvec_t)0 >> (SM_FLAGS_PER_INDEX - (right_len / SM_BITS_PER_VECTOR)) * 2;
-        }
-        if (right_len % SM_BITS_PER_VECTOR) {
-          SM_CHUNK_SET_FLAGS(right_chunk.m_data[0], (split_at + right_len) / SM_BITS_PER_VECTOR, SM_PAYLOAD_MIXED);
-          right_chunk.m_data[1] |= ~(__sm_bitvec_t)0 >> (SM_CHUNK_MAX_CAPACITY - (right_len % SM_BITS_PER_VECTOR));
-        }
-        fprintf(stdout, "\n%s\n", QCC_showChunk(rp, 0));
-        __sm_when_diag({
-          for (int i = idx; i < start + right_len; i++) {
-            __sm_assert(__sm_chunk_is_set(&right_chunk, i) == (i == idx ? false : true));
-          }
-        });
+    /* Find the starting offset for our pivot chunk. */
+    size_t aligned_idx = __sm_get_chunk_aligned_offset(idx);
+    __sm_assert(idx >= aligned_idx && idx < (aligned_idx + SM_CHUNK_MAX_CAPACITY));
+    /* Let's avoid changing the actual map and for now work in our static buf. */
+    pivot_p = buf;
+    *(__sm_idx_t *)pivot_p = aligned_idx;
+    __sm_chunk_init(&pivot_chunk, pivot_p + SM_SIZEOF_OVERHEAD);
+    /* Set the chunk flags to all ones, ... */
+    pivot_chunk.m_data[0] = ~(__sm_bitvec_t)0;
+    /* ... set the flag for the position containing the index to mixed ... */
+    SM_CHUNK_SET_FLAGS(pivot_chunk.m_data[0], aligned_idx / SM_BITS_PER_VECTOR, SM_PAYLOAD_MIXED);
+    /* ... and clear the bit at index (`idx`). */
+    size_t remaining_bits = (SM_CHUNK_MAX_CAPACITY - (idx % SM_BITS_PER_VECTOR));
+    pivot_chunk.m_data[1] |= ~(__sm_bitvec_t)0 >> (SM_CHUNK_MAX_CAPACITY - (remaining_bits % SM_BITS_PER_VECTOR));
+    __sm_when_diag({
+      /* Sanity check the chunk */
+      fprintf(stdout, "\n%s\n", QCC_showChunk(pivot_p, 0));
+      for (size_t i = aligned_idx; i < aligned_idx + SM_CHUNK_MAX_CAPACITY; i++) {
+        __sm_assert(__sm_chunk_is_set(&pivot_chunk, i) == (i >= idx ? false : true));
       }
-      /* Set the chunk flags to all ones, then the one position that contains
-       * the index is set to mixed, we extend the chunk by a vector, and call
-       * the chunk clear function to unset the bit at index. */
-      left_chunk->m_data[0] = ~(__sm_bitvec_t)0;
-      SM_CHUNK_SET_FLAGS(left_chunk->m_data[0], split_at / SM_BITS_PER_VECTOR, SM_PAYLOAD_MIXED);
-      __sm_chunk_clr_bit(left_chunk, idx, &pos);
-      fprintf(stdout, "\n%s\n", QCC_showChunk(p, 0));
+    });
+    /* Where did the pivot chunk fall within the original chunk? */
+    __sm_idx_t lr_start[2], lr_end[2];
+    uint8_t *lr[2] = { 0 };
+    size_t expand_by;
+
+    do {
+      if (aligned_idx == start) {
+        /* The pivot is left aligned, there will be two chunks in total. */
+        lr_start[1] = aligned_idx + SM_CHUNK_MAX_CAPACITY;
+        lr_end[1] = length;
+        /* Used later for constructing the remaining right chunk */
+        lr[1] = (uint8_t *)((uintptr_t)buf + (SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t)));
+        /* Calculate space needed in the buffer, reuse the left chunk bytes. */
+        expand_by = (SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) * 3);
+        break;
+      }
+
+      if (aligned_idx + SM_CHUNK_MAX_CAPACITY >= start + length) {
+        /* The pivot is right aligned, there will be two chunks in total. */
+        lr_start[0] = start;
+        lr_end[0] = aligned_idx - 1;
+        /* Move the pivot chunk over to make room for the new left chunk. */
+        size_t amt = SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) * 2;
+        memmove((uint8_t *)((uintptr_t)buf + amt), buf, amt);
+        memset(buf, 0, amt);
+        /* Used later for constructing the remaining left chunk */
+        lr[0] = buf;
+        /* Calculate space needed in the buffer, reuse the left chunk bytes. */
+        expand_by = (SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) * 3);
+        break;
+      }
+
+      /* The pivot's range is central, there will be three chunks in total. */
+      lr_start[0] = start;
+      lr_end[0] = aligned_idx;
+      lr_start[1] = aligned_idx + SM_CHUNK_MAX_CAPACITY;
+      lr_end[1] = length;
+      /* Move the pivot chunk over to make room for the new left chunk. */
+      size_t amt;
+      if (lr_end[0] - lr_start[0] >= SM_CHUNK_MAX_CAPACITY) {
+        amt = SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t);
+      } else {
+        amt = SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) * 2;
+      }
+      memmove((uint8_t *)((uintptr_t)buf + amt), buf, amt);
+      memset(buf, 0, amt);
+      /* Used later for constructing the remaining left and right chunks */
+      lr[0] = buf;
+      lr[1] = (uint8_t *)((uintptr_t)buf + amt + SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) * 2);
+      /* Calculate space needed in the buffer, reuse the left chunk bytes. */
+      expand_by = amt + sizeof(__sm_bitvec_t);
+    } while (0);
+
+    for (int i = 0; i < 2; i++) {
+      __sm_chunk_t lrc;
+      if (lr[i]) {
+        /* First assign the starting offset ... */
+        *(__sm_idx_t *)lr[i] = lr_start[i];
+        /* ... then, construct a chunk ... */
+        __sm_chunk_init(&lrc, lr[i] + SM_SIZEOF_OVERHEAD);
+        /* ... determine the type of chunk required ... */
+        if (lr_end[i] - lr_start[i] >= SM_CHUNK_MAX_CAPACITY) {
+          /* ... we need a run-length encoding (RLE), chunk ... */
+          SM_CHUNK_SET_RLE(&lrc);
+          /* ... now assign the length ... */
+          __sm_chunk_rle_set_length(&lrc, lr_end[i] - lr_start[i]);
+          /* ... and capacity, which differes left to right ... */
+          if (i == 0) {
+            /* ... left: extend to the start of the pivot chunk or, */
+            __sm_chunk_rle_set_capacity(&lrc, aligned_idx - lr_start[i]);
+          } else {
+            /* ... right: extend to either max or the start of the next chunk */
+            size_t right_offset = offset + SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t);
+            __sm_chunk_rle_set_capacity(&lrc, __sm_chunk_rle_capacity_limit(map, aligned_idx, right_offset));
+          }
+        } else {
+          /* ... we need a new sparse chunk ... */
+          size_t lrl = lr_end[i] - lr_start[i];
+          /* ... how many flags can we mark as all ones? ... */
+          if (lrl > SM_BITS_PER_VECTOR) {
+            *lrc.m_data = ~(__sm_bitvec_t)0 >> (SM_FLAGS_PER_INDEX - (lrl / SM_BITS_PER_VECTOR)) * 2;
+          }
+          /* ... do we have a mixed flag to create and vector to assign? ... */
+          if (lrl % SM_BITS_PER_VECTOR) {
+            SM_CHUNK_SET_FLAGS(lrc.m_data[0], (aligned_idx + lrl) / SM_BITS_PER_VECTOR, SM_PAYLOAD_MIXED);
+            lrc.m_data[1] |= ~(__sm_bitvec_t)0 >> (SM_CHUNK_MAX_CAPACITY - (lrl % SM_BITS_PER_VECTOR));
+          } else {
+            /* ... earlier size estimates were all pessimistic, adjust them ... */
+            if (i == 0) {
+              /* ... slide the pivot chunk over a tad ... */
+              size_t amt = SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t);
+              uint8_t *loc = (uint8_t *)((uintptr_t)buf + amt);
+              memmove(loc, (uint8_t *)((uintptr_t)loc + sizeof(__sm_bitvec_t)), amt);
+              memset(((uint8_t *)(uintptr_t)buf + (2 * amt)), 0, sizeof(__sm_bitvec_t));
+              lr[1] = (uint8_t *)((uintptr_t)lr[1] - sizeof(__sm_bitvec_t));
+            }
+            /* ... if not, our size estimate shrinks ... */
+            expand_by -= sizeof(__sm_bitvec_t);
+          }
+        }
+      }
+      //__sm_when_diag({
+        /* Sanity check the chunk */
+        fprintf(stdout, "\n%s\n", QCC_showChunk(pivot_p, 0));
+        for (size_t i = lr_start[i]; i < lr_end[i]; i++) {
+          __sm_assert(__sm_chunk_is_set(&pivot_chunk, i) == true);
+        }
+        if (!SM_IS_CHUNK_RLE(&lrc)) {
+          for (size_t i = lr_end[i]; i < SM_CHUNK_MAX_CAPACITY; i++) {
+            __sm_assert(__sm_chunk_is_set(&pivot_chunk, i) == false);
+          }
+        }
+      //});
     }
+    /* Determine if we have room for this construct. */
+    SM_ENOUGH_SPACE(expand_by);
 
     return idx;
   }
