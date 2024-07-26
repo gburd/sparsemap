@@ -1485,7 +1485,7 @@ bidx_clear(sparsemap_t *map, sparsemap_idx_t idx)
       lr[0] = buf;
       lr[1] = (uint8_t *)((uintptr_t)buf + amt * 2);
       /* Calculate space needed in the buffer, reuse the left chunk bytes. */
-      expand_by = amt + sizeof(__sm_bitvec_t);
+      expand_by = (amt * 2) + sizeof(__sm_bitvec_t);
     } while (0);
 
     for (int i = 0; i < 2; i++) {
@@ -1555,10 +1555,24 @@ bidx_clear(sparsemap_t *map, sparsemap_idx_t idx)
     /* Determine if we have room for this construct. */
     SM_ENOUGH_SPACE(expand_by);
 
+    /* We do, so let's knit this into place within the map. */
+    //__sm_when_diag({ fprintf(stdout, "\n%s\n", QCC_showChunk(p, 0)) });
+    size_t amt = SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t);
+    __sm_insert_data(map, offset + amt, buf + amt, expand_by);
+    memcpy(p, buf, expand_by + amt);
+    //__sm_when_diag({
+    //  fprintf(stdout, "\nbefore: \t%s\tafter:\t%s\n", QCC_showChunk(buf, 0), QCC_showChunk(p, 0));
+    //  fprintf(stdout, "\nbefore: \t%s\tafter:\t%s\n", QCC_showChunk(buf + amt, 0), QCC_showChunk(p + amt, 0));
+    //  fprintf(stdout, "\nbefore: \t%s\tafter:\t%s\n", QCC_showChunk(buf + (2 * amt) + sizeof(__sm_bitvec_t), 0), QCC_showChunk(p + (2 * amt) + sizeof(__sm_bitvec_t), 0));
+    //});
+
     __sm_when_diag({
-      /* Sanity check the region */
+      /* Sanity check all indexes in the region. */
+      __sm_chunk_t c;
       for (size_t j = start; j < length; j++) {
-        __sm_assert(__sm_chunk_is_set(&pivot_chunk, j) == (j == idx ? false : true));
+        __sm_chunk_init(&c, p + __sm_get_chunk_offset(map, start));
+        __sm_assert(__sm_chunk_is_set(&c, j) == (j == idx ? false : true));
+        __sm_assert(sparsemap_is_set(map, j) == (j == idx ? false : true));
       }
     });
     return idx;
