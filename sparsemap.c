@@ -512,7 +512,7 @@ __sm_chunk_set_bit(__sm_chunk_t *chunk, sparsemap_idx_t idx, size_t *pos)
     __sm_bitvec_t w = chunk->m_data[*pos];
     w |= (__sm_bitvec_t)1 << (idx % SM_BITS_PER_VECTOR);
     /* Did the vector transition from mixed to all ones? Remove it if so. */
-    if (w == (__sm_bitvec_t)-1) {
+    if (w == ~(__sm_bitvec_t)0) {
       SM_CHUNK_SET_FLAGS(*chunk->m_data, bv, SM_PAYLOAD_ONES);
       return SM_NEEDS_TO_SHRINK;
     }
@@ -585,7 +585,7 @@ __sm_chunk_set(__sm_chunk_t *chunk, size_t idx, bool value, size_t *pos, __sm_bi
        then try again. */
     if (!retried) {
       *pos = 1 + __sm_chunk_get_position(chunk, bv);
-      *fill = (__sm_bitvec_t)-1;
+      *fill = ~(__sm_bitvec_t)0;
       return SM_NEEDS_TO_GROW;
     }
     /* New flags are 2#10 meaning SM_PAYLOAD_MIXED. Currently, flags are
@@ -610,7 +610,7 @@ __sm_chunk_set(__sm_chunk_t *chunk, size_t idx, bool value, size_t *pos, __sm_bi
     *fill = 0;
     return SM_NEEDS_TO_SHRINK;
   }
-  if (w == (__sm_bitvec_t)-1) {
+  if (w == ~(__sm_bitvec_t)0) {
     chunk->m_data[0] |= (__sm_bitvec_t)SM_PAYLOAD_ONES << (bv * 2);
     *pos = position;
     *fill = 0;
@@ -1430,12 +1430,11 @@ bidx_clear(sparsemap_t *map, sparsemap_idx_t idx)
     pivot_chunk.m_data[0] = ~(__sm_bitvec_t)0;
     /* ... set the flag for the position containing the index to mixed ... */
     SM_CHUNK_SET_FLAGS(pivot_chunk.m_data[0], aligned_idx / SM_BITS_PER_VECTOR, SM_PAYLOAD_MIXED);
-    /* ... and clear the bit at index (`idx`). */
-    size_t remaining_bits = (SM_CHUNK_MAX_CAPACITY - (idx % SM_BITS_PER_VECTOR));
-    pivot_chunk.m_data[1] |= ~(__sm_bitvec_t)0 >> (SM_CHUNK_MAX_CAPACITY - (remaining_bits % SM_BITS_PER_VECTOR));
+    /* ... and clear only the bit at that index in this chunk. */
+    pivot_chunk.m_data[1] = ~(__sm_bitvec_t)0 & ~((__sm_bitvec_t)1 << (idx % SM_BITS_PER_VECTOR));
     __sm_when_diag({
       /* Sanity check the chunk */
-      // fprintf(stdout, "\n%s\n", QCC_showChunk(pivot_p, 0));
+      // __sm_when_diag({ fprintf(stdout, "\n%s\n", QCC_showChunk(pivot_p, 0)); } );
       for (size_t i = aligned_idx; i < aligned_idx + SM_CHUNK_MAX_CAPACITY; i++) {
         __sm_assert(__sm_chunk_is_set(&pivot_chunk, i) == (i >= idx ? false : true));
       }
@@ -1451,7 +1450,7 @@ bidx_clear(sparsemap_t *map, sparsemap_idx_t idx)
         lr_start[1] = aligned_idx + SM_CHUNK_MAX_CAPACITY;
         lr_end[1] = length;
         /* Used later for constructing the remaining right chunk */
-        lr[1] = (uint8_t *)((uintptr_t)buf + (SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t)));
+        lr[1] = (uint8_t *)((uintptr_t)buf + (SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) * 2));
         /* Calculate space needed in the buffer, reuse the left chunk bytes. */
         expand_by = (SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) * 3);
         break;
@@ -1501,7 +1500,7 @@ bidx_clear(sparsemap_t *map, sparsemap_idx_t idx)
           SM_CHUNK_SET_RLE(&lrc);
           /* ... now assign the length ... */
           __sm_chunk_rle_set_length(&lrc, lr_end[i] - lr_start[i]);
-          /* ... and capacity, which differes left to right ... */
+          /* ... and capacity, which differs left to right ... */
           if (i == 0) {
             /* ... left: extend to the start of the pivot chunk or, */
             __sm_chunk_rle_set_capacity(&lrc, aligned_idx - lr_start[i]);
@@ -1538,33 +1537,35 @@ bidx_clear(sparsemap_t *map, sparsemap_idx_t idx)
             expand_by -= sizeof(__sm_bitvec_t);
           }
         }
-      }
-      __sm_when_diag({
-        /* Sanity check the chunk */
-        // fprintf(stdout, "\n%s\n", QCC_showChunk(lr[i], 0));
-        for (size_t j = lr_start[i]; j < lr_end[i]; j++) {
-          __sm_assert(__sm_chunk_is_set(&pivot_chunk, j) == true);
-        }
-        if (!SM_IS_CHUNK_RLE(&lrc)) {
-          for (size_t j = lr_end[i]; j < SM_CHUNK_MAX_CAPACITY; j++) {
-            __sm_assert(__sm_chunk_is_set(&pivot_chunk, j) == false);
+        __sm_when_diag({
+          /* Sanity check the chunk */
+          // fprintf(stdout, "\n%s\n", QCC_showChunk(lr[i], 0));
+          for (size_t j = lr_start[i]; j < lr_end[i]; j++) {
+            __sm_assert(__sm_chunk_is_set(&pivot_chunk, j) == true);
           }
-        }
-      });
+          if (!SM_IS_CHUNK_RLE(&lrc)) {
+            for (size_t j = lr_end[i]; j < SM_CHUNK_MAX_CAPACITY; j++) {
+              __sm_assert(__sm_chunk_is_set(&pivot_chunk, j) == false);
+            }
+          }
+        });
+      }
     }
     /* Determine if we have room for this construct. */
     SM_ENOUGH_SPACE(expand_by);
 
     /* We do, so let's knit this into place within the map. */
-    //__sm_when_diag({ fprintf(stdout, "\n%s\n", QCC_showChunk(p, 0)) });
+    __sm_when_diag({ fprintf(stdout, "\n%s\n", QCC_showChunk(p, 0)); });
     size_t amt = SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t);
     __sm_insert_data(map, offset + amt, buf + amt, expand_by);
     memcpy(p, buf, expand_by + amt);
     //__sm_when_diag({
-    //  fprintf(stdout, "\nbefore: \t%s\tafter:\t%s\n", QCC_showChunk(buf, 0), QCC_showChunk(p, 0));
-    //  fprintf(stdout, "\nbefore: \t%s\tafter:\t%s\n", QCC_showChunk(buf + amt, 0), QCC_showChunk(p + amt, 0));
-    //  fprintf(stdout, "\nbefore: \t%s\tafter:\t%s\n", QCC_showChunk(buf + (2 * amt) + sizeof(__sm_bitvec_t), 0), QCC_showChunk(p + (2 * amt) + sizeof(__sm_bitvec_t), 0));
+    //  fprintf(stdout, "\n%s\n", QCC_showChunk(p, 0));
+    //  fprintf(stdout, "\n%s\n", QCC_showChunk(p + SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) * 2, 0));
     //});
+
+    /* And update the chunk count in the map. */
+    __sm_set_chunk_count(map, __sm_get_chunk_count(map) + (lr[0] ? 1 : 0) + (lr[1] ? 1 : 0));
 
     __sm_when_diag({
       /* Sanity check all indexes in the region. */
@@ -1737,19 +1738,18 @@ bidx_set(sparsemap_t *map, sparsemap_idx_t idx)
     return idx;
   }
 
-  /* Is this chunk RLE and the index within its range? */
+  /* Is this an RLE chunk and the index within its range? */
   if (SM_IS_CHUNK_RLE(&chunk) && idx >= start && idx - start < capacity) {
     /* This RLE contains the bits in [start, start + length] so the index of
      * the last bit in this RLE chunk is `start + length - 1` which is why
      * we test index (0-based) against current length (1-based) below. */
     size_t l = __sm_chunk_rle_get_length(&chunk);
-    if (idx - start == l) {
+    if ((idx - start) == l) {
       __sm_chunk_rle_set_length(&chunk, l + 1);
       __sm_assert(__sm_chunk_rle_get_length(&chunk) == l + 1);
       return idx;
     }
   }
-  // TODO GSB if (RLE chunk and this is in the range) {}
 
   if (idx - start >= capacity) {
     /* Our search resulted in a chunk however it's capacity doesn't encompass
@@ -1773,7 +1773,13 @@ bidx_set(sparsemap_t *map, sparsemap_idx_t idx)
     return __bidx_set(map, idx, p, offset, v);
   }
 
-  return __bidx_set(map, idx, p, offset, NULL);
+  __sm_idx_t ret_idx = __bidx_set(map, idx, p, offset, NULL);
+
+  // Did this chunk become all ones?  Can we compact with adjacent chunks?
+  if (chunk.m_data[0] == ~(__sm_bitvec_t)0) {
+
+  }
+  return ret_idx;
 }
 
 sparsemap_idx_t
@@ -2839,7 +2845,7 @@ _tst_get_chunk_offset(QCC_GenValue **vals, int len, QCC_Stamp **stamp)
   }
 
   // by setting the first bit in each of rnd_nvec chunks we create one chunk
-  // per and with exactly one additional bitvec per so we should observe..
+  // per and with exactly one additional bitvec per so we should observe...
   for (int i = 0; i < rnd_nvec; i++) {
     sparsemap_idx_t l = offset + (i * SM_CHUNK_MAX_CAPACITY);
     sparsemap_set(map, l, true);
@@ -2882,9 +2888,27 @@ _tst_get_chunk_offset(QCC_GenValue **vals, int len, QCC_Stamp **stamp)
     sparsemap_set(map, SM_CHUNK_MAX_CAPACITY + i, true);
   }
   // this should trigger the transformation of the 0th chunk back to sparse,
-  // but also leave a second sparse chunk
-  sparsemap_set(map, 2050, false);
+  // but also create a second and third sparse chunks
+  sparsemap_set(map, 0, false);
   if (__sm_get_chunk_offset(map, 0) != 0) {
+    return QCC_FAIL;
+  }
+  sparsemap_set(map, 0, true);
+
+  sparsemap_set(map, 129, false);
+  if (__sm_get_chunk_offset(map, 129) != 0) {
+    return QCC_FAIL;
+  }
+  sparsemap_set(map, 129, true);
+
+  sparsemap_set(map, 2050, false);
+  if (__sm_get_chunk_offset(map, 2050) != 1) {
+    return QCC_FAIL;
+  }
+  sparsemap_set(map, 2050, true);
+
+  sparsemap_set(map, 5048, false);
+  if (__sm_get_chunk_offset(map, 5048) != 2) {
     return QCC_FAIL;
   }
 
