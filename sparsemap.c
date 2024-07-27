@@ -1509,6 +1509,8 @@ bidx_clear(sparsemap_t *map, sparsemap_idx_t idx)
             size_t right_offset = offset + SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t);
             __sm_chunk_rle_set_capacity(&lrc, __sm_chunk_rle_capacity_limit(map, aligned_idx, right_offset));
           }
+          /* ... and our size estimate shrinks. */
+          expand_by -= sizeof(__sm_bitvec_t);
         } else {
           /* ... we need a new sparse chunk ... */
           size_t lrl = lr_end[i] - lr_start[i];
@@ -1555,7 +1557,7 @@ bidx_clear(sparsemap_t *map, sparsemap_idx_t idx)
     SM_ENOUGH_SPACE(expand_by);
 
     /* We do, so let's knit this into place within the map. */
-    __sm_when_diag({ fprintf(stdout, "\n%s\n", QCC_showChunk(p, 0)); });
+    // __sm_when_diag({ fprintf(stdout, "\n%s\n", QCC_showChunk(p, 0)); });
     size_t amt = SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t);
     __sm_insert_data(map, offset + amt, buf + amt, expand_by);
     memcpy(p, buf, expand_by + amt);
@@ -1564,7 +1566,7 @@ bidx_clear(sparsemap_t *map, sparsemap_idx_t idx)
     //  fprintf(stdout, "\n%s\n", QCC_showChunk(p + SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) * 2, 0));
     //});
 
-    /* And update the chunk count in the map. */
+    /* Update the chunk count in the map. */
     __sm_set_chunk_count(map, __sm_get_chunk_count(map) + (lr[0] ? 1 : 0) + (lr[1] ? 1 : 0));
 
     __sm_when_diag({
@@ -1775,9 +1777,57 @@ bidx_set(sparsemap_t *map, sparsemap_idx_t idx)
 
   __sm_idx_t ret_idx = __bidx_set(map, idx, p, offset, NULL);
 
-  // Did this chunk become all ones?  Can we compact with adjacent chunks?
+  /* Did this chunk become all ones, can we compact it with adjacent chunks? */
   if (chunk.m_data[0] == ~(__sm_bitvec_t)0) {
+    __sm_chunk_t adj;
 
+    /* Is there a previous chunk? */
+    if (offset > 0) {
+      size_t adj_offset = (size_t)__sm_get_chunk_offset(map, start - 1);
+      if (adj_offset < offset) {
+        uint8_t *adj_p = __sm_get_chunk_data(map, adj_offset);
+        __sm_idx_t adj_start = *(__sm_idx_t *)adj_p;
+        __sm_chunk_init(&adj, adj_p + SM_SIZEOF_OVERHEAD);
+        if (SM_IS_CHUNK_RLE(&adj)) {
+          /* Does it align with this full sparse chunk? */
+          if (__sm_chunk_rle_get_length(&adj) + adj_start == start) {
+            /* The stars have aligned, combine them! */
+            // TODO
+            fprintf(stdout, "whee");
+          }
+        } else {
+          /* Is this adjacent sparse chunk also all ones? */
+          if (adj.m_data[0] == ~(__sm_bitvec_t)0) {
+            /* The stars have aligned, combine them! */
+            // TODO
+            fprintf(stdout, "whee");
+          }
+        }
+      }
+    }
+
+    /* Is there a next chunk, and if so is it RLE? */
+    size_t adj_offset = offset + SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t);
+    if (adj_offset < map->m_data_used - (SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t))) {
+      uint8_t *adj_p = __sm_get_chunk_data(map, adj_offset);
+      __sm_idx_t adj_start = *(__sm_idx_t *)adj_p;
+      __sm_chunk_init(&adj, adj_p + SM_SIZEOF_OVERHEAD);
+      if (SM_IS_CHUNK_RLE(&adj)) {
+        /* Does it align with this full sparse chunk? */
+        if (start + SM_CHUNK_MAX_CAPACITY == adj_start) {
+          /* The stars have aligned, combine them! */
+          // TODO
+          fprintf(stdout, "whee");
+        }
+      } else {
+        /* Is this adjacent sparse chunk also all ones? */
+        if (adj.m_data[0] == ~(__sm_bitvec_t)0 && start + SM_CHUNK_MAX_CAPACITY == adj_start) {
+          /* The stars have aligned, combine them! */
+          // TODO
+          fprintf(stdout, "whee");
+        }
+      }
+    }
   }
   return ret_idx;
 }
