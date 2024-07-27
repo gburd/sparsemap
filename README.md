@@ -12,7 +12,7 @@ The "best" case happens when large consecutive sequences of the bits are
 either set ("1") or not set ("0"). If your numbers are consecutive 64 bit
 integers then sparsemap can compress up to 16kb in just 8 bytes.
 
-## How does it work?
+## How does it work? TODO... refine...
 
 On the lowest level a bitmap contains a number of chunks.  Each chunk has a
 starting offset (`uint32_t`), a descriptor (the first `sm_bitvec_t`), and may

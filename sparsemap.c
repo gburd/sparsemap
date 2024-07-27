@@ -1429,7 +1429,7 @@ bidx_clear(sparsemap_t *map, sparsemap_idx_t idx)
     /* Set the chunk flags to all ones, ... */
     pivot_chunk.m_data[0] = ~(__sm_bitvec_t)0;
     /* ... set the flag for the position containing the index to mixed ... */
-    SM_CHUNK_SET_FLAGS(pivot_chunk.m_data[0], aligned_idx / SM_BITS_PER_VECTOR, SM_PAYLOAD_MIXED);
+    SM_CHUNK_SET_FLAGS(pivot_chunk.m_data[0], idx / SM_BITS_PER_VECTOR, SM_PAYLOAD_MIXED);
     /* ... and clear only the bit at that index in this chunk. */
     pivot_chunk.m_data[1] = ~(__sm_bitvec_t)0 & ~((__sm_bitvec_t)1 << (idx % SM_BITS_PER_VECTOR));
     __sm_when_diag({
@@ -1815,14 +1815,23 @@ bidx_set(sparsemap_t *map, sparsemap_idx_t idx)
       if (SM_IS_CHUNK_RLE(&adj)) {
         /* Does it align with this full sparse chunk? */
         if (start + SM_CHUNK_MAX_CAPACITY == adj_start) {
-          /* The stars have aligned, combine them! */
-          // TODO
-          fprintf(stdout, "whee");
+          size_t adj_length = __sm_chunk_rle_get_length(&adj);
+          if (adj_length + SM_CHUNK_MAX_CAPACITY < SM_CHUNK_RLE_MAX_CAPACITY) {
+            /* The stars have aligned, transform to RLE and combine them! */
+            // __sm_when_diag({ fprintf(stdout, "\n%s\n", QCC_showChunk(p, 0)); } );
+            // __sm_when_diag({ fprintf(stdout, "\n%s\n", QCC_showChunk(adj_p, 0)); } );
+            SM_CHUNK_SET_RLE(&chunk);
+            __sm_chunk_rle_set_length(&chunk, __sm_chunk_rle_get_length(&adj));
+            __sm_chunk_rle_set_capacity(&chunk, __sm_chunk_rle_get_capacity(&adj));
+            // __sm_when_diag({ fprintf(stdout, "\n%s\n", QCC_showChunk(p, 0)); } );
+            __sm_remove_data(map, adj_offset, SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t));
+            __sm_set_chunk_count(map, __sm_get_chunk_count(map) - 1);
+          }
         }
       } else {
         /* Is this adjacent sparse chunk also all ones? */
         if (adj.m_data[0] == ~(__sm_bitvec_t)0 && start + SM_CHUNK_MAX_CAPACITY == adj_start) {
-          /* The stars have aligned, combine them! */
+          /* The stars have aligned, transform to RLE and combine them! */
           // TODO
           fprintf(stdout, "whee");
         }
