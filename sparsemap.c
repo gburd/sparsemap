@@ -1821,7 +1821,7 @@ bidx_set(sparsemap_t *map, sparsemap_idx_t idx)
             // __sm_when_diag({ fprintf(stdout, "\n%s\n", QCC_showChunk(p, 0)); } );
             // __sm_when_diag({ fprintf(stdout, "\n%s\n", QCC_showChunk(adj_p, 0)); } );
             SM_CHUNK_SET_RLE(&chunk);
-            __sm_chunk_rle_set_length(&chunk, __sm_chunk_rle_get_length(&adj));
+            __sm_chunk_rle_set_length(&chunk, __sm_chunk_rle_get_length(&adj) + SM_CHUNK_MAX_CAPACITY);
             __sm_chunk_rle_set_capacity(&chunk, __sm_chunk_rle_get_capacity(&adj));
             // __sm_when_diag({ fprintf(stdout, "\n%s\n", QCC_showChunk(p, 0)); } );
             __sm_remove_data(map, adj_offset, SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t));
@@ -2961,7 +2961,7 @@ _tst_get_chunk_offset(QCC_GenValue **vals, int len, QCC_Stamp **stamp)
   sparsemap_set(map, 129, true);
 
   sparsemap_set(map, 2050, false);
-  if (__sm_get_chunk_offset(map, 2050) != 1) {
+  if (__sm_get_chunk_offset(map, 2050) != SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t)) {
     return QCC_FAIL;
   }
   sparsemap_set(map, 2050, true);
