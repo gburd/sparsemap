@@ -1441,7 +1441,7 @@ bidx_clear(sparsemap_t *map, sparsemap_idx_t idx)
 
     /* Is the 0-based index beyond the run length? */
     size_t length = __sm_chunk_rle_get_length(&chunk);
-    if (idx > start + length) {
+    if (idx >= start + length) {
       return idx;
     }
 
@@ -1488,8 +1488,8 @@ bidx_clear(sparsemap_t *map, sparsemap_idx_t idx)
     __sm_when_diag({
       /* Sanity check the chunk */
       // __sm_when_diag({ fprintf(stdout, "\n%s\n", QCC_showChunk(pivot_p, 0)); } );
-      for (size_t i = aligned_idx; i < aligned_idx + SM_CHUNK_MAX_CAPACITY; i++) {
-        __sm_assert(__sm_chunk_is_set(&pivot_chunk, i) == (i >= idx ? false : true));
+      for (size_t i = 0; i < SM_CHUNK_MAX_CAPACITY; i++) {
+        __sm_assert(__sm_chunk_is_set(&pivot_chunk, i) == (i >= aligned_idx + idx ? false : true));
       }
     });
     /* Where did the pivot chunk fall within the original chunk? */
@@ -1595,7 +1595,7 @@ bidx_clear(sparsemap_t *map, sparsemap_idx_t idx)
         __sm_when_diag({
           /* Sanity check the chunk */
           // fprintf(stdout, "\n%s\n", QCC_showChunk(lr[i], 0));
-          for (size_t j = lr_start[i]; j < lr_end[i]; j++) {
+          for (size_t j = lr_start[i]; j < SM_CHUNK_MAX_CAPACITY; j++) {
             __sm_assert(__sm_chunk_is_set(&pivot_chunk, j) == true);
           }
           if (!SM_IS_CHUNK_RLE(&lrc)) {
@@ -1626,9 +1626,8 @@ bidx_clear(sparsemap_t *map, sparsemap_idx_t idx)
       /* Sanity check all indexes in the region. */
       __sm_chunk_t c;
       for (size_t j = start; j < length; j++) {
-        __sm_chunk_init(&c, p + __sm_get_chunk_offset(map, start));
-        __sm_assert(__sm_chunk_is_set(&c, j) == (j == idx ? false : true));
-        __sm_assert(sparsemap_is_set(map, j) == (j == idx ? false : true));
+        __sm_chunk_init(&c, p + __sm_get_chunk_offset(map, j));
+        __sm_assert(__sm_chunk_is_set(&c, j % SM_CHUNK_MAX_CAPACITY) == (j == idx ? false : true));
       }
     });
     return idx;
@@ -1848,14 +1847,14 @@ bidx_set(sparsemap_t *map, sparsemap_idx_t idx)
           if (adj_start + length == start) {
             if (SM_CHUNK_MAX_CAPACITY + length < SM_CHUNK_RLE_MAX_CAPACITY) {
               /* The stars have aligned, transform to RLE and combine them! */
-              __sm_when_diag({ fprintf(stdout, "\n%s\n", QCC_showChunk(adj_p, 0)); });
-              __sm_when_diag({ fprintf(stdout, "\n%s\n", QCC_showChunk(p, 0)); });
+              // __sm_when_diag({ fprintf(stdout, "\n%s\n", QCC_showChunk(adj_p, 0)); });
+              // __sm_when_diag({ fprintf(stdout, "\n%s\n", QCC_showChunk(p, 0)); });
               __sm_chunk_set_rle(&adj);
               __sm_chunk_rle_set_length(&adj, SM_CHUNK_MAX_CAPACITY + length);
               __sm_chunk_rle_set_capacity(&adj, __sm_chunk_rle_get_capacity(&chunk));
               __sm_remove_data(map, offset, SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&chunk));
               __sm_set_chunk_count(map, __sm_get_chunk_count(map) - 1);
-              __sm_when_diag({ fprintf(stdout, "\n%s\n", QCC_showChunk(adj_p, 0)); });
+              // __sm_when_diag({ fprintf(stdout, "\n%s\n", QCC_showChunk(adj_p, 0)); });
 
               /* Now chunk is shifted to the left, it becomes the adjacent chunk. */
               p = adj_p;
@@ -1882,14 +1881,14 @@ bidx_set(sparsemap_t *map, sparsemap_idx_t idx)
         if (start + length == adj_start) {
           if (adj_length + length < SM_CHUNK_RLE_MAX_CAPACITY) {
             /* The stars have aligned, transform to RLE and combine them! */
-            __sm_when_diag({ fprintf(stdout, "\n%s\n", QCC_showChunk(p, 0)); });
-            __sm_when_diag({ fprintf(stdout, "\n%s\n", QCC_showChunk(adj_p, 0)); });
+            // __sm_when_diag({ fprintf(stdout, "\n%s\n", QCC_showChunk(p, 0)); });
+            // __sm_when_diag({ fprintf(stdout, "\n%s\n", QCC_showChunk(adj_p, 0)); });
             __sm_chunk_rle_set_length(&chunk, length + adj_length);
             __sm_remove_data(map, adj_offset, SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&adj));
             __sm_chunk_set_rle(&chunk);
             __sm_chunk_rle_set_capacity(&chunk, __sm_chunk_rle_capacity_limit(map, start, offset));
             __sm_set_chunk_count(map, __sm_get_chunk_count(map) - 1);
-            __sm_when_diag({ fprintf(stdout, "\n%s\n", QCC_showChunk(p, 0)); });
+            // __sm_when_diag({ fprintf(stdout, "\n%s\n", QCC_showChunk(p, 0)); });
           }
         }
       }
@@ -3023,8 +3022,8 @@ _tst_get_chunk_offset(QCC_GenValue **vals, int len, QCC_Stamp **stamp)
   }
   sparsemap_set(map, 2050, true);
 
-  sparsemap_set(map, 5048, false);
-  if (__sm_get_chunk_offset(map, 5048) != 2) {
+  sparsemap_set(map, 5047, false);
+  if (__sm_get_chunk_offset(map, 5047) != 1) {
     return QCC_FAIL;
   }
 
