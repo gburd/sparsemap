@@ -133,18 +133,29 @@ enum __SM_CHUNK_INFO {
   } while (0)
 
 #define SM_CHUNK_GET_FLAGS(data, at) ((((data)) & ((__sm_bitvec_t)SM_FLAG_MASK << ((at)*2))) >> ((at)*2))
-
 #define SM_CHUNK_SET_FLAGS(data, at, to) (data) = ((data) & ~((__sm_bitvec_t)SM_FLAG_MASK << ((at)*2))) | ((__sm_bitvec_t)(to) << ((at)*2))
-
 #define SM_IS_CHUNK_RLE(chunk) \
   (((*((__sm_bitvec_t *)(chunk)->m_data) & (((__sm_bitvec_t)0x3) << (SM_BITS_PER_VECTOR - 2))) >> (SM_BITS_PER_VECTOR - 2)) == SM_PAYLOAD_NONE)
-
-#define SM_CHUNK_SET_RLE(chunk) (*(((__sm_bitvec_t *)(chunk)->m_data)) = (((__sm_bitvec_t)1) << (SM_BITS_PER_VECTOR - 2)))
 
 #define SM_RLE_FLAGS_MASK 0xC000000000000000
 #define SM_RLE_CAPACITY_MASK 0x3FFFFFFF80000000
 #define SM_RLE_LENGTH_MASK 0x7FFFFFFF
 
+/**
+ * TODO
+ */
+static inline void
+__sm_chunk_set_rle(__sm_chunk_t *chunk)
+{
+  __sm_bitvec_t w = chunk->m_data[0];
+  w &= ~SM_RLE_FLAGS_MASK;
+  w |= ((((__sm_bitvec_t)1) << (SM_BITS_PER_VECTOR - 2)) & SM_RLE_FLAGS_MASK);
+  chunk->m_data[0] = w;
+}
+
+/**
+ * TODO
+ */
 static inline size_t
 __sm_chunk_rle_get_capacity(__sm_chunk_t *chunk)
 {
@@ -153,6 +164,9 @@ __sm_chunk_rle_get_capacity(__sm_chunk_t *chunk)
   return w;
 }
 
+/**
+ * TODO
+ */
 static inline void
 __sm_chunk_rle_set_capacity(__sm_chunk_t *chunk, size_t capacity)
 {
@@ -170,6 +184,9 @@ __sm_chunk_rle_get_length(__sm_chunk_t *chunk)
   return w;
 }
 
+/**
+ * TODO
+ */
 static inline void
 __sm_chunk_rle_set_length(__sm_chunk_t *chunk, size_t length)
 {
@@ -178,6 +195,42 @@ __sm_chunk_rle_set_length(__sm_chunk_t *chunk, size_t length)
   w &= ~SM_RLE_LENGTH_MASK;
   w |= length & SM_RLE_LENGTH_MASK;
   chunk->m_data[0] = w;
+}
+
+/**
+ * TODO
+ */
+static size_t
+__sm_chunk_get_run_length(__sm_chunk_t *chunk)
+{
+  size_t count = 0, length = 0;
+
+  if (SM_IS_CHUNK_RLE(chunk)) {
+    length = __sm_chunk_rle_get_length(chunk);
+  } else {
+    __sm_bitvec_t w = chunk->m_data[0];
+
+    switch (w) {
+    case 0:
+      return 0;
+    case ~(__sm_bitvec_t)0:
+      return SM_BITS_PER_VECTOR;
+    default:
+      /* Shift right until a 0 is found ... */
+      while ((w & SM_PAYLOAD_ONES) == SM_PAYLOAD_ONES) {
+        count++;
+        w >>= 2;
+      }
+      /* ... and then check if remaining bits are all zero. */
+      if (count) {
+        length = count * SM_BITS_PER_VECTOR;
+        if (SM_CHUNK_GET_FLAGS(chunk->m_data[0], count) == SM_PAYLOAD_MIXED) {
+          length += popcountll(chunk->m_data[1]);
+        }
+      }
+    }
+  }
+  return length;
 }
 
 struct __attribute__((aligned(8))) sparsemap {
@@ -1497,7 +1550,7 @@ bidx_clear(sparsemap_t *map, sparsemap_idx_t idx)
         /* ... determine the type of chunk required ... */
         if (lr_end[i] - lr_start[i] - 1 >= SM_CHUNK_MAX_CAPACITY) {
           /* ... we need a run-length encoding (RLE), chunk ... */
-          SM_CHUNK_SET_RLE(&lrc);
+          __sm_chunk_set_rle(&lrc);
           /* ... now assign the length ... */
           __sm_chunk_rle_set_length(&lrc, lr_end[i] - lr_start[i]);
           /* ... and capacity, which differs left to right ... */
@@ -1734,7 +1787,7 @@ bidx_set(sparsemap_t *map, sparsemap_idx_t idx)
      * run, so in this case we transition from 2048 to a length of 2049.
      * in this run. */
 
-    SM_CHUNK_SET_RLE(&chunk);
+    __sm_chunk_set_rle(&chunk);
     __sm_chunk_rle_set_length(&chunk, SM_CHUNK_MAX_CAPACITY + 1);
     __sm_chunk_rle_set_capacity(&chunk, __sm_chunk_rle_capacity_limit(map, start, offset));
     return idx;
@@ -1788,52 +1841,56 @@ bidx_set(sparsemap_t *map, sparsemap_idx_t idx)
         uint8_t *adj_p = __sm_get_chunk_data(map, adj_offset);
         __sm_idx_t adj_start = *(__sm_idx_t *)adj_p;
         __sm_chunk_init(&adj, adj_p + SM_SIZEOF_OVERHEAD);
-        if (SM_IS_CHUNK_RLE(&adj)) {
+        /* Is the adjacent chunk on the left RLE or a sparse chunk of all ones? */
+        if (SM_IS_CHUNK_RLE(&adj) || chunk.m_data[0] == ~(__sm_bitvec_t)0) {
           /* Does it align with this full sparse chunk? */
-          if (__sm_chunk_rle_get_length(&adj) + adj_start == start) {
-            /* The stars have aligned, combine them! */
-            // TODO
-            fprintf(stdout, "whee");
-          }
-        } else {
-          /* Is this adjacent sparse chunk also all ones? */
-          if (adj.m_data[0] == ~(__sm_bitvec_t)0) {
-            /* The stars have aligned, combine them! */
-            // TODO
-            fprintf(stdout, "whee");
+          size_t length = SM_IS_CHUNK_RLE(&chunk) ? __sm_chunk_rle_get_length(&chunk) : SM_CHUNK_MAX_CAPACITY;
+          if (adj_start + length == start) {
+            if (SM_CHUNK_MAX_CAPACITY + length < SM_CHUNK_RLE_MAX_CAPACITY) {
+              /* The stars have aligned, transform to RLE and combine them! */
+              __sm_when_diag({ fprintf(stdout, "\n%s\n", QCC_showChunk(adj_p, 0)); });
+              __sm_when_diag({ fprintf(stdout, "\n%s\n", QCC_showChunk(p, 0)); });
+              __sm_chunk_set_rle(&adj);
+              __sm_chunk_rle_set_length(&adj, SM_CHUNK_MAX_CAPACITY + length);
+              __sm_chunk_rle_set_capacity(&adj, __sm_chunk_rle_get_capacity(&chunk));
+              __sm_remove_data(map, offset, SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&chunk));
+              __sm_set_chunk_count(map, __sm_get_chunk_count(map) - 1);
+              __sm_when_diag({ fprintf(stdout, "\n%s\n", QCC_showChunk(adj_p, 0)); });
+
+              /* Now chunk is shifted to the left, it becomes the adjacent chunk. */
+              p = adj_p;
+              offset = adj_offset;
+              start = adj_start;
+              __sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
+            }
           }
         }
       }
     }
 
-    /* Is there a next chunk, and if so is it RLE? */
+    /* Is there a next chunk? */
     size_t adj_offset = offset + SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t);
     if (adj_offset < map->m_data_used - (SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t))) {
       uint8_t *adj_p = __sm_get_chunk_data(map, adj_offset);
       __sm_idx_t adj_start = *(__sm_idx_t *)adj_p;
       __sm_chunk_init(&adj, adj_p + SM_SIZEOF_OVERHEAD);
-      if (SM_IS_CHUNK_RLE(&adj)) {
+      /* Is the adjacent right chunk RLE or a sparse with a run of ones? */
+      size_t adj_length = __sm_chunk_get_run_length(&adj);
+      if (adj_length || SM_IS_CHUNK_RLE(&adj)) {
         /* Does it align with this full sparse chunk? */
-        if (start + SM_CHUNK_MAX_CAPACITY == adj_start) {
-          size_t adj_length = __sm_chunk_rle_get_length(&adj);
-          if (adj_length + SM_CHUNK_MAX_CAPACITY < SM_CHUNK_RLE_MAX_CAPACITY) {
+        size_t length = SM_IS_CHUNK_RLE(&chunk) ? __sm_chunk_rle_get_length(&chunk) : SM_CHUNK_MAX_CAPACITY;
+        if (start + length == adj_start) {
+          if (adj_length + length < SM_CHUNK_RLE_MAX_CAPACITY) {
             /* The stars have aligned, transform to RLE and combine them! */
-            // __sm_when_diag({ fprintf(stdout, "\n%s\n", QCC_showChunk(p, 0)); } );
-            // __sm_when_diag({ fprintf(stdout, "\n%s\n", QCC_showChunk(adj_p, 0)); } );
-            SM_CHUNK_SET_RLE(&chunk);
-            __sm_chunk_rle_set_length(&chunk, __sm_chunk_rle_get_length(&adj) + SM_CHUNK_MAX_CAPACITY);
-            __sm_chunk_rle_set_capacity(&chunk, __sm_chunk_rle_get_capacity(&adj));
-            // __sm_when_diag({ fprintf(stdout, "\n%s\n", QCC_showChunk(p, 0)); } );
-            __sm_remove_data(map, adj_offset, SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t));
+            __sm_when_diag({ fprintf(stdout, "\n%s\n", QCC_showChunk(p, 0)); });
+            __sm_when_diag({ fprintf(stdout, "\n%s\n", QCC_showChunk(adj_p, 0)); });
+            __sm_chunk_rle_set_length(&chunk, length + adj_length);
+            __sm_remove_data(map, adj_offset, SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&adj));
+            __sm_chunk_set_rle(&chunk);
+            __sm_chunk_rle_set_capacity(&chunk, __sm_chunk_rle_capacity_limit(map, start, offset));
             __sm_set_chunk_count(map, __sm_get_chunk_count(map) - 1);
+            __sm_when_diag({ fprintf(stdout, "\n%s\n", QCC_showChunk(p, 0)); });
           }
-        }
-      } else {
-        /* Is this adjacent sparse chunk also all ones? */
-        if (adj.m_data[0] == ~(__sm_bitvec_t)0 && start + SM_CHUNK_MAX_CAPACITY == adj_start) {
-          /* The stars have aligned, transform to RLE and combine them! */
-          // TODO
-          fprintf(stdout, "whee");
         }
       }
     }
@@ -2726,7 +2783,7 @@ QCC_genChunk()
     chunk->m_data = (__sm_bitvec_t *)((uintptr_t)chunk + sizeof(__sm_chunk_t));
     chunk->m_data[0] = 0;
     // ... set the flags on this vector to indicate that is it RLE ...
-    SM_CHUNK_SET_RLE(chunk);
+    __sm_chunk_set_rle(chunk);
     // ... set the RLE chunk's initial capacity ...
     __sm_chunk_rle_set_capacity(chunk, SM_CHUNK_RLE_MAX_CAPACITY);
     // ... and set the RLE chunk's length of 1s to len.
