@@ -73,9 +73,11 @@ typedef struct {
   __sm_bitvec_t *m_data;
 } __sm_chunk_t;
 
-// TODO remove me...
+// TODO remove me, this is only used for debugging.
+#ifdef SPARSEMAP_DIAGNOSTIC
 static char *QCC_showChunk(void *value, int len);
-static char *_qcc_format_chunk(__sm_idx_t start, __sm_chunk_t *chunk);
+static char *_qcc_format_chunk(__sm_idx_t start, __sm_chunk_t * chunk);
+#endif
 
 enum __SM_CHUNK_INFO {
   /* metadata overhead: 4 bytes for __sm_chunk_t count */
@@ -93,11 +95,14 @@ enum __SM_CHUNK_INFO {
   /* maximum capacity of a __sm_chunk_t (in bits) */
   SM_CHUNK_MAX_CAPACITY = (SM_BITS_PER_VECTOR * SM_FLAGS_PER_INDEX),
 
-  /* maximum capacity of a __sm_chunk_t (in bits) is */
+  /* maximum capacity of a __sm_chunk_t (31 bits of the RLE) */
   SM_CHUNK_RLE_MAX_CAPACITY = 0x7FFFFFFF,
 
   /* minimum capacity of a __sm_chunk_t (in bits) */
   SM_CHUNK_MIN_CAPACITY = (SM_BITS_PER_VECTOR - 2),
+
+  /* maximum length of a __sm_chunk_t (31 bits of the RLE) */
+  SM_CHUNK_RLE_MAX_LENGTH = 0x7FFFFFFF,
 
   /* __sm_bitvec_t payload is all zeros (2#00) */
   SM_PAYLOAD_ZEROS = 0,
@@ -141,8 +146,11 @@ enum __SM_CHUNK_INFO {
 #define SM_RLE_CAPACITY_MASK 0x3FFFFFFF80000000
 #define SM_RLE_LENGTH_MASK 0x7FFFFFFF
 
-/**
- * TODO
+/** @brief Changes the chunk to be flagged as RLE encoded.
+ *
+ * This doesn't change any other bits in the chunk's descriptor.
+ *
+ * @param[in] chunk The chunk to modify.
  */
 static inline void
 __sm_chunk_set_rle(__sm_chunk_t *chunk)
@@ -153,8 +161,13 @@ __sm_chunk_set_rle(__sm_chunk_t *chunk)
   chunk->m_data[0] = w;
 }
 
-/**
- * TODO
+/** @brief Get the capacity of an RLE chunk.
+ *
+ * This only returns a meaningful value when chunk is RLE encoded.  This will
+ * return garbage when called referencing a sparse chunk.
+ *
+ * @param[in] chunk The chunk in question.
+ * @return The capacity of the RLE chunk, at most SM_CHUNK_RLE_MAX_CAPACITY.
  */
 static inline size_t
 __sm_chunk_rle_get_capacity(__sm_chunk_t *chunk)
@@ -164,8 +177,13 @@ __sm_chunk_rle_get_capacity(__sm_chunk_t *chunk)
   return w;
 }
 
-/**
- * TODO
+/** @brief Sets the capacity of the RLE chunk.
+ *
+ * This does not check the chunk type, if the chunk isn't RLE then this function
+ * will overwrite flags data in a sparse chunk.
+ *
+ * @param[in] chunk The chunk in question.
+ * @param[in] capacity The new capacity, at most SM_CHUNK_RLE_MAX_CAPACITY.
  */
 static inline void
 __sm_chunk_rle_set_capacity(__sm_chunk_t *chunk, size_t capacity)
@@ -177,6 +195,15 @@ __sm_chunk_rle_set_capacity(__sm_chunk_t *chunk, size_t capacity)
   chunk->m_data[0] = w;
 }
 
+/** @brief Get the current length of an RLE chunk.
+ *
+ * This only returns a meaningful value when chunk is RLE encoded.  This will
+ * return garbage when called referencing a sparse chunk.
+ *
+ * @param[in] chunk The chunk in question.
+ * @reutrn The current length of the run of adjacent ones encoded in this RLE
+ * chunk, at most SM_CHUNK_RLE_MAX_CAPACITY.
+ */
 static inline size_t
 __sm_chunk_rle_get_length(__sm_chunk_t *chunk)
 {
@@ -184,21 +211,30 @@ __sm_chunk_rle_get_length(__sm_chunk_t *chunk)
   return w;
 }
 
-/**
- * TODO
+/** @brief Sets the length of the RLE chunk.
+ *
+ * This does not check the chunk type, if the chunk isn't RLE then this function
+ * will overwrite flags data in a sparse chunk.
+ *
+ * @param[in] chunk The chunk in question.
+ * @param[in] length The new capacity, at most SM_CHUNK_RLE_MAX_LENGTH.
  */
 static inline void
 __sm_chunk_rle_set_length(__sm_chunk_t *chunk, size_t length)
 {
-  __sm_assert(length <= SM_CHUNK_RLE_MAX_CAPACITY);
+  __sm_assert(length <= SM_CHUNK_RLE_MAX_LENGTH);
   __sm_bitvec_t w = chunk->m_data[0];
   w &= ~SM_RLE_LENGTH_MASK;
   w |= length & SM_RLE_LENGTH_MASK;
   chunk->m_data[0] = w;
 }
 
-/**
- * TODO
+/** @brief Returns the length of a run of adjacent ones in this chunk.
+ *
+ * A "run" is a set of adjacent ones that starts at the 0th bit of this
+ * chunk. For an RLE chunk that's encoded in the descriptor.  For a sparse chunk
+ * we must see how many flags are SM_PAYLOAD_ONES and then if we find a
+ * SM_PAYLOAD_MIXED count the additional adjacent ones if they exist.
  */
 static size_t
 __sm_chunk_get_run_length(__sm_chunk_t *chunk)
@@ -214,7 +250,7 @@ __sm_chunk_get_run_length(__sm_chunk_t *chunk)
     case 0:
       return 0;
     case ~(__sm_bitvec_t)0:
-      return SM_BITS_PER_VECTOR;
+      return SM_CHUNK_MAX_CAPACITY;
     default:
       /* Shift right until a 0 is found ... */
       while ((w & SM_PAYLOAD_ONES) == SM_PAYLOAD_ONES) {
@@ -225,7 +261,11 @@ __sm_chunk_get_run_length(__sm_chunk_t *chunk)
       if (count) {
         length = count * SM_BITS_PER_VECTOR;
         if (SM_CHUNK_GET_FLAGS(chunk->m_data[0], count) == SM_PAYLOAD_MIXED) {
-          length += popcountll(chunk->m_data[1]);
+          w = chunk->m_data[1];
+          while ((w & 1) == 1) {
+            w >>= 1;
+            length++;
+          }
         }
       }
     }
@@ -461,27 +501,34 @@ __sm_chunk_get_size(__sm_chunk_t *chunk)
 static bool
 __sm_chunk_is_set(__sm_chunk_t *chunk, size_t idx)
 {
-  /* in which __sm_bitvec_t is |idx| stored? */
-  size_t bv = idx / SM_BITS_PER_VECTOR;
-  __sm_assert(bv < SM_FLAGS_PER_INDEX);
-
-  /* now retrieve the flags of that __sm_bitvec_t */
-  size_t flags = SM_CHUNK_GET_FLAGS(*chunk->m_data, bv);
-  switch (flags) {
-  case SM_PAYLOAD_ZEROS:
-  case SM_PAYLOAD_NONE:
+  if (SM_IS_CHUNK_RLE(chunk)) {
+    if (idx < __sm_chunk_rle_get_length(chunk)) {
+      return true;
+    }
     return false;
-  case SM_PAYLOAD_ONES:
-    return true;
-  default:
-    __sm_assert(flags == SM_PAYLOAD_MIXED);
-    /* FALLTHROUGH */
-  }
+  } else {
+    /* in which __sm_bitvec_t is |idx| stored? */
+    size_t bv = idx / SM_BITS_PER_VECTOR;
+    __sm_assert(bv < SM_FLAGS_PER_INDEX);
 
-  /* get the __sm_bitvec_t at |bv| */
-  __sm_bitvec_t w = chunk->m_data[1 + __sm_chunk_get_position(chunk, bv)];
-  /* and finally check the bit in that __sm_bitvec_t */
-  return (w & ((__sm_bitvec_t)1 << (idx % SM_BITS_PER_VECTOR))) > 0;
+    /* now retrieve the flags of that __sm_bitvec_t */
+    size_t flags = SM_CHUNK_GET_FLAGS(*chunk->m_data, bv);
+    switch (flags) {
+    case SM_PAYLOAD_ZEROS:
+    case SM_PAYLOAD_NONE:
+      return false;
+    case SM_PAYLOAD_ONES:
+      return true;
+    default:
+      __sm_assert(flags == SM_PAYLOAD_MIXED);
+      /* FALLTHROUGH */
+    }
+
+    /* get the __sm_bitvec_t at |bv| */
+    __sm_bitvec_t w = chunk->m_data[1 + __sm_chunk_get_position(chunk, bv)];
+    /* and finally check the bit in that __sm_bitvec_t */
+    return (w & ((__sm_bitvec_t)1 << (idx % SM_BITS_PER_VECTOR))) > 0;
+  }
 }
 
 /*
@@ -1487,9 +1534,10 @@ bidx_clear(sparsemap_t *map, sparsemap_idx_t idx)
     pivot_chunk.m_data[1] = ~(__sm_bitvec_t)0 & ~((__sm_bitvec_t)1 << (idx % SM_BITS_PER_VECTOR));
     __sm_when_diag({
       /* Sanity check the chunk */
-      // __sm_when_diag({ fprintf(stdout, "\n%s\n", QCC_showChunk(pivot_p, 0)); } );
-      for (size_t i = 0; i < SM_CHUNK_MAX_CAPACITY; i++) {
-        __sm_assert(__sm_chunk_is_set(&pivot_chunk, i) == (i >= aligned_idx + idx ? false : true));
+      // fprintf(stdout, "\n%s\n", QCC_showChunk(pivot_p, 0);
+      for (size_t j = 0; j < SM_CHUNK_MAX_CAPACITY; j++) {
+        bool expected = (j + aligned_idx == idx) ? false : true;
+        __sm_assert(__sm_chunk_is_set(&pivot_chunk, j) == expected);
       }
     });
     /* Where did the pivot chunk fall within the original chunk? */
@@ -1595,13 +1643,8 @@ bidx_clear(sparsemap_t *map, sparsemap_idx_t idx)
         __sm_when_diag({
           /* Sanity check the chunk */
           // fprintf(stdout, "\n%s\n", QCC_showChunk(lr[i], 0));
-          for (size_t j = lr_start[i]; j < SM_CHUNK_MAX_CAPACITY; j++) {
-            __sm_assert(__sm_chunk_is_set(&pivot_chunk, j) == true);
-          }
-          if (!SM_IS_CHUNK_RLE(&lrc)) {
-            for (size_t j = lr_end[i]; j < SM_CHUNK_MAX_CAPACITY; j++) {
-              __sm_assert(__sm_chunk_is_set(&pivot_chunk, j) == false);
-            }
+          for (size_t j = 0; j < (lr_end[i] - lr_start[i]) - 1; j++) {
+            __sm_assert(__sm_chunk_is_set(&lrc, j) == true);
           }
         });
       }
@@ -1621,13 +1664,16 @@ bidx_clear(sparsemap_t *map, sparsemap_idx_t idx)
 
     /* Update the chunk count in the map. */
     __sm_set_chunk_count(map, __sm_get_chunk_count(map) + (lr[0] ? 1 : 0) + (lr[1] ? 1 : 0));
-
     __sm_when_diag({
       /* Sanity check all indexes in the region. */
+      // fprintf(stdout, "\n%s\n", QCC_showChunk(pivot_p, 0));
       __sm_chunk_t c;
       for (size_t j = start; j < length; j++) {
-        __sm_chunk_init(&c, p + __sm_get_chunk_offset(map, j));
-        __sm_assert(__sm_chunk_is_set(&c, j % SM_CHUNK_MAX_CAPACITY) == (j == idx ? false : true));
+        bool expected = j == idx ? false : true;
+        uint8_t *cp = p + __sm_get_chunk_offset(map, j);
+        __sm_idx_t cs = *(__sm_idx_t *)cp;
+        __sm_chunk_init(&c, cp + SM_SIZEOF_OVERHEAD);
+        __sm_assert(__sm_chunk_is_set(&c, j - cs) == expected);
       }
     });
     return idx;
@@ -1843,9 +1889,9 @@ bidx_set(sparsemap_t *map, sparsemap_idx_t idx)
         /* Is the adjacent chunk on the left RLE or a sparse chunk of all ones? */
         if (SM_IS_CHUNK_RLE(&adj) || chunk.m_data[0] == ~(__sm_bitvec_t)0) {
           /* Does it align with this full sparse chunk? */
-          size_t length = SM_IS_CHUNK_RLE(&chunk) ? __sm_chunk_rle_get_length(&chunk) : SM_CHUNK_MAX_CAPACITY;
+          size_t length = __sm_chunk_get_run_length(&chunk);
           if (adj_start + length == start) {
-            if (SM_CHUNK_MAX_CAPACITY + length < SM_CHUNK_RLE_MAX_CAPACITY) {
+            if (SM_CHUNK_MAX_CAPACITY + length < SM_CHUNK_RLE_MAX_LENGTH) {
               /* The stars have aligned, transform to RLE and combine them! */
               // __sm_when_diag({ fprintf(stdout, "\n%s\n", QCC_showChunk(adj_p, 0)); });
               // __sm_when_diag({ fprintf(stdout, "\n%s\n", QCC_showChunk(p, 0)); });
@@ -1877,9 +1923,9 @@ bidx_set(sparsemap_t *map, sparsemap_idx_t idx)
       size_t adj_length = __sm_chunk_get_run_length(&adj);
       if (adj_length || SM_IS_CHUNK_RLE(&adj)) {
         /* Does it align with this full sparse chunk? */
-        size_t length = SM_IS_CHUNK_RLE(&chunk) ? __sm_chunk_rle_get_length(&chunk) : SM_CHUNK_MAX_CAPACITY;
+        size_t length = __sm_chunk_get_run_length(&chunk);
         if (start + length == adj_start) {
-          if (adj_length + length < SM_CHUNK_RLE_MAX_CAPACITY) {
+          if (adj_length + length < SM_CHUNK_RLE_MAX_LENGTH) {
             /* The stars have aligned, transform to RLE and combine them! */
             // __sm_when_diag({ fprintf(stdout, "\n%s\n", QCC_showChunk(p, 0)); });
             // __sm_when_diag({ fprintf(stdout, "\n%s\n", QCC_showChunk(adj_p, 0)); });
@@ -2769,7 +2815,7 @@ QCC_genChunk()
 {
   if (((double)random() / (double)RAND_MAX) > 0.5) {
     // Generate a run-length encoded (RLE) chunk:
-    sparsemap_idx_t from = 1, to = SM_CHUNK_RLE_MAX_CAPACITY;
+    sparsemap_idx_t from = 1, to = SM_CHUNK_RLE_MAX_LENGTH;
     unsigned int len = ((unsigned int)random() % (to - from)) + from;
     // First allocate enough room for the chunk data ...
     uint8_t *p = malloc(SM_SIZEOF_OVERHEAD + sizeof(__sm_chunk_t) + (sizeof(__sm_bitvec_t) * 2));
@@ -2952,14 +2998,14 @@ _tst_get_chunk_offset(QCC_GenValue **vals, int len, QCC_Stamp **stamp)
   unsigned int rnd_nvec = rnd_offset / sizeof(__sm_bitvec_t);
   __sm_idx_t offset = __sm_get_chunk_aligned_offset(idx);
 
-  // an empty map should return -1 (no chunks present, so offset of -1)
+  // An empty map should return -1 (no chunks present, so offset of -1).
   for (unsigned int i = offset; i < SM_CHUNK_MAX_CAPACITY + offset; i++) {
     if (__sm_get_chunk_offset(map, idx) != -1) {
       return QCC_FAIL;
     }
   }
 
-  // by setting the first bit in each of rnd_nvec chunks we create one chunk
+  // By setting the first bit in each of rnd_nvec chunks we create one chunk
   // per and with exactly one additional bitvec per so we should observe...
   for (int i = 0; i < rnd_nvec; i++) {
     sparsemap_idx_t l = offset + (i * SM_CHUNK_MAX_CAPACITY);
@@ -2973,7 +3019,7 @@ _tst_get_chunk_offset(QCC_GenValue **vals, int len, QCC_Stamp **stamp)
     }
   }
 
-  // now for RLE, first let's clear and check a full chunk
+  // Now for RLE, first let's clear and check a full chunk.
   sparsemap_clear(map);
   for (int i = 0; i < SM_CHUNK_MAX_CAPACITY; i++) {
     sparsemap_set(map, i, true);
@@ -2987,43 +3033,52 @@ _tst_get_chunk_offset(QCC_GenValue **vals, int len, QCC_Stamp **stamp)
     return QCC_FAIL;
   }
 
-  // this should trigger the transformation of the 0th chunk into RLE
+  // This should trigger the transformation of the 0th chunk into RLE.
   sparsemap_set(map, SM_CHUNK_MAX_CAPACITY, true);
   if (__sm_get_chunk_offset(map, SM_CHUNK_MAX_CAPACITY) != 0) {
     return QCC_FAIL;
   }
-  // this should trigger the transformation of the 0th chunk back to sparse
+  // This should trigger the transformation of the 0th chunk back to sparse.
   sparsemap_set(map, SM_CHUNK_MAX_CAPACITY, false);
   if (__sm_get_chunk_offset(map, SM_CHUNK_MAX_CAPACITY) != 0) {
     return QCC_FAIL;
   }
 
-  // this should trigger the transformation of the 0th chunk into RLE again
+  // This should trigger the transformation of the 0th chunk into RLE again.
   for (int i = 0; i < 3000; i++) {
     sparsemap_set(map, SM_CHUNK_MAX_CAPACITY + i, true);
   }
-  // this should trigger the transformation of the 0th chunk back to sparse,
-  // but also create a second and third sparse chunks
+  // This should trigger the transformation of the 0th chunk back to sparse,
+  // but also create a second and third sparse chunks.
   sparsemap_set(map, 0, false);
   if (__sm_get_chunk_offset(map, 0) != 0) {
     return QCC_FAIL;
   }
   sparsemap_set(map, 0, true);
 
+  // This will split the chunk into two chunks; sparse, RLE.
   sparsemap_set(map, 129, false);
   if (__sm_get_chunk_offset(map, 129) != 0) {
     return QCC_FAIL;
   }
   sparsemap_set(map, 129, true);
 
+  // This will split the chunk into three chunks; sparse, sparse, RLE.
   sparsemap_set(map, 2050, false);
+  if (__sm_get_chunk_offset(map, 0) != 0) {
+    return QCC_FAIL;
+  }
   if (__sm_get_chunk_offset(map, 2050) != SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t)) {
+    return QCC_FAIL;
+  }
+  if (__sm_get_chunk_offset(map, 2050 + SM_CHUNK_MAX_CAPACITY) != 2 * SM_SIZEOF_OVERHEAD + 3 * sizeof(__sm_bitvec_t)) {
     return QCC_FAIL;
   }
   sparsemap_set(map, 2050, true);
 
+  // This won't split the chunk, it just shrinks the RLE by one.
   sparsemap_set(map, 5047, false);
-  if (__sm_get_chunk_offset(map, 5047) != 1) {
+  if (__sm_get_chunk_offset(map, 5046) != 0) {
     return QCC_FAIL;
   }
 
