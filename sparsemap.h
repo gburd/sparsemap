@@ -294,9 +294,9 @@ void *sparsemap_get_data(sparsemap_t *map);
  */
 size_t sparsemap_count(sparsemap_t *map);
 
-/** @brief Returns the offset of the first bit set in the map.
+/** @brief Returns the position of the first bit set in the map.
  *
- * This is the same as the value of the first set bit in the
+ * This is the same as the offset of the first set bit in the
  * map.
  *
  * @param[in] map The sparsemap reference.

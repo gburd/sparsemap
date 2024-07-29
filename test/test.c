@@ -27,6 +27,9 @@
 
 #define SELECT_FALSE
 
+char *QCC_showSparsemap(void *value, int len);
+char *QCC_showChunk(void *value, int len);
+
 /* !!! Duplicated here for testing purposes. Keep in sync, or suffer. !!! */
 struct sparsemap {
   size_t m_capacity;
@@ -315,7 +318,7 @@ test_api_remaining_capacity(const MunitParameter params[], void *data)
   int i = 0;
   double cap;
   do {
-    sparsemap_set(map, i++);
+    sparsemap_set(map, i++ * 2);
     cap = sparsemap_capacity_remaining(map);
   } while (cap > 1.0 && errno != ENOSPC);
   errno = 0;
@@ -679,8 +682,11 @@ test_api_get_start_offset_roll(const MunitParameter params[], void *data)
     sparsemap_set(map, i);
     if (i > 2047) {
       sparsemap_unset(map, i - 2048);
+      // if (sparsemap_get_starting_offset(map) != i - 2047) {
+      //   fprintf(stdout, "\n%s\n", QCC_showSparsemap(map, 0));
+      //   fprintf(stdout, "%ld\t%ld\t%zu\n", i, i - 2047, sparsemap_get_starting_offset(map));
+      // }
       assert_true(sparsemap_get_starting_offset(map) == i - 2047);
-      // printf("%d\t%d\t%zu\n", i, i - 2047, sparsemap_get_starting_offset(map));
     }
   }
   return MUNIT_OK;

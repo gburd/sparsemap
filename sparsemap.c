@@ -75,7 +75,8 @@ typedef struct {
 
 // TODO remove me, this is only used for debugging.
 #ifdef SPARSEMAP_TESTING
-static char *QCC_showChunk(void *value, int len);
+char *QCC_showSparsemap(void *value, int len);
+char *QCC_showChunk(void *value, int len);
 static char *_qcc_format_chunk(__sm_idx_t start, __sm_chunk_t *chunk);
 #endif
 
@@ -262,8 +263,7 @@ __sm_chunk_get_run_length(__sm_chunk_t *chunk)
         length = count * SM_BITS_PER_VECTOR;
         if (SM_CHUNK_GET_FLAGS(chunk->m_data[0], count) == SM_PAYLOAD_MIXED) {
           w = chunk->m_data[1];
-          while ((w & 1) == 1) {
-            w >>= 1;
+          for (int k = SM_BITS_PER_VECTOR; k && ((w & 1) == 1); k--, w >>= 1) {
             length++;
           }
         }
@@ -647,7 +647,7 @@ __sm_chunk_set_bit(__sm_chunk_t *chunk, sparsemap_idx_t idx, size_t *pos)
  * @note, the caller MUST to perform the relevant actions and call set() again,
  * this time with \b retried = true.
  */
- // TODO remove me... use __sm_chunk_bit_set/unset()
+// TODO remove me... use __sm_chunk_bit_set/unset()
 static int
 __sm_chunk_set(__sm_chunk_t *chunk, size_t idx, bool value, size_t *pos, __sm_bitvec_t *fill, bool retried)
 {
@@ -1550,11 +1550,13 @@ sparsemap_unset(sparsemap_t *map, sparsemap_idx_t idx)
       if (aligned_idx == start) {
         /* The pivot is left aligned, there will be two chunks in total. */
         lr_start[1] = aligned_idx + SM_CHUNK_MAX_CAPACITY;
-        lr_end[1] = length;
+        lr_end[1] = lr_start[1] + length - SM_CHUNK_MAX_CAPACITY;
         /* Used later for constructing the remaining right chunk */
         lr[1] = (uint8_t *)((uintptr_t)buf + (SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) * 2));
         /* Calculate space needed in the buffer, reuse the left chunk bytes. */
         expand_by = (SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) * 3);
+        __sm_assert(lr_start[1] <= lr_end[1]);
+        __sm_assert(lr[0] == 0);
         break;
       }
 
@@ -1570,6 +1572,8 @@ sparsemap_unset(sparsemap_t *map, sparsemap_idx_t idx)
         lr[0] = buf;
         /* Calculate space needed in the buffer, reuse the left chunk bytes. */
         expand_by = (SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) * 3);
+        __sm_assert(lr_start[0] <= lr_end[0]);
+        __sm_assert(lr[1] == 0);
         break;
       }
 
@@ -1587,6 +1591,8 @@ sparsemap_unset(sparsemap_t *map, sparsemap_idx_t idx)
       lr[1] = (uint8_t *)((uintptr_t)buf + amt * 2);
       /* Calculate space needed in the buffer, reuse the left chunk bytes. */
       expand_by = (amt * 2) + sizeof(__sm_bitvec_t);
+      __sm_assert(lr_start[0] <= lr_end[0]);
+      __sm_assert(lr_start[1] <= lr_end[1]);
     } while (0);
 
     for (int i = 0; i < 2; i++) {
@@ -1618,7 +1624,7 @@ sparsemap_unset(sparsemap_t *map, sparsemap_idx_t idx)
           size_t lrl = lr_end[i] - lr_start[i];
           /* ... how many flags can we mark as all ones? ... */
           if (lrl > SM_BITS_PER_VECTOR) {
-            lrc.m_data[0] = ~(__sm_bitvec_t)0 >> (SM_FLAGS_PER_INDEX - (lrl / SM_BITS_PER_VECTOR)) * 2;
+            lrc.m_data[0] = ~(__sm_bitvec_t)0 >> ((SM_FLAGS_PER_INDEX - (lrl / SM_BITS_PER_VECTOR)) * 2);
           }
           /* ... do we have a mixed flag to create and vector to assign? ... */
           if (lrl % SM_BITS_PER_VECTOR) {
@@ -1641,13 +1647,13 @@ sparsemap_unset(sparsemap_t *map, sparsemap_idx_t idx)
             expand_by -= sizeof(__sm_bitvec_t);
           }
         }
-        __sm_when_diag({
+        //__sm_when_diag({
           /* Sanity check the chunk */
           // fprintf(stdout, "\n%s\n", QCC_showChunk(lr[i], 0));
           for (size_t j = 0; j < (lr_end[i] - lr_start[i]) - 1; j++) {
             __sm_assert(__sm_chunk_is_set(&lrc, j) == true);
           }
-        });
+        //});
       }
     }
     /* Determine if we have room for this construct. */
@@ -1888,7 +1894,7 @@ sparsemap_set(sparsemap_t *map, sparsemap_idx_t idx)
         __sm_idx_t adj_start = *(__sm_idx_t *)adj_p;
         __sm_chunk_init(&adj, adj_p + SM_SIZEOF_OVERHEAD);
         /* Is the adjacent chunk on the left RLE or a sparse chunk of all ones? */
-        if (SM_IS_CHUNK_RLE(&adj) || chunk.m_data[0] == ~(__sm_bitvec_t)0) {
+        if (SM_IS_CHUNK_RLE(&adj) || adj.m_data[0] == ~(__sm_bitvec_t)0) {
           /* Does it align with this full sparse chunk? */
           size_t length = __sm_chunk_get_run_length(&chunk);
           if (adj_start + length == start) {
@@ -1922,7 +1928,7 @@ sparsemap_set(sparsemap_t *map, sparsemap_idx_t idx)
       __sm_chunk_init(&adj, adj_p + SM_SIZEOF_OVERHEAD);
       /* Is the adjacent right chunk RLE or a sparse with a run of ones? */
       size_t adj_length = __sm_chunk_get_run_length(&adj);
-      if (adj_length || SM_IS_CHUNK_RLE(&adj)) {
+      if (adj_length) {
         /* Does it align with this full sparse chunk? */
         size_t length = __sm_chunk_get_run_length(&chunk);
         if (start + length == adj_start) {
@@ -1967,6 +1973,10 @@ sparsemap_get_starting_offset(sparsemap_t *map)
   p += SM_SIZEOF_OVERHEAD;
   __sm_chunk_t chunk;
   __sm_chunk_init(&chunk, p);
+  if (SM_IS_CHUNK_RLE(&chunk)) {
+    offset = relative_position;
+    goto done;
+  }
   for (size_t m = 0; m < sizeof(__sm_bitvec_t); m++, p++) {
     for (int n = 0; n < SM_FLAGS_PER_INDEX_BYTE; n++) {
       size_t flags = SM_CHUNK_GET_FLAGS(*p, n);
@@ -2591,7 +2601,7 @@ _qcc_format_chunk(__sm_idx_t start, __sm_chunk_t *chunk)
     }
     str = buf + sprintf(buf, "%.10u\t%s%s", start, desc_str, mixed ? " :: " : "");
     for (int i = 0; i < mixed; i++) {
-      str += sprintf(str, "0x%lx%s", chunk->m_data[1 + i], i + 1 < mixed ? " " : "");
+      str += sprintf(str, "0x%0.16lx%s", chunk->m_data[1 + i], i + 1 < mixed ? " " : "");
     }
   } else {
     sprintf(buf, "%.10u\t1»%zu of %zu", start, __sm_chunk_rle_get_length(chunk), __sm_chunk_rle_get_capacity(chunk));
@@ -2599,7 +2609,7 @@ _qcc_format_chunk(__sm_idx_t start, __sm_chunk_t *chunk)
   return buf;
 }
 
-static char *
+char *
 QCC_showChunk(void *value, int len)
 {
   __sm_idx_t start = *(__sm_idx_t *)value;
@@ -2610,7 +2620,7 @@ QCC_showChunk(void *value, int len)
   return _qcc_format_chunk(start, &chunk);
 }
 
-static char *
+char *
 QCC_showSparsemap(void *value, int len)
 {
   sparsemap_t *map = (sparsemap_t *)value;
