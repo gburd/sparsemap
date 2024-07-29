@@ -35,16 +35,16 @@ main()
   uint8_t buffer2[1024];
   sparsemap_init(map, buffer, sizeof(buffer));
   assert(sparsemap_get_size(map) == size);
-  sparsemap_set(map, 0, true);
+  sparsemap_set(map, 0);
   assert(sparsemap_get_size(map) == size + 4 + 8 + 8);
   assert(sparsemap_is_set(map, 0) == true);
   assert(sparsemap_get_size(map) == size + 4 + 8 + 8);
   assert(sparsemap_is_set(map, 1) == false);
-  sparsemap_set(map, 0, false);
+  sparsemap_unset(map, 0);
   assert(sparsemap_get_size(map) == size);
 
   sparsemap_clear(map);
-  sparsemap_set(map, 64, true);
+  sparsemap_set(map, 64);
   assert(sparsemap_is_set(map, 64) == true);
   assert(sparsemap_get_size(map) == size + 4 + 8 + 8);
 
@@ -54,7 +54,7 @@ main()
   // set [0..100000]
   for (int i = 0; i < 100000; i++) {
     assert(sparsemap_is_set(map, i) == false);
-    sparsemap_set(map, i, true);
+    sparsemap_set(map, i);
     if (i > 5) {
       for (int j = i - 5; j <= i; j++) {
         assert(sparsemap_is_set(map, j) == true);
@@ -73,7 +73,7 @@ main()
   // unset [0..10000]
   for (int i = 0; i < 10000; i++) {
     assert(sparsemap_is_set(map, i) == true);
-    sparsemap_set(map, i, false);
+    sparsemap_unset(map, i);
     assert(sparsemap_is_set(map, i) == false);
   }
 
@@ -87,7 +87,7 @@ main()
   // set [10000..0]
   for (int i = 10000; i >= 0; i--) {
     assert(sparsemap_is_set(map, i) == false);
-    sparsemap_set(map, i, true);
+    sparsemap_set(map, i);
     assert(sparsemap_is_set(map, i) == true);
   }
 
@@ -106,7 +106,7 @@ main()
   // unset [10000..0]
   for (int i = 10000; i >= 0; i--) {
     assert(sparsemap_is_set(map, i) == true);
-    sparsemap_set(map, i, false);
+    sparsemap_unset(map, i);
     assert(sparsemap_is_set(map, i) == false);
   }
 
@@ -117,13 +117,13 @@ main()
   fprintf(stderr, ".");
   sparsemap_clear(map);
 
-  sparsemap_set(map, 0, true);
-  sparsemap_set(map, 2048 * 2 + 1, true);
+  sparsemap_set(map, 0);
+  sparsemap_set(map, 2048 * 2 + 1);
   assert(sparsemap_is_set(map, 0) == true);
   assert(sparsemap_is_set(map, 2048 * 2 + 0) == false);
   assert(sparsemap_is_set(map, 2048 * 2 + 1) == true);
   assert(sparsemap_is_set(map, 2048 * 2 + 2) == false);
-  sparsemap_set(map, 2048, true);
+  sparsemap_set(map, 2048);
   assert(sparsemap_is_set(map, 0) == true);
   assert(sparsemap_is_set(map, 2047) == false);
   assert(sparsemap_is_set(map, 2048) == true);
@@ -137,7 +137,7 @@ main()
   fprintf(stderr, ".");
 
   for (int i = 0; i < 100000; i++) {
-    sparsemap_set(map, i, true);
+    sparsemap_set(map, i);
   }
   for (int i = 0; i < 100000; i++) {
     assert(sparsemap_select(map, i, true) == (unsigned)i);
@@ -147,7 +147,7 @@ main()
   fprintf(stderr, ".");
 
   for (int i = 1; i < 513; i++) {
-    sparsemap_set(map, i, true);
+    sparsemap_set(map, i);
   }
   for (int i = 1; i < 513; i++) {
     assert(sparsemap_select(map, i - 1, true) == (unsigned)i);
@@ -157,7 +157,7 @@ main()
   fprintf(stderr, ".");
 
   for (size_t i = 0; i < 8; i++) {
-    sparsemap_set(map, i * 10, true);
+    sparsemap_set(map, i * 10);
   }
   for (size_t i = 0; i < 8; i++) {
     assert(sparsemap_select(map, i, true) == (sparsemap_idx_t)i * 10);
@@ -168,7 +168,7 @@ main()
   sparsemap_init(sm2, buffer2, sizeof(buffer2));
   sparsemap_clear(sm2);
   for (int i = 0; i < 2048 * 2; i++) {
-    sparsemap_set(map, i, true);
+    sparsemap_set(map, i);
   }
   sparsemap_split(map, 2048, sm2);
   for (int i = 0; i < 2048; i++) {
@@ -185,7 +185,7 @@ main()
   sparsemap_init(sm2, buffer2, sizeof(buffer2));
   sparsemap_clear(map);
   for (int i = 0; i < 2048 * 3; i++) {
-    sparsemap_set(map, i, true);
+    sparsemap_set(map, i);
     assert(sparsemap_is_set(map, i) == true);
   }
   sparsemap_split(map, 64, sm2);

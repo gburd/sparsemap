@@ -377,7 +377,7 @@ _sparsemap_set(sparsemap_t **_map, sparsemap_idx_t idx, bool value)
 {
   sparsemap_t *map = *_map, *new_map = NULL;
   do {
-    sparsemap_idx_t l = sparsemap_set(map, idx, value);
+    sparsemap_idx_t l = sparsemap_assign(map, idx, value);
     if (l != idx) {
       if (errno == ENOSPC) {
         size_t capacity = sparsemap_get_capacity(map) + 64;

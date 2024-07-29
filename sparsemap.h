@@ -227,7 +227,7 @@ size_t sparsemap_get_capacity(sparsemap_t *map);
  */
 bool sparsemap_is_set(sparsemap_t *map, sparsemap_idx_t idx);
 
-/** @brief Sets the bit at index \b idx to \b value.
+/** @brief Assigns the bit at 0-based index \b idx to \b value.
  *
  * A sparsemap has a fixed size buffer with a capacity that can be exhausted by
  * when calling this function.  In such cases the return value is not equal to
@@ -237,10 +237,41 @@ bool sparsemap_is_set(sparsemap_t *map, sparsemap_idx_t idx);
  *
  * @param[in] map The sparsemap reference.
  * @param[in] idx The 0-based offset into the bitmap index to modify.
+ * @param[in] value When true idx set to 1, otherwise idx set to 0.
  * @returns the \b idx supplied on success or SPARSEMAP_IDX_MAX on error
  * with \b errno set to ENOSPC when the map is full.
  */
-sparsemap_idx_t sparsemap_set(sparsemap_t *map, sparsemap_idx_t idx, bool value);
+sparsemap_idx_t sparsemap_assign(sparsemap_t *map, sparsemap_idx_t idx, bool value);
+
+/** @brief Sets the bit at 0-based index \b idx to 1.
+ *
+ * A sparsemap has a fixed size buffer with a capacity that can be exhausted by
+ * when calling this function.  In such cases the return value is not equal to
+ * the provided \b idx and errno is set to ENOSPC.  In such situations it is
+ * possible to grow the data size and retry the set() operation under certain
+ * circumstances (see #sparsemap() and #sparsemap_set_data_size()).
+ *
+ * @param[in] map The sparsemap reference.
+ * @param[in] idx The 0-based offset into the bitmap index to set to 1;
+ * @returns the \b idx supplied on success or SPARSEMAP_IDX_MAX on error
+ * with \b errno set to ENOSPC when the map is full.
+ */
+sparsemap_idx_t sparsemap_set(sparsemap_t *map, sparsemap_idx_t idx);
+
+/** @brief Unsets the bit at 0-based index \b idx (sets it to 0).
+ *
+ * A sparsemap has a fixed size buffer with a capacity that can be exhausted by
+ * when calling this function.  In such cases the return value is not equal to
+ * the provided \b idx and errno is set to ENOSPC.  In such situations it is
+ * possible to grow the data size and retry the set() operation under certain
+ * circumstances (see #sparsemap() and #sparsemap_set_data_size()).
+ *
+ * @param[in] map The sparsemap reference.
+ * @param[in] idx The 0-based offset into the bitmap index to unset.
+ * @returns the \b idx supplied on success or SPARSEMAP_IDX_MAX on error
+ * with \b errno set to ENOSPC when the map is full.
+ */
+sparsemap_idx_t sparsemap_unset(sparsemap_t *map, sparsemap_idx_t idx);
 
 /** @brief Returns the byte size of the data buffer that has been used thus far.
  *

@@ -347,7 +347,7 @@ bitmap_from_uint32(sparsemap_t *map, uint32_t number)
 {
   for (int i = 0; i < 32; i++) {
     bool bit = number & (1 << i);
-    sparsemap_set(map, i, bit);
+    sparsemap_assign(map, i, bit);
   }
 }
 
@@ -398,7 +398,7 @@ sm_bitmap_from_uint64(sparsemap_t *map, int offset, uint64_t number)
 {
   for (int i = offset; i < 64; i++) {
     bool bit = number & ((uint64_t)1 << i);
-    sparsemap_set(map, i, bit);
+    sparsemap_assign(map, i, bit);
   }
 }
 
@@ -416,7 +416,7 @@ sm_add_span(sparsemap_t *map, int map_size, int span_length)
     }
   } while (attempts);
   for (sparsemap_idx_t i = placed_at; i < placed_at + span_length; i++) {
-    if (sparsemap_set(map, i, true) != i) {
+    if (sparsemap_set(map, i) != i) {
       return placed_at; // TODO error?
     }
   }

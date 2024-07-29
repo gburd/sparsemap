@@ -35,7 +35,7 @@ main(void)
 
   // set all the bits on in a random order
   for (i = 0; i < TEST_ARRAY_SIZE; i++) {
-    sparsemap_set(map, array[i], true);
+    sparsemap_set(map, array[i]);
     assert(sparsemap_is_set(map, array[i]) == true);
   }
 
@@ -55,7 +55,7 @@ main(void)
     shuffle(array, TEST_ARRAY_SIZE);
     print_spans(array, TEST_ARRAY_SIZE);
     for (i = 0; i < TEST_ARRAY_SIZE; i++) {
-      sparsemap_set(map, array[i], true);
+      sparsemap_set(map, array[i]);
       assert(sparsemap_is_set(map, array[i]) == true);
     }
     has_span(map, array, TEST_ARRAY_SIZE, (int)len);

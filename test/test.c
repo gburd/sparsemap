@@ -50,7 +50,7 @@ populate_map(sparsemap_t *map, int size, int max_value)
   shuffle(array, size);
   before = sparsemap_count(map);
   for (int i = 0; i < size; i++) {
-    sparsemap_set(map, array[i], true);
+    sparsemap_set(map, array[i]);
     bool set = sparsemap_is_set(map, array[i]);
     assert_true(set);
   }
@@ -206,7 +206,7 @@ test_api_clear(const MunitParameter params[], void *data)
 
   assert_ptr_not_null(map);
 
-  sparsemap_set(map, 42, true);
+  sparsemap_set(map, 42);
   assert_true(sparsemap_is_set(map, 42));
   sparsemap_clear(map);
   assert_false(sparsemap_is_set(map, 42));
@@ -315,7 +315,7 @@ test_api_remaining_capacity(const MunitParameter params[], void *data)
   int i = 0;
   double cap;
   do {
-    sparsemap_set(map, i++, true);
+    sparsemap_set(map, i++);
     cap = sparsemap_capacity_remaining(map);
   } while (cap > 1.0 && errno != ENOSPC);
   errno = 0;
@@ -328,7 +328,7 @@ test_api_remaining_capacity(const MunitParameter params[], void *data)
   i = 0;
   do {
     int p = munit_rand_int_range(0, 150000);
-    sparsemap_set(map, p, true);
+    sparsemap_set(map, p);
     i++;
     cap = sparsemap_capacity_remaining(map);
   } while (cap > 1.0 && errno != ENOSPC);
@@ -366,7 +366,7 @@ test_api_get_capacity(const MunitParameter params[], void *data)
 
   assert_ptr_not_null(map);
 
-  sparsemap_set(map, 42, true);
+  sparsemap_set(map, 42);
   assert_true(sparsemap_is_set(map, 42));
   assert_true(sparsemap_get_capacity(map) == 1024);
 
@@ -401,7 +401,7 @@ test_api_is_set(const MunitParameter params[], void *data)
 
   assert_ptr_not_null(map);
 
-  sparsemap_set(map, 42, true);
+  sparsemap_set(map, 42);
   assert_true(sparsemap_is_set(map, 42));
 
   return MUNIT_OK;
@@ -436,12 +436,12 @@ test_api_set(const MunitParameter params[], void *data)
 
   assert_false(sparsemap_is_set(map, 1));
   assert_false(sparsemap_is_set(map, 8192));
-  sparsemap_set(map, 1, true);
-  sparsemap_set(map, 8192, true);
+  sparsemap_set(map, 1);
+  sparsemap_set(map, 8192);
   assert_true(sparsemap_is_set(map, 1));
   assert_true(sparsemap_is_set(map, 8192));
-  sparsemap_set(map, 1, false);
-  sparsemap_set(map, 8192, false);
+  sparsemap_unset(map, 1);
+  sparsemap_unset(map, 8192);
   assert_false(sparsemap_is_set(map, 1));
   assert_false(sparsemap_is_set(map, 8192));
 
@@ -513,15 +513,15 @@ test_api_count(const MunitParameter params[], void *data)
   assert_true(sparsemap_count(map) == 1024);
 
   sparsemap_clear(map);
-  sparsemap_set(map, 0, true);
+  sparsemap_set(map, 0);
   assert_true(sparsemap_count(map) == 1);
 
-  sparsemap_set(map, 8675309, true);
+  sparsemap_set(map, 8675309);
   assert_true(sparsemap_count(map) == 2);
 
   sparsemap_clear(map);
   for (int i = 0; i < 512; i++) {
-    sparsemap_set(map, i + 13, true);
+    sparsemap_set(map, i + 13);
   }
   assert_true(sparsemap_count(map) == 512);
 
@@ -577,31 +577,31 @@ test_api_get_start_offset(const MunitParameter params[], void *data)
 
   assert_ptr_not_null(map);
 
-  sparsemap_set(map, 0, true);
+  sparsemap_set(map, 0);
   assert_true(sparsemap_get_starting_offset(map) == 0);
   sparsemap_clear(map);
 
-  sparsemap_set(map, 1, true);
+  sparsemap_set(map, 1);
   assert_true(sparsemap_get_starting_offset(map) == 1);
   sparsemap_clear(map);
 
-  sparsemap_set(map, 1025, true);
+  sparsemap_set(map, 1025);
   assert_true(sparsemap_get_starting_offset(map) == 1025);
   sparsemap_clear(map);
 
   for (int i = 0; i < 1000; i++) {
-    sparsemap_set(map, i, true);
+    sparsemap_set(map, i);
   }
   assert_true(sparsemap_get_starting_offset(map) == 0);
   sparsemap_clear(map);
 
   for (int i = 0; i < 1000; i++) {
-    sparsemap_set(map, i + 1024, true);
+    sparsemap_set(map, i + 1024);
   }
   assert_true(sparsemap_get_starting_offset(map) == 1024);
   sparsemap_clear(map);
 
-  sparsemap_set(map, 13012, true);
+  sparsemap_set(map, 13012);
   assert_true(sparsemap_get_starting_offset(map) == 13012);
 
   return MUNIT_OK;
@@ -634,20 +634,20 @@ test_api_get_end_offset(const MunitParameter params[], void *data)
 
   assert_ptr_not_null(map);
 
-  sparsemap_set(map, 0, true);
+  sparsemap_set(map, 0);
   assert_true(sparsemap_get_ending_offset(map) == 0);
   sparsemap_clear(map);
 
-  sparsemap_set(map, 0, true);
-  sparsemap_set(map, 1, true);
+  sparsemap_set(map, 0);
+  sparsemap_set(map, 1);
   assert_true(sparsemap_get_ending_offset(map) == 1);
   sparsemap_clear(map);
 
-  sparsemap_set(map, 0, true);
-  sparsemap_set(map, 67, true);
-  sparsemap_set(map, 1002, true);
-  sparsemap_set(map, 3087, true);
-  sparsemap_set(map, 13012, true);
+  sparsemap_set(map, 0);
+  sparsemap_set(map, 67);
+  sparsemap_set(map, 1002);
+  sparsemap_set(map, 3087);
+  sparsemap_set(map, 13012);
   assert_true(sparsemap_get_ending_offset(map) == 13012);
 
   return MUNIT_OK;
@@ -676,9 +676,9 @@ test_api_get_start_offset_roll(const MunitParameter params[], void *data)
   (void)params;
 
   for (sparsemap_idx_t i = 0; i < 10 * 2048; i++) {
-    sparsemap_set(map, i, true);
+    sparsemap_set(map, i);
     if (i > 2047) {
-      sparsemap_set(map, i - 2048, false);
+      sparsemap_unset(map, i - 2048);
       assert_true(sparsemap_get_starting_offset(map) == i - 2047);
       // printf("%d\t%d\t%zu\n", i, i - 2047, sparsemap_get_starting_offset(map));
     }
@@ -761,7 +761,7 @@ test_api_split(const MunitParameter params[], void *data)
     for (sparsemap_idx_t seg = 0; seg < 10 * 1024; seg += 1024) {
 
       for (sparsemap_idx_t i = 0; i < 1024; i++) {
-        assert_true(sparsemap_set(map, i + seg, true) == i + seg);
+        assert_true(sparsemap_set(map, i + seg) == i + seg);
       }
       for (sparsemap_idx_t i = 0; i < 1024; i++) {
         assert_true(sparsemap_is_set(map, i + seg));
@@ -785,7 +785,7 @@ test_api_split(const MunitParameter params[], void *data)
   }
 
   for (sparsemap_idx_t i = 0; i < 100; i++) {
-    assert_true(sparsemap_set(map, i, true) == i);
+    assert_true(sparsemap_set(map, i) == i);
   }
   for (sparsemap_idx_t i = 0; i < 100; i++) {
     assert_true(sparsemap_is_set(map, i));
@@ -808,7 +808,7 @@ test_api_split(const MunitParameter params[], void *data)
 
   sparsemap_init(&portion, buf, 1024);
   for (sparsemap_idx_t i = 0; i < 13; i++) {
-    assert_true(sparsemap_set(map, i + 24, true) == i + 24);
+    assert_true(sparsemap_set(map, i + 24) == i + 24);
   }
 
   offset = sparsemap_split(map, SPARSEMAP_IDX_MAX, &portion);
@@ -859,7 +859,7 @@ test_api_merge(const MunitParameter params[], void *data)
   sparsemap_merge(map, other);
 
   // Merge a single set bit in the first chunk into the empty map.
-  sparsemap_set(other, 0, true);
+  sparsemap_set(other, 0);
   sparsemap_merge(map, other);
   assert_true(sparsemap_is_set(other, 0));
   assert_true(sparsemap_is_set(map, 0));
@@ -867,32 +867,32 @@ test_api_merge(const MunitParameter params[], void *data)
   sparsemap_clear(other);
 
   // Merge two maps with the same single bit set.
-  sparsemap_set(map, 0, true);
-  sparsemap_set(other, 0, true);
+  sparsemap_set(map, 0);
+  sparsemap_set(other, 0);
   sparsemap_merge(map, other);
   assert_true(sparsemap_is_set(map, 0));
   sparsemap_clear(map);
   sparsemap_clear(other);
 
   // Merge an empty map with one that has the first bit set.
-  sparsemap_set(map, 0, true);
+  sparsemap_set(map, 0);
   sparsemap_merge(map, other);
   assert_true(sparsemap_is_set(map, 0));
   sparsemap_clear(map);
   sparsemap_clear(other);
 
-  sparsemap_set(other, 2049, true);
+  sparsemap_set(other, 2049);
   sparsemap_merge(map, other);
   assert_true(sparsemap_is_set(map, 2049));
   sparsemap_clear(map);
   sparsemap_clear(other);
 
-  sparsemap_set(other, 1, true);
-  sparsemap_set(other, 2049, true);
-  sparsemap_set(map, 2050, true);
-  sparsemap_set(other, 4097, true);
-  sparsemap_set(map, 6113, true);
-  sparsemap_set(other, 8193, true);
+  sparsemap_set(other, 1);
+  sparsemap_set(other, 2049);
+  sparsemap_set(map, 2050);
+  sparsemap_set(other, 4097);
+  sparsemap_set(map, 6113);
+  sparsemap_set(other, 8193);
   sparsemap_merge(map, other);
   assert_true(sparsemap_is_set(map, 1));
   assert_true(sparsemap_is_set(map, 2049));
@@ -909,11 +909,11 @@ test_api_merge(const MunitParameter params[], void *data)
   sparsemap_clear(map);
   sparsemap_clear(other);
 
-  sparsemap_set(map, 0, true);
-  sparsemap_set(map, 2048, true);
-  sparsemap_set(map, 8193, true);
+  sparsemap_set(map, 0);
+  sparsemap_set(map, 2048);
+  sparsemap_set(map, 8193);
   for (int i = 2049; i < 4096; i++) {
-    sparsemap_set(other, i, true);
+    sparsemap_set(other, i);
   }
   sparsemap_merge(map, other);
   assert(sparsemap_is_set(map, 0));
@@ -926,7 +926,7 @@ test_api_merge(const MunitParameter params[], void *data)
   sparsemap_clear(other);
 
   for (int i = 2049; i < 4096; i++) {
-    sparsemap_set(map, i, true);
+    sparsemap_set(map, i);
   }
   sparsemap_split(map, 2051, other);
   for (int i = 2049; i < 4096; i++) {
@@ -1053,9 +1053,9 @@ test_api_select_neg(const MunitParameter params[], void *data)
 
   assert_ptr_not_null(map);
 
-  sparsemap_set(map, 42, true);
-  sparsemap_set(map, 420, true);
-  sparsemap_set(map, 4200, true);
+  sparsemap_set(map, 42);
+  sparsemap_set(map, 420);
+  sparsemap_set(map, 4200);
 
   f = sparsemap_select(map, 0, false);
   assert_true(f == 0);
@@ -1100,7 +1100,7 @@ test_api_rank_true(const MunitParameter params[], void *data)
   assert_ptr_not_null(map);
 
   for (int i = 0; i < 10; i++) {
-    sparsemap_set(map, i, true);
+    sparsemap_set(map, i);
   }
   /* rank() is also 0-based, for consistency (and confusion sake); consider the
      range as [start, end] of [0, 9] counts the bits set in the first 10
@@ -1114,10 +1114,10 @@ test_api_rank_true(const MunitParameter params[], void *data)
   sparsemap_clear(map);
 
   for (int i = 0; i < 10000; i++) {
-    sparsemap_set(map, i, true);
+    sparsemap_set(map, i);
   }
   sparsemap_idx_t hole = 4999;
-  sparsemap_set(map, hole, false);
+  sparsemap_unset(map, hole);
   for (size_t i = 0; i < 10000; i++) {
     for (size_t j = i; j < 10000; j++) {
       size_t amt = (i > j) ? 0 : j - i + 1 - ((hole >= i && j >= hole) ? 1 : 0);
@@ -1167,7 +1167,7 @@ test_api_rank_false(const MunitParameter params[], void *data)
 
   // One chunk means not so empty now!
   sparsemap_idx_t hole = 4999;
-  sparsemap_set(map, hole, true);
+  sparsemap_set(map, hole);
   for (size_t i = 0; i < 10000; i++) {
     for (size_t j = i; j < 10000; j++) {
       int amt = (i > j) ? 0 : j - i + 1 - ((hole >= i && j >= hole) ? 1 : 0);
@@ -1177,8 +1177,8 @@ test_api_rank_false(const MunitParameter params[], void *data)
   }
 
   sparsemap_clear(map);
-  sparsemap_set(map, 1, true);
-  sparsemap_set(map, 11, true);
+  sparsemap_set(map, 1);
+  sparsemap_set(map, 11);
   r = sparsemap_rank(map, 0, 11, false);
   assert_true(r == 10);
 
@@ -1467,7 +1467,7 @@ test_scale_alternating(const MunitParameter params[], void *data)
 
   for (sparsemap_idx_t i = 0; i < (1000 * 8192); i++) {
     if (i % 2) {
-      if (sparsemap_set(map, i, true) != i) {
+      if (sparsemap_set(map, i) != i) {
         // printf("%zu\n", i);
         break;
       }
@@ -1523,7 +1523,7 @@ test_scale_spans_come_spans_go(const MunitParameter params[], void *data)
           assert_true(sparsemap_is_set(map, j) == true);
         }
         for (int j = b; j < s; j++) {
-          sparsemap_set(map, j, false);
+          sparsemap_unset(map, j);
         }
         for (int j = b; j < s; j++) {
           assert_true(sparsemap_is_set(map, j) == false);
@@ -1575,7 +1575,7 @@ test_scale_best_case(const MunitParameter params[], void *data)
   for (int i = 0; i < 172032; i++) {
     /* ANSI esc code to clear line, carrage return, then print on the same line */
     //    printf("\033[2K\r%d", i);
-    sparsemap_set(map, i, true);
+    sparsemap_set(map, i);
   }
 
   return MUNIT_OK;
@@ -1619,7 +1619,7 @@ test_scale_worst_case(const MunitParameter params[], void *data)
   for (int i = 0; i < 7744; i += 2) {
     /* ANSI esc code to clear line, carrage return, then print on the same line */
     //    printf("\033[2K\r%d", i);
-    sparsemap_set(map, i, true);
+    sparsemap_set(map, i);
   }
 
   return MUNIT_OK;

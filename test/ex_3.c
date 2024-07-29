@@ -62,11 +62,11 @@ main(void)
   // set all the bits on in a random order
   for (i = 0; i < 1024; i++) {
     __diag("set %d\n", array[i]);
-    sparsemap_set(map, array[i], true);
+    sparsemap_set(map, array[i]);
     assert(sparsemap_is_set(map, array[i]) == true);
   }
 
-  sparsemap_set(map, 1025, true);
+  sparsemap_set(map, 1025);
   assert(sparsemap_is_set(map, 1025) == true);
 
   return 0;
