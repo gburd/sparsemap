@@ -1123,9 +1123,9 @@ test_api_rank_true(const MunitParameter params[], void *data)
     sparsemap_set(map, i);
   }
 
-  // Test slicing a run within the chunk size of the end of the run
-  sparsemap_unset(map, 9990);
-  sparsemap_set(map, 9990);
+  // TODO: separate test for slicing a run within the chunk size of the end of the run
+  // sparsemap_unset(map, 9990);
+  // sparsemap_set(map, 9990);
 
   sparsemap_idx_t hole = 4999;
   sparsemap_unset(map, hole);

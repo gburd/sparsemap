@@ -75,6 +75,7 @@ typedef struct {
 
 // TODO remove me, this is only used for debugging.
 #ifdef SPARSEMAP_TESTING
+#include <inttypes.h>
 char *QCC_showSparsemap(void *value, int len);
 char *QCC_showChunk(void *value, int len);
 static char *_qcc_format_chunk(__sm_idx_t start, __sm_chunk_t *chunk, bool none);
@@ -1588,7 +1589,7 @@ sparsemap_unset(sparsemap_t *map, sparsemap_idx_t idx)
       if (aligned_idx == start) {
         /* The pivot is left aligned, there will be two chunks in total. */
         lr_start[1] = aligned_idx + SM_CHUNK_MAX_CAPACITY;
-        lr_end[1] = lr_start[1] + length - SM_CHUNK_MAX_CAPACITY;
+        lr_end[1] = aligned_idx + length - 1;
         /* Used later for constructing the remaining right chunk */
         lr[1] = (uint8_t *)((uintptr_t)buf + (SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) * 2));
         /* Calculate space needed in the buffer, reuse the left chunk bytes. */
@@ -1601,7 +1602,7 @@ sparsemap_unset(sparsemap_t *map, sparsemap_idx_t idx)
       if (aligned_idx + SM_CHUNK_MAX_CAPACITY >= start + length) {
         /* The pivot is right aligned, there will be two chunks in total. */
         if (aligned_idx + SM_CHUNK_MAX_CAPACITY >= length) {
-          /* The pivot extends beyond the end of the run length, shorten it. */
+          /* ... shorten it because it extends beyond the end of the run ... */
           size_t ovr = (aligned_idx + SM_CHUNK_MAX_CAPACITY) - (start + length);
           __sm_assert(ovr < SM_CHUNK_MAX_CAPACITY);
           // fprintf(stdout, "\n%ld\n%s\n", ovr, QCC_showChunk(pivot_p, 0));
@@ -1610,7 +1611,7 @@ sparsemap_unset(sparsemap_t *map, sparsemap_idx_t idx)
             pivot_chunk.m_data[0] &= ~(__sm_bitvec_t)0 >> ((ovr / SM_BITS_PER_VECTOR) * 2);
           }
           if (ovr % SM_BITS_PER_VECTOR) {
-            pivot_chunk.m_data[1] &= ~(~(__sm_bitvec_t)0 << ((length + 1) % SM_FLAGS_PER_INDEX));
+            pivot_chunk.m_data[1] &= ~(~(__sm_bitvec_t)0 << (length % SM_FLAGS_PER_INDEX));
           }
         }
         /* Record information necessary to construct the left chunk. */
@@ -1631,9 +1632,9 @@ sparsemap_unset(sparsemap_t *map, sparsemap_idx_t idx)
 
       /* The pivot's range is central, there will be three chunks in total. */
       lr_start[0] = start;
-      lr_end[0] = aligned_idx;
+      lr_end[0] = aligned_idx - 1;
       lr_start[1] = aligned_idx + SM_CHUNK_MAX_CAPACITY;
-      lr_end[1] = length;
+      lr_end[1] = length - 1;
       /* Move the pivot chunk over to make room for the new left chunk. */
       size_t amt = SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) * 2;
       memmove((uint8_t *)((uintptr_t)buf + amt), buf, amt);
@@ -1643,8 +1644,8 @@ sparsemap_unset(sparsemap_t *map, sparsemap_idx_t idx)
       lr[1] = (uint8_t *)((uintptr_t)buf + amt * 2);
       /* Calculate space needed in the buffer, reuse the left chunk bytes. */
       expand_by = (amt * 2) + sizeof(__sm_bitvec_t);
-      __sm_assert(lr_start[0] <= lr_end[0]);
-      __sm_assert(lr_start[1] <= lr_end[1]);
+      __sm_assert(lr_start[0] < lr_end[0]);
+      __sm_assert(lr_start[1] < lr_end[1]);
     } while (0);
 
     for (int i = 0; i < 2; i++) {
@@ -1655,19 +1656,22 @@ sparsemap_unset(sparsemap_t *map, sparsemap_idx_t idx)
         /* ... then, construct a chunk ... */
         __sm_chunk_init(&lrc, lr[i] + SM_SIZEOF_OVERHEAD);
         /* ... determine the type of chunk required ... */
-        if (lr_end[i] - lr_start[i] - 1 >= SM_CHUNK_MAX_CAPACITY) {
+        if (lr_end[i] - lr_start[i] + 1 > SM_CHUNK_MAX_CAPACITY) {
           /* ... we need a run-length encoding (RLE), chunk ... */
           __sm_chunk_set_rle(&lrc);
           /* ... now assign the length ... */
-          __sm_chunk_rle_set_length(&lrc, lr_end[i] - lr_start[i]);
+          __sm_chunk_rle_set_length(&lrc, lr_end[i] - lr_start[i] + 1);
           /* ... a few things differ left to right ... */
           if (i == 0) {
-            /* ... left: extend capacity to the start of the pivot chunk or, */
+            /* ... left: extend capacity to the start of the pivot chunk ... */
             __sm_chunk_rle_set_capacity(&lrc, aligned_idx - lr_start[i]);
-            /* ... and adjust the pivot chunk ... */
+            /* ... and adjust the pivot chunk and start of lr[1] in buf ... */
             size_t amt = SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) * 2;
             memmove((uint8_t *)((uintptr_t)buf + SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t)), (uint8_t *)((uintptr_t)buf + amt), amt);
             memset((uint8_t *)((uintptr_t)buf + SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) + amt), 0, sizeof(__sm_bitvec_t));
+            if (lr[1]) {
+              lr[1] = (uint8_t *)((uintptr_t)lr[1] - sizeof(__sm_bitvec_t));
+            }
           } else {
             /* ... right: extend capacity to max or the start of next chunk */
             size_t right_offset = offset + SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t);
@@ -1676,8 +1680,8 @@ sparsemap_unset(sparsemap_t *map, sparsemap_idx_t idx)
           /* ... and our size estimate shrinks. */
           expand_by -= sizeof(__sm_bitvec_t);
         } else {
-          /* ... we need a new sparse chunk ... */
-          size_t lrl = lr_end[i] - lr_start[i];
+          /* ... we need a new sparse chunk, how long should it be? ... */
+          size_t lrl = lr_end[i] - lr_start[i] + 1;
           /* ... how many flags can we mark as all ones? ... */
           if (lrl > SM_BITS_PER_VECTOR) {
             lrc.m_data[0] = ~(__sm_bitvec_t)0 >> ((SM_FLAGS_PER_INDEX - (lrl / SM_BITS_PER_VECTOR)) * 2);
@@ -1689,15 +1693,13 @@ sparsemap_unset(sparsemap_t *map, sparsemap_idx_t idx)
           } else {
             /* ... earlier size estimates were all pessimistic, adjust them ... */
             if (i == 0) {
-              /* ... slide the pivot chunk over a tad ... */
-              size_t amt = SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t);
-              uint8_t *loc = (uint8_t *)((uintptr_t)buf + amt);
-              // fprintf(stdout, "\n%s\n", QCC_showChunk((uint8_t *)((uintptr_t)loc + sizeof(__sm_bitvec_t)), 0));
-              memmove(loc, (uint8_t *)((uintptr_t)loc + sizeof(__sm_bitvec_t)), amt + sizeof(__sm_bitvec_t));
-              // fprintf(stdout, "\n%s\n", QCC_showChunk(loc, 0));
-              memset(((uint8_t *)(uintptr_t)buf + (2 * amt) + sizeof(__sm_bitvec_t)), 0, sizeof(__sm_bitvec_t));
-              // fprintf(stdout, "\n%s\n", QCC_showChunk(loc, 0));
-              lr[1] = (uint8_t *)((uintptr_t)lr[1] - sizeof(__sm_bitvec_t));
+              /* ... left: adjust the pivot chunk and start of lr[1] in buf ... */
+              size_t amt = SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) * 2;
+              memmove((uint8_t *)((uintptr_t)buf + SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t)), (uint8_t *)((uintptr_t)buf + amt), amt);
+              memset((uint8_t *)((uintptr_t)buf + SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) + amt), 0, sizeof(__sm_bitvec_t));
+              if (lr[1]) {
+                lr[1] = (uint8_t *)((uintptr_t)lr[1] - sizeof(__sm_bitvec_t));
+              }
             }
             /* ... if not, our size estimate shrinks ... */
             expand_by -= sizeof(__sm_bitvec_t);
@@ -1706,7 +1708,7 @@ sparsemap_unset(sparsemap_t *map, sparsemap_idx_t idx)
         __sm_when_diag({
           /* Sanity check the chunk */
           // fprintf(stdout, "\n%s\n", QCC_showChunk(lr[i], 0));
-          for (size_t j = 0; j < (lr_end[i] - lr_start[i]) - 1; j++) {
+          for (size_t j = 0; j < lr_end[i] - lr_start[i]; j++) {
             __sm_assert(__sm_chunk_is_set(&lrc, j) == true);
           }
         });
@@ -1767,7 +1769,7 @@ sparsemap_unset(sparsemap_t *map, sparsemap_idx_t idx)
   }
 
 done:;
-  __sm_when_diag({ fprintf(stdout, "\n++++++++++++++++++++++++++++++ unset: %lu\n%s\n", idx, QCC_showSparsemap(map, 0)); });
+  //__sm_when_diag({ fprintf(stdout, "\n++++++++++++++++++++++++++++++ unset: %lu\n%s\n", idx, QCC_showSparsemap(map, 0)); });
   return ret_idx;
 }
 
@@ -1995,13 +1997,13 @@ sparsemap_set(sparsemap_t *map, sparsemap_idx_t idx)
         if (__sm_chunk_is_rle(&adj) || adj.m_data[0] == ~(__sm_bitvec_t)0) {
           /* Does it align with this full sparse chunk? */
           size_t adj_length = __sm_chunk_get_run_length(&adj);
-          if (adj_start + adj_length == start - 1) {
+          if (adj_start + adj_length == start) {
             if (SM_CHUNK_MAX_CAPACITY + run_length < SM_CHUNK_RLE_MAX_LENGTH) {
               /* The stars have aligned, transform to RLE and combine them! */
               // __sm_when_diag({ fprintf(stdout, "\n%s\n", QCC_showChunk(adj_p, 0)); });
               // __sm_when_diag({ fprintf(stdout, "\n%s\n", QCC_showChunk(p, 0)); });
               __sm_chunk_set_rle(&adj);
-              __sm_chunk_rle_set_length(&adj, run_length + adj_length);
+              __sm_chunk_rle_set_length(&adj, adj_length + run_length);
               __sm_remove_data(map, offset, SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&chunk));
               __sm_chunk_rle_set_capacity(&adj, __sm_chunk_rle_capacity_limit(map, adj_start, adj_offset));
               __sm_set_chunk_count(map, __sm_get_chunk_count(map) - 1);
@@ -2049,7 +2051,7 @@ sparsemap_set(sparsemap_t *map, sparsemap_idx_t idx)
   }
 
 done:;
-  __sm_when_diag({ fprintf(stdout, "\n++++++++++++++++++++++++++++++ set: %lu\n%s\n", idx, QCC_showSparsemap(map, 0)); });
+  //__sm_when_diag({ fprintf(stdout, "\n++++++++++++++++++++++++++++++ set: %lu\n%s\n", idx, QCC_showSparsemap(map, 0)); });
   return ret_idx;
 }
 
@@ -2706,10 +2708,14 @@ _qcc_format_chunk(__sm_idx_t start, __sm_chunk_t *chunk, bool none)
     }
     str = buf + sprintf(buf, "%.10u\t%s%s", start, desc_str, mixed ? " :: " : "");
     for (int i = 0; i < mixed; i++) {
-      str += sprintf(str, "0x%.16lx%s", chunk->m_data[1 + i], i + 1 < mixed ? " " : "");
+      // str += sprintf(str, "0x%0lX%s", chunk->m_data[1 + i], i + 1 < mixed ? " " : "");
+      str += sprintf(str, "%#018" PRIx64 "%s", chunk->m_data[1 + i], i + 1 < mixed ? " " : "");
     }
   } else {
-    sprintf(buf, "%.10u\t1»%zu of %zu", start, __sm_chunk_rle_get_length(chunk), __sm_chunk_rle_get_capacity(chunk));
+    // sprintf(buf, "%.10u\t1»%zu of %zu", start, __sm_chunk_rle_get_length(chunk), __sm_chunk_rle_get_capacity(chunk));
+    size_t len = __sm_chunk_rle_get_length(chunk);
+    size_t cap = __sm_chunk_rle_get_capacity(chunk);
+    sprintf(buf, "%.10u\t[%u, %zu) %zu of %zu", start, start, start + len - 1, len, cap);
   }
   return buf;
 }
@@ -2729,21 +2735,21 @@ char *
 QCC_showSparsemap(void *value, int len)
 {
   sparsemap_t *map = (sparsemap_t *)value;
-  size_t count = __sm_get_chunk_count(map);
-  size_t clen = 0;
+  size_t off = 0, count = __sm_get_chunk_count(map);
   char *str, *buf = NULL;
 
   if (count > 0) {
-    uint8_t *p = __sm_get_chunk_data(map, 0);
+    uint8_t *s, *p = __sm_get_chunk_data(map, 0);
     for (size_t i = 0; i < count; i++) {
       __sm_chunk_t chunk;
       __sm_idx_t start = *(__sm_idx_t *)p;
       __sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
       char *c = _qcc_format_chunk(start, &chunk, true);
       if (buf) {
-        char *new = realloc(buf, strlen(buf) + strlen(c) + 2);
+        char *new = realloc(buf, strlen(buf) + strlen(c) + 24);
         if (new) {
           buf = new;
+          // sprintf(str, "\n[%lu - %lu]\t%s", i, off, c);
           sprintf(str, "\n%s", c);
           str += strlen(c);
         }
@@ -2751,8 +2757,8 @@ QCC_showSparsemap(void *value, int len)
         buf = c;
         str = buf + strlen(c);
       }
-      p += SM_SIZEOF_OVERHEAD;
-      p += __sm_chunk_get_size(&chunk);
+      p += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&chunk);
+      off = p - s;
     }
   }
 
