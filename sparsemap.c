@@ -867,7 +867,7 @@ __sm_chunk_select(__sm_chunk_t *chunk, ssize_t n, ssize_t *offset, bool value)
  *
  * @param[in] chunk The chunk in question.
  * @param[in,out] begin Decreases \b offset by the number of bits ignored,
- * at most by SM_BITS_PER_VECTOR.
+ * at most by SM_BITS_PER_VECTOR if sparse or SM_CHUNK_RLE_MAX_CAPACITY if RLE.
  * @param[in] end The ending value of the range (inclusive) to count.
  * @param[out] pos_in_chunk The position of the last bit examined in this chunk,
  * always
@@ -883,113 +883,147 @@ static size_t
 __sm_chunk_rank(__sm_chunk_t *chunk, size_t *begin, size_t end, size_t *pos_in_chunk, __sm_bitvec_t *last_bitvec, bool value)
 {
   size_t ret = 0;
+  size_t capacity = __sm_chunk_get_capacity(chunk);
 
   *pos_in_chunk = 0;
 
-  /* A chunk can only hold at most SM_CHUNK_MAX_CAPACITY bits, so if
-   * begin is larger than that, we're basically done. */
-  if (*begin >= SM_CHUNK_MAX_CAPACITY) {
-    *pos_in_chunk = SM_CHUNK_MAX_CAPACITY;
-    *begin -= SM_CHUNK_MAX_CAPACITY;
+  /* A chunk can only hold at most "capacity" bits, so if begin is larger than
+   * that, we're done. */
+  if (*begin >= capacity) {
+    *pos_in_chunk = capacity;
+    *begin -= capacity;
     return 0;
   }
 
-  register uint8_t *p = (uint8_t *)chunk->m_data;
-  for (size_t i = 0; i < sizeof(__sm_bitvec_t); i++, p++) {
-    for (int j = 0; j < SM_FLAGS_PER_INDEX_BYTE; j++) {
-      size_t flags = SM_CHUNK_GET_FLAGS(*p, j);
-      if (flags == SM_PAYLOAD_NONE) {
-        continue;
+  if (SM_IS_CHUNK_RLE(chunk)) {
+    /* We're an RLE chunk.  When ranking it is inclusive and 0-based so the
+     * rank over a run of >= 10 beginning at 0 ending at 9 is 10. */
+    size_t ce = __sm_chunk_rle_get_length(chunk) - 1;
+    if (value) {
+      if (*begin > ce) {
+        *begin -= ce;
+      } else {
+        if (ce >= end) {
+          ret = end - *begin + 1;
+        } else {
+          ret = ce - *begin + 1;
+        }
       }
-      if (flags == SM_PAYLOAD_ZEROS) {
-        *last_bitvec = 0;
-        if (end >= SM_BITS_PER_VECTOR) {
-          *pos_in_chunk += SM_BITS_PER_VECTOR;
-          end -= SM_BITS_PER_VECTOR;
-          if (*begin >= SM_BITS_PER_VECTOR) {
-            *begin = *begin - SM_BITS_PER_VECTOR;
+      *begin = 0;
+      *pos_in_chunk = (end >= capacity ? capacity : end) - 1;
+    } else {
+      // TODO... rethink below...
+      ce -= *begin;
+      if (end > ce) {
+        if (end < capacity) {
+          ret = end - ce;
+          *pos_in_chunk = end;
+        } else {
+          ret = end - capacity;
+          *pos_in_chunk = capacity;
+        }
+      }
+      *begin = 0;
+    }
+  } else {
+    /* We're a sparse chunk. */
+    register uint8_t *p = (uint8_t *)chunk->m_data;
+    for (size_t i = 0; i < sizeof(__sm_bitvec_t); i++, p++) {
+      for (int j = 0; j < SM_FLAGS_PER_INDEX_BYTE; j++) {
+        size_t flags = SM_CHUNK_GET_FLAGS(*p, j);
+        if (flags == SM_PAYLOAD_NONE) {
+          continue;
+        }
+        if (flags == SM_PAYLOAD_ZEROS) {
+          *last_bitvec = 0;
+          if (end >= SM_BITS_PER_VECTOR) {
+            *pos_in_chunk += SM_BITS_PER_VECTOR;
+            end -= SM_BITS_PER_VECTOR;
+            if (*begin >= SM_BITS_PER_VECTOR) {
+              *begin = *begin - SM_BITS_PER_VECTOR;
+            } else {
+              if (value == false) {
+                ret += SM_BITS_PER_VECTOR - *begin;
+              }
+              *begin = 0;
+            }
           } else {
+            *pos_in_chunk += end + 1;
             if (value == false) {
-              ret += SM_BITS_PER_VECTOR - *begin;
-            }
-            *begin = 0;
-          }
-        } else {
-          *pos_in_chunk += end + 1;
-          if (value == false) {
-            if (*begin > end) {
-              *begin = *begin - end;
+              if (*begin > end) {
+                *begin = *begin - end;
+              } else {
+                ret += end + 1 - *begin;
+                *begin = 0;
+                return ret;
+              }
             } else {
-              ret += end + 1 - *begin;
-              *begin = 0;
               return ret;
             }
-          } else {
-            return ret;
           }
-        }
-      } else if (flags == SM_PAYLOAD_ONES) {
-        *last_bitvec = UINT64_MAX;
-        if (end >= SM_BITS_PER_VECTOR) {
-          *pos_in_chunk += SM_BITS_PER_VECTOR;
-          end -= SM_BITS_PER_VECTOR;
-          if (*begin >= SM_BITS_PER_VECTOR) {
-            *begin = *begin - SM_BITS_PER_VECTOR;
+        } else if (flags == SM_PAYLOAD_ONES) {
+          *last_bitvec = UINT64_MAX;
+          if (end >= SM_BITS_PER_VECTOR) {
+            *pos_in_chunk += SM_BITS_PER_VECTOR;
+            end -= SM_BITS_PER_VECTOR;
+            if (*begin >= SM_BITS_PER_VECTOR) {
+              *begin = *begin - SM_BITS_PER_VECTOR;
+            } else {
+              if (value == true) {
+                ret += SM_BITS_PER_VECTOR - *begin;
+              }
+              *begin = 0;
+            }
           } else {
+            *pos_in_chunk += end + 1;
             if (value == true) {
-              ret += SM_BITS_PER_VECTOR - *begin;
-            }
-            *begin = 0;
-          }
-        } else {
-          *pos_in_chunk += end + 1;
-          if (value == true) {
-            if (*begin > end) {
-              *begin = *begin - end;
+              if (*begin > end) {
+                *begin = *begin - end;
+              } else {
+                ret += end + 1 - *begin;
+                *begin = 0;
+                return ret;
+              }
             } else {
-              ret += end + 1 - *begin;
-              *begin = 0;
               return ret;
             }
+          }
+        } else if (flags == SM_PAYLOAD_MIXED) {
+          __sm_bitvec_t w = chunk->m_data[1 + __sm_chunk_get_position(chunk, i * SM_FLAGS_PER_INDEX_BYTE + j)];
+          if (end >= SM_BITS_PER_VECTOR) {
+            *pos_in_chunk += SM_BITS_PER_VECTOR;
+            end -= SM_BITS_PER_VECTOR;
+            uint64_t mask = *begin == 0 ? UINT64_MAX : ~(UINT64_MAX >> (SM_BITS_PER_VECTOR - (*begin >= 64 ? 64 : *begin)));
+            __sm_bitvec_t mw;
+            if (value == true) {
+              mw = w & mask;
+            } else {
+              mw = ~w & mask;
+            }
+            size_t pc = popcountll(mw);
+            ret += pc;
+            *begin = (*begin > SM_BITS_PER_VECTOR) ? *begin - SM_BITS_PER_VECTOR : 0;
           } else {
+            *pos_in_chunk += end + 1;
+            __sm_bitvec_t mw;
+            uint64_t mask;
+            uint64_t end_mask = (end == 63) ? UINT64_MAX : ((uint64_t)1 << (end + 1)) - 1;
+            uint64_t begin_mask = *begin == 0 ? UINT64_MAX : ~(UINT64_MAX >> (SM_BITS_PER_VECTOR - (*begin >= 64 ? 64 : *begin)));
+            /* To count the set bits we need to mask off the portion of the vector that we need
+             * to count then call popcount().  So, let's create a mask for the range between
+             * begin and end inclusive [*begin, end]. */
+            mask = end_mask & begin_mask;
+            if (value) {
+              mw = w & mask;
+            } else {
+              mw = ~w & mask;
+            }
+            int pc = popcountll(mw);
+            ret += pc;
+            *last_bitvec = mw >> ((*begin > 63) ? 63 : *begin);
+            *begin = *begin > end ? *begin - end + 1 : 0;
             return ret;
           }
-        }
-      } else if (flags == SM_PAYLOAD_MIXED) {
-        __sm_bitvec_t w = chunk->m_data[1 + __sm_chunk_get_position(chunk, i * SM_FLAGS_PER_INDEX_BYTE + j)];
-        if (end >= SM_BITS_PER_VECTOR) {
-          *pos_in_chunk += SM_BITS_PER_VECTOR;
-          end -= SM_BITS_PER_VECTOR;
-          uint64_t mask = *begin == 0 ? UINT64_MAX : ~(UINT64_MAX >> (SM_BITS_PER_VECTOR - (*begin >= 64 ? 64 : *begin)));
-          __sm_bitvec_t mw;
-          if (value == true) {
-            mw = w & mask;
-          } else {
-            mw = ~w & mask;
-          }
-          size_t pc = popcountll(mw);
-          ret += pc;
-          *begin = (*begin > SM_BITS_PER_VECTOR) ? *begin - SM_BITS_PER_VECTOR : 0;
-        } else {
-          *pos_in_chunk += end + 1;
-          __sm_bitvec_t mw;
-          uint64_t mask;
-          uint64_t end_mask = (end == 63) ? UINT64_MAX : ((uint64_t)1 << (end + 1)) - 1;
-          uint64_t begin_mask = *begin == 0 ? UINT64_MAX : ~(UINT64_MAX >> (SM_BITS_PER_VECTOR - (*begin >= 64 ? 64 : *begin)));
-          /* To count the set bits we need to mask off the portion of the vector that we need
-           * to count then call popcount().  So, let's create a mask for the range between
-           * begin and end inclusive [*begin, end]. */
-          mask = end_mask & begin_mask;
-          if (value) {
-            mw = w & mask;
-          } else {
-            mw = ~w & mask;
-          }
-          int pc = popcountll(mw);
-          ret += pc;
-          *last_bitvec = mw >> ((*begin > 63) ? 63 : *begin);
-          *begin = *begin > end ? *begin - end + 1 : 0;
-          return ret;
         }
       }
     }
@@ -2512,6 +2546,10 @@ __sm_rank_vec(sparsemap_t *map, size_t begin, size_t end, bool value, __sm_bitve
     return 0;
   }
 
+  if (begin == end) {
+    return sparsemap_is_set(map, begin) == value ? 1 : 0;
+  }
+
   count = __sm_get_chunk_count(map);
 
   if (count == 0) {
@@ -2522,7 +2560,6 @@ __sm_rank_vec(sparsemap_t *map, size_t begin, size_t end, bool value, __sm_bitve
   }
 
   p = __sm_get_chunk_data(map, 0);
-
   for (size_t i = 0; i < count; i++) {
     __sm_idx_t start = *(__sm_idx_t *)p;
     /* [prev, start + pos), prev is the last bit examined 0-based. */
@@ -2584,7 +2621,7 @@ __sm_rank_vec(sparsemap_t *map, size_t begin, size_t end, bool value, __sm_bitve
     __sm_chunk_t chunk;
     __sm_chunk_init(&chunk, p);
 
-    /* Count all the set/unset inside this chunk. */
+    /* Count all the set/unset inside this chunk within the range. */
     amt = __sm_chunk_rank(&chunk, &begin, end - start, &pos, vec, value);
     result += amt;
     p += __sm_chunk_get_size(&chunk);
@@ -2601,7 +2638,7 @@ __sm_rank_vec(sparsemap_t *map, size_t begin, size_t end, bool value, __sm_bitve
 }
 
 size_t
-sparsemap_rank(sparsemap_t *map, size_t begin, size_t end, bool value)
+sparsemap_rank(sparsemap_t *map, sparsemap_idx_t begin, sparsemap_idx_t end, bool value)
 {
   __sm_bitvec_t vec;
   return __sm_rank_vec(map, begin, end, value, &vec);

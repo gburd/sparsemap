@@ -1133,6 +1133,10 @@ test_api_rank_true(const MunitParameter params[], void *data)
     for (size_t j = i; j < 10000; j++) {
       size_t amt = (i > j) ? 0 : j - i + 1 - ((hole >= i && j >= hole) ? 1 : 0);
       size_t r = sparsemap_rank(map, i, j, true);
+      if (r != amt) {
+        fprintf(stdout, "\n%s\n", QCC_showSparsemap(map, 0));
+        sparsemap_rank(map, i, j, true);
+      }
       assert_true(r == amt);
     }
   }
