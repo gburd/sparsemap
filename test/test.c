@@ -1133,10 +1133,10 @@ test_api_rank_true(const MunitParameter params[], void *data)
     for (size_t j = i; j < 10000; j++) {
       size_t amt = (i > j) ? 0 : j - i + 1 - ((hole >= i && j >= hole) ? 1 : 0);
       size_t r = sparsemap_rank(map, i, j, true);
-      if (r != amt) {
-        fprintf(stdout, "\n%s\n", QCC_showSparsemap(map, 0));
-        sparsemap_rank(map, i, j, true);
-      }
+      // if (r != amt) {
+      //   fprintf(stdout, "\n%s\n", QCC_showSparsemap(map, 0));
+      //   sparsemap_rank(map, i, j, true);
+      // }
       assert_true(r == amt);
     }
   }
@@ -1166,7 +1166,7 @@ test_api_rank_false_tear_down(void *fixture)
 static MunitResult
 test_api_rank_false(const MunitParameter params[], void *data)
 {
-  int r;
+  size_t r;
   sparsemap_t *map = (sparsemap_t *)data;
   (void)params;
 
@@ -1185,11 +1185,29 @@ test_api_rank_false(const MunitParameter params[], void *data)
   sparsemap_set(map, hole);
   for (size_t i = 0; i < 10000; i++) {
     for (size_t j = i; j < 10000; j++) {
-      int amt = (i > j) ? 0 : j - i + 1 - ((hole >= i && j >= hole) ? 1 : 0);
+      size_t amt = (i > j) ? 0 : j - i + 1 - ((hole >= i && j >= hole) ? 1 : 0);
       r = sparsemap_rank(map, i, j, false);
       assert_true(r == amt);
     }
   }
+
+  // RLE
+  for (size_t i = 0; i < 10000; i++) {
+    sparsemap_set(map, i);
+  }
+  r = sparsemap_rank(map, 9990, 10010, false);
+  // if (r != 10) {
+  //   fprintf(stdout, "\n%s\n", QCC_showSparsemap(map, 0));
+  //   sparsemap_rank(map, 9990, 10010, true);
+  // }
+  assert_true(r == 10);
+
+  r = sparsemap_rank(map, 9990, 4294967295, false);
+  // if (r != 4294957295) {
+  //   fprintf(stdout, "\n%s\n", QCC_showSparsemap(map, 0));
+  //   sparsemap_rank(map, 9990, 4294967295, true);
+  // }
+  assert_true(r == 4294957295);
 
   sparsemap_clear(map);
   sparsemap_set(map, 1);
