@@ -599,20 +599,30 @@ __sm_chunk_is_set(__sm_chunk_t *chunk, size_t idx)
   }
 }
 
-/**
- * TODO
+/** @brief Clears bit at the chunk-relative idx.
+ *
+ * @param[in] chunk The chunk in question.
+ * @param[in] idx The chunk-relative 0-based index to clear.
+ * @param[in,out] pos When non-zero there is a vector available for MIXED
+ * mutations, no need to "grow".  When zero then set to the position in the
+ * buffer where there needs to be a new vector to grow into.
+ * @return SM_OK, GROW, or SHRINK; grow indicates the need for an additional
+ * vector (transitioning from ZEROS or ONES to MIXED), shrink that the
+ * additional mixed vector isn't needed anymore (transitioning from MIXED to
+ * ZEROS or ONES).
  */
 static int
 __sm_chunk_clr_bit(__sm_chunk_t *chunk, sparsemap_idx_t idx, size_t *pos)
 {
-  /* Where in the descriptor does this idx fall, which flag should we examine? */
+  __sm_bitvec_t w;
   size_t bv = idx / SM_BITS_PER_VECTOR;
+
   __sm_assert(bv < SM_FLAGS_PER_INDEX);
 
   switch (SM_CHUNK_GET_FLAGS(*chunk->m_data, bv)) {
-    __sm_bitvec_t w;
   case SM_PAYLOAD_ZEROS:
     /* The bit is already clear, no-op. */
+    *pos = 0;
     return SM_OK;
     break;
   case SM_PAYLOAD_ONES:
@@ -632,7 +642,7 @@ __sm_chunk_clr_bit(__sm_chunk_t *chunk, sparsemap_idx_t idx, size_t *pos)
     *pos = 1 + __sm_chunk_get_position(chunk, bv);
     w = chunk->m_data[*pos];
     w &= ~((__sm_bitvec_t)1 << (idx % SM_BITS_PER_VECTOR));
-    /* Did the vector transition from mixed to all zeros? Remove it if so. */
+    /* Did the vector transition from mixed to all zeros? If so, remove it. */
     if (w == 0) {
       SM_CHUNK_SET_FLAGS(*chunk->m_data, bv, SM_PAYLOAD_ZEROS);
       return SM_NEEDS_TO_SHRINK;
@@ -652,8 +662,17 @@ __sm_chunk_clr_bit(__sm_chunk_t *chunk, sparsemap_idx_t idx, size_t *pos)
   return SM_OK;
 }
 
-/*
- * TODO
+/** @brief Sets a bit at the chunk-relative idx.
+ *
+ * @param[in] chunk The chunk in question.
+ * @param[in] idx The chunk-relative 0-based index to set.
+ * @param[in,out] pos When non-zero there is a vector available for MIXED
+ * mutations, no need to "grow".  When zero then set to the position in the
+ * buffer where there needs to be a new vector to grow into.
+ * @return SM_OK, GROW, or SHRINK; grow indicates the need for an additional
+ * vector (transitioning from ZEROS or ONES to MIXED), shrink that the
+ * additional mixed vector isn't needed anymore (transitioning from MIXED to
+ * ZEROS or ONES).
  */
 static int
 __sm_chunk_set_bit(__sm_chunk_t *chunk, sparsemap_idx_t idx, size_t *pos)
@@ -663,10 +682,10 @@ __sm_chunk_set_bit(__sm_chunk_t *chunk, sparsemap_idx_t idx, size_t *pos)
   __sm_assert(bv < SM_FLAGS_PER_INDEX);
   __sm_assert(__sm_chunk_is_rle(chunk) == false);
 
-  unsigned int flags = SM_CHUNK_GET_FLAGS(*chunk->m_data, bv);
-  switch (flags) {
+  switch (SM_CHUNK_GET_FLAGS(*chunk->m_data, bv)) {
   case SM_PAYLOAD_ONES:
     /* The bit is already set, no-op. */
+    *pos = 0;
     return SM_OK;
     break;
   case SM_PAYLOAD_ZEROS:
@@ -681,7 +700,7 @@ __sm_chunk_set_bit(__sm_chunk_t *chunk, sparsemap_idx_t idx, size_t *pos)
     *pos = 1 + __sm_chunk_get_position(chunk, bv);
     __sm_bitvec_t w = chunk->m_data[*pos];
     w |= (__sm_bitvec_t)1 << (idx % SM_BITS_PER_VECTOR);
-    /* Did the vector transition from mixed to all ones? Remove it if so. */
+    /* Did the vector transition from mixed to all ones? If so, remove it. */
     if (w == ~(__sm_bitvec_t)0) {
       SM_CHUNK_SET_FLAGS(*chunk->m_data, bv, SM_PAYLOAD_ONES);
       return SM_NEEDS_TO_SHRINK;
@@ -698,99 +717,6 @@ __sm_chunk_set_bit(__sm_chunk_t *chunk, sparsemap_idx_t idx, size_t *pos)
 #endif
     break;
   }
-  return SM_OK;
-}
-
-/** @brief Assigns a state to a bit in the chunk (set or unset).
- *
- * Sets the value of a bit at index \b idx. Then updates position \b pos to the
- * position of the __sm_bitvec_t which is inserted/deleted and \b fill - the value
- * of the fill word (used when growing).
- *
- * @param[in] chunk The chunk in question.
- * @param[in] idx The 0-based index into this chunk to mutate.
- * @param[in] value The new state for the \b idx'th bit.
- * @param[in,out] pos The position of the __sm_bitvec_t inserted/deleted within the chunk.
- * @param[in,out] fill The value of the fill word (when growing).
- * @param[in] retired When not retried, grow the chunk by a bitvec.
- * @returns \b SM_NEEDS_TO_GROW, \b SM_NEEDS_TO_SHRINK, or \b SM_OK
- * @note, the caller MUST to perform the relevant actions and call set() again,
- * this time with \b retried = true.
- */
-// TODO remove me... use __sm_chunk_bit_set/unset()
-static int
-__sm_chunk_set(__sm_chunk_t *chunk, size_t idx, bool value, size_t *pos, __sm_bitvec_t *fill, bool retried)
-{
-  /* Where in the descriptor does this idx fall, which flag should we examine? */
-  size_t bv = idx / SM_BITS_PER_VECTOR;
-  __sm_assert(bv < SM_FLAGS_PER_INDEX);
-
-  size_t flags = SM_CHUNK_GET_FLAGS(*chunk->m_data, bv);
-  __sm_assert(flags != SM_PAYLOAD_NONE);
-  if (flags == SM_PAYLOAD_ZEROS) {
-    /* Easy - set bit to 0 in a __sm_bitvec_t of zeroes. */
-    if (value == false) {
-      *pos = 0;
-      *fill = 0;
-      return SM_OK;
-    }
-    /* The sparsemap must grow this __sm_chunk_t by one additional __sm_bitvec_t,
-     * then try again. */
-    if (!retried) {
-      *pos = 1 + __sm_chunk_get_position(chunk, bv);
-      *fill = 0;
-      return SM_NEEDS_TO_GROW;
-    }
-    /* New flags are 2#10 meaning SM_PAYLOAD_MIXED. Currently, flags are set
-     * to 2#00, so 2#00 | 2#10 = 2#10. */
-    *chunk->m_data |= ((__sm_bitvec_t)SM_PAYLOAD_MIXED << (bv * 2));
-    /* FALLTHROUGH */
-  } else if (flags == SM_PAYLOAD_ONES) {
-    /* Easy - set bit to 1 in a __sm_bitvec_t of ones. */
-    if (value == true) {
-      *pos = 0;
-      *fill = 0;
-      return SM_OK;
-    }
-    /* The sparsemap must grow this __sm_chunk_t by one additional __sm_bitvec_t,
-       then try again. */
-    if (!retried) {
-      *pos = 1 + __sm_chunk_get_position(chunk, bv);
-      *fill = ~(__sm_bitvec_t)0;
-      return SM_NEEDS_TO_GROW;
-    }
-    /* New flags are 2#10 meaning SM_PAYLOAD_MIXED. Currently, flags are
-       set to 2#11, so 2#11 ^ 2#01 = 2#10. */
-    chunk->m_data[0] ^= ((__sm_bitvec_t)SM_PAYLOAD_NONE << (bv * 2));
-    /* FALLTHROUGH */
-  }
-
-  /* Now flip the bit. */
-  size_t position = 1 + __sm_chunk_get_position(chunk, bv);
-  __sm_bitvec_t w = chunk->m_data[position];
-  if (value) {
-    w |= (__sm_bitvec_t)1 << (idx % SM_BITS_PER_VECTOR);
-  } else {
-    w &= ~((__sm_bitvec_t)1 << (idx % SM_BITS_PER_VECTOR));
-  }
-
-  /* If this __sm_bitvec_t is now all zeroes or ones then we can remove it. */
-  if (w == 0) {
-    chunk->m_data[0] &= ~((__sm_bitvec_t)SM_PAYLOAD_ONES << (bv * 2));
-    *pos = position;
-    *fill = 0;
-    return SM_NEEDS_TO_SHRINK;
-  }
-  if (w == ~(__sm_bitvec_t)0) {
-    chunk->m_data[0] |= (__sm_bitvec_t)SM_PAYLOAD_ONES << (bv * 2);
-    *pos = position;
-    *fill = 0;
-    return SM_NEEDS_TO_SHRINK;
-  }
-
-  chunk->m_data[position] = w;
-  *pos = 0;
-  *fill = 0;
   return SM_OK;
 }
 
@@ -1725,14 +1651,13 @@ void
 __sm_merge_chunk(sparsemap_t *map, sparsemap_idx_t src_start, sparsemap_idx_t dst_start, sparsemap_idx_t capacity, __sm_chunk_t *dst_chunk,
   __sm_chunk_t *src_chunk)
 {
+  __sm_bitvec_t fill = 0;
   ssize_t delta = src_start - dst_start;
   for (sparsemap_idx_t j = 0; j < capacity; j++) {
     ssize_t offset = __sm_get_chunk_offset(map, src_start + j);
     if (__sm_chunk_is_set(src_chunk, j) && !__sm_chunk_is_set(dst_chunk, j + delta)) {
-      size_t position;
-      __sm_bitvec_t fill;
-      // TODO: switch (__sm_chunk_clr_bit(dst_chunk, j + delta, &position)) {
-      switch (__sm_chunk_set(dst_chunk, j + delta, true, &position, &fill, false)) {
+      size_t position = 0;
+      switch (__sm_chunk_set_bit(dst_chunk, j + delta, &position)) {
       case SM_NEEDS_TO_GROW:
         offset += SM_SIZEOF_OVERHEAD + position * sizeof(__sm_bitvec_t);
         __sm_insert_data(map, offset, (uint8_t *)&fill, sizeof(__sm_bitvec_t));
