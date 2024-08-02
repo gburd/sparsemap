@@ -72,6 +72,11 @@ typedef struct {
   __sm_bitvec_t *m_data;
 } __sm_chunk_t;
 
+typedef struct {
+  size_t rem;
+  size_t pos;
+} __sm_chunk_rank_t;
+
 // NOTE: When using in production feel free to remove this section of test code.
 #ifdef SPARSEMAP_TESTING
 #include <inttypes.h>
@@ -129,6 +134,33 @@ enum __SM_CHUNK_INFO {
   /* return code for set(): needs to shrink this __sm_chunk_t */
   SM_NEEDS_TO_SHRINK = 2
 };
+
+/* Used when separating a RLE chunk into 2-3 chunks */
+typedef struct {
+  struct {
+    uint8_t *p;          // pointer into m_data
+    size_t offset;       // offset in m_data
+    __sm_chunk_t *chunk; // chunk to be split
+    __sm_idx_t start;    // start of chunk
+    size_t length;       // initial length of chunk
+    size_t capacity;     // the capacity of this RLE chunk
+  } target;
+
+  struct {
+    uint8_t *p;          // location in buf
+    sparsemap_idx_t idx; // chunk-aligned to idx
+  } pivot;
+
+  struct {
+    sparsemap_idx_t start;
+    sparsemap_idx_t end;
+    uint8_t *p;
+    __sm_chunk_t c;
+  } ex[2]; // 0 is left, 1 is right
+
+  uint8_t buf[(SM_SIZEOF_OVERHEAD * 3) + (sizeof(__sm_bitvec_t) * 6)];
+  size_t expand_by;
+} __sm_chunk_sep_t;
 
 #define SM_ENOUGH_SPACE(need)                          \
   do {                                                 \
@@ -853,11 +885,6 @@ __sm_chunk_select(__sm_chunk_t *chunk, ssize_t n, ssize_t *offset, bool value)
   return ret;
 }
 
-typedef struct {
-  size_t rem;
-  size_t pos;
-} __sm_chunk_rank_t;
-
 /**
  * @brief Ranks bits within the range [from, to].
  *
@@ -1200,6 +1227,21 @@ __sm_get_chunk_end(sparsemap_t *map)
   return p;
 }
 
+/** @brief Aligns to SM_CHUNK_CAPACITY a given index \b idx.
+ *
+ * Due to integer division discarding the remainder, the final return value is
+ * always rounded down to the nearest multiple of SM_CHUNK_MAX_CAPACITY.
+ *
+ * @param[in] idx The index to align.
+ * @returns the aligned offset (aligned to __sm_chunk_t capacity)
+ */
+static __sm_idx_t
+__sm_get_chunk_aligned_offset(size_t idx)
+{
+  const size_t capacity = SM_CHUNK_MAX_CAPACITY;
+  return (idx / capacity) * capacity;
+}
+
 /** @brief Provides the byte size amount of \b m_data consumed.
  *
  * @param[in] map The sparsemap_t in question.
@@ -1219,21 +1261,6 @@ __sm_get_size_impl(sparsemap_t *map)
     p += __sm_chunk_get_size(&chunk);
   }
   return SM_SIZEOF_OVERHEAD + p - start;
-}
-
-/** @brief Aligns to SM_CHUNK_CAPACITY a given index \b idx.
- *
- * Due to integer division discarding the remainder, the final return value is
- * always rounded down to the nearest multiple of SM_CHUNK_MAX_CAPACITY.
- *
- * @param[in] idx The index to align.
- * @returns the aligned offset (aligned to __sm_chunk_t capacity)
- */
-static __sm_idx_t
-__sm_get_chunk_aligned_offset(size_t idx)
-{
-  const size_t capacity = SM_CHUNK_MAX_CAPACITY;
-  return (idx / capacity) * capacity;
 }
 
 /** @brief Provides the byte offset of the chunk containing the bit at \b idx.
@@ -1330,6 +1357,295 @@ __sm_remove_data(sparsemap_t *map, size_t offset, size_t gap_size)
   map->m_data_used -= gap_size;
 }
 
+/** @brief Coalesces chunks adjacent when they form or extend a run.
+ *
+ * This is called from __sm_chunk_set/unset/merge/split functions when a
+ * there is a chance that chunks should combine into runs so as to use less
+ * space in the map.
+ *
+ * The provided chunk may have two adjacent chunks, this function first
+ * processes the chunk to the left and then the one to the right.
+ *
+ * In the case that there is a chunk to the left (with a lower starting index)
+ * we examine it's type and ending offset as well as it's run length.  Either
+ * type of chunk (sparse and RLE) can have a run.  In the case of an RLE chunk
+ * that's all it can express.  With a sparse chunk a run is defined as adjacent
+ * set bits starting at the 0th index of the chunk and extending up to at most
+ * the maximum size of a chunk without gaps ([1..SM_CHUNK_MAX_CAPACITY] in
+ * length).  When the left chunk's run ends at the starting index of this chunk
+ * we can combine them. Combining these two will always result in a RLE chunk.
+ *
+ * Once that is finished... we may have something to the right as well.  We look
+ * for an adjacent chunk, then determine if it has a run with a starting point
+ * adjacent to the end of a run in this chunk.  At this point we may have
+ * mutated and coalesced the left into the center chunk which we further mutate
+ * and combine with the right.  At most we can combine three chunks into one in
+ * these two phases.
+ *
+ * @returns the number of chunks to be removed from the map
+ */
+// TODO __sparsemap_coalesce(sparsemap_t *map)
+static int
+__sm_coalesce_chunk(sparsemap_t *map, __sm_chunk_t *chunk)
+{
+  // TODO
+  return 0;
+}
+
+/** @brief Separates an RLE chunk into new chunks when necessary.
+ *
+ * This is called from __sm_chunk_set/unset/merge/split functions when a
+ * run-length encoded (RLE) chunk must be mutated into one or more new chunks.
+ *
+ * This function expects that the separation information is complete and that
+ * the pivot chunk has yet to be created.  The target will always be RLE and the
+ * piviot will always be a new sparse chunk.  The hard part is where the pivot
+ * lies in relation to the target.
+ *
+ * - left aligned
+ * - right aligned
+ * - centrally aligned
+ *
+ * When left aligned the chunk-aligned starting index of the pivot matches the
+ * starting index of the target. This results in two chunks, one new (the pivot)
+ * on the left, and one shortened RLE on the right.
+ *
+ * When right aligned there are two cases, the second more common one is when
+ * the chunk-aligned starting index of the pivot plus its length extends beyond
+ * the end of the run length of the target RLE chunk but is still within the
+ * capacity of the RLE chunk. This again results in two chunks, one on the left
+ * for the remainder of the run and one to the right.  In rare cases the end of
+ * the pivot chunk perfectly aligns with the end of the target's length.
+ *
+ * The last case is when the chunk-aligned starting index is somewhere within
+ * the body of the target.  This results in three chunks; left, right, and pivot
+ * (or center).
+ *
+ * In all three cases the new chunks (left and right) may be either RLE or
+ * sparse encoded, that's TBD based on their sizes after the pivot area is
+ * removed from the body of the run.
+ *
+ * @param map[in] The sparsemap containing this chunk.
+ * @param sep[in,out] An struct with information necessary for this operation.
+ * @param idx[in] The map-relative 0-based index of the bit to be mutated.
+ * @param state[in] The ending state of idx; set/1, unset/0, or unmodified/-1.
+ * @return non-zero on failure, and errno to ENOSPC when the map can't fit the mutations
+ */
+static int
+__sm_separate_rle_chunk(sparsemap_t *map, __sm_chunk_sep_t *sep, sparsemap_idx_t idx, int state)
+{
+  int num_chunks = 0;
+  __sm_chunk_t pivot_chunk;
+  size_t aligned_idx;
+  __sm_chunk_t lrc;
+
+  __sm_assert(state == 0 || state == 1 || state == -1);
+  __sm_assert(SM_IS_CHUNK_RLE(sep->target.chunk));
+  if (state == 1) {
+    /* setting a bit */
+    __sm_assert(idx < sep->target.capacity);
+    __sm_assert(idx > sep->target.length + sep->target.start);
+  } else if (state == 0) {
+    /* clearing a bit */
+    __sm_assert(idx >= sep->target.start);
+    __sm_assert(idx < sep->target.length + sep->target.start);
+  }
+  /* When `state == -1` we are splitting a chunk at idx but otherwise leaving it unmodified. */
+
+  memset(sep->buf, 0, (SM_SIZEOF_OVERHEAD * 3) + (sizeof(__sm_bitvec_t) * 6));
+
+  /* Find the starting offset for our pivot chunk ... */
+  aligned_idx = __sm_get_chunk_aligned_offset(idx);
+  __sm_assert(idx >= aligned_idx && idx < (aligned_idx + SM_CHUNK_MAX_CAPACITY));
+  /* avoid changing the map->m_data and for now work in our buf ... */
+  sep->pivot.p = sep->buf;
+  *(__sm_idx_t *)sep->pivot.p = aligned_idx;
+  __sm_chunk_init(&pivot_chunk, sep->pivot.p + SM_SIZEOF_OVERHEAD);
+
+  /* The pivot, extracted from a run, starts off as all 1s. */
+  pivot_chunk.m_data[0] = ~(__sm_bitvec_t)0;
+
+  if (state == 0) {
+    /* To unset, change the flag at the position of the idx to "mixed" ... */
+    SM_CHUNK_SET_FLAGS(pivot_chunk.m_data[0], idx / SM_BITS_PER_VECTOR, SM_PAYLOAD_MIXED);
+    /* and clear only the bit at that index in this chunk. */
+    pivot_chunk.m_data[1] = ~(__sm_bitvec_t)0 & ~((__sm_bitvec_t)1 << (idx % SM_BITS_PER_VECTOR));
+  } else if (state == 1) {
+    if (idx >= sep->target.start && idx < sep->target.start + sep->target.length) {
+      /* It's a no-op to set a bit in a range of bits already set. */
+      return 0;
+    }
+  } else {
+    /* Unmodified */
+  }
+
+  /* Where did the pivot chunk fall within the original chunk? */
+  do {
+    if (aligned_idx == sep->target.start) {
+      /* The pivot is left aligned, there will be two chunks in total. */
+      sep->ex[1].start = aligned_idx + SM_CHUNK_MAX_CAPACITY;
+      sep->ex[1].end = aligned_idx + sep->target.length - 1;
+      /* Used later for constructing the remaining right chunk */
+      sep->ex[1].p = (uint8_t *)((uintptr_t)sep->buf + (SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) * 2));
+      /* Calculate space needed in the buffer, reuse the left chunk's bytes. */
+      sep->expand_by = (SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) * 3);
+      __sm_assert(sep->ex[1].start <= sep->ex[1].end);
+      __sm_assert(sep->ex[0].p == 0);
+      break;
+    }
+
+    if (aligned_idx + SM_CHUNK_MAX_CAPACITY >= sep->target.start + sep->target.length) {
+      /* The pivot is right aligned, there will be two chunks in total. */
+      num_chunks = 1;
+      size_t ovr = (aligned_idx + SM_CHUNK_MAX_CAPACITY) - (sep->target.start + sep->target.length);
+      if (ovr > 0) {
+        /* Shorten the pivot chunk because it extends beyond the end of the run ... */
+        if (ovr > SM_BITS_PER_VECTOR) {
+          pivot_chunk.m_data[0] &= ~(__sm_bitvec_t)0 >> ((ovr / SM_BITS_PER_VECTOR) * 2);
+        }
+        if (ovr % SM_BITS_PER_VECTOR) {
+          pivot_chunk.m_data[1] = ~(~(__sm_bitvec_t)0 << (sep->target.length % SM_FLAGS_PER_INDEX));
+        }
+      }
+
+      /* Are we setting a bit beyond the length where we partially overlap? */
+      if (state == 1 && idx > sep->target.start + sep->target.length) {
+        /* Change only the flag at the position of the index to "mixed" ... */
+        SM_CHUNK_SET_FLAGS(pivot_chunk.m_data[0], idx / SM_BITS_PER_VECTOR, SM_PAYLOAD_MIXED);
+        /* and set the bit at that index in this chunk. */
+        pivot_chunk.m_data[1] |= (__sm_bitvec_t)1 << (idx % SM_BITS_PER_VECTOR);
+      }
+
+      /* Record information necessary to construct the left chunk. */
+      sep->ex[0].start = sep->target.start;
+      sep->ex[0].end = aligned_idx - 1;
+      /* Move the pivot chunk over to make room for the new left chunk. */
+      size_t amt = SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) * 2;
+      memmove((uint8_t *)((uintptr_t)sep->buf + amt), sep->buf, amt);
+      memset(sep->buf, 0, amt);
+      /* Used later for constructing the remaining left chunk */
+      sep->ex[0].p = sep->buf;
+      /* Calculate space needed in the buffer, reuse the left chunk bytes. */
+      sep->expand_by = (SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) * 3);
+      __sm_assert(sep->ex[0].start <= sep->ex[0].end);
+      __sm_assert(sep->ex[1].p == 0);
+      break;
+    }
+
+    if (aligned_idx >= sep->target.start + sep->target.length) {
+      /* The pivot is beyond the run but within the capacity, two chunks. */
+      num_chunks = 1;
+      if (aligned_idx + SM_CHUNK_MAX_CAPACITY < sep->target.capacity) {
+        /* Ensure the aligned chunk is fully in the range (length, capacity). */
+        pivot_chunk.m_data[0] = (__sm_bitvec_t)0;
+        /* Change only the flag at the position of the index to "mixed" ... */
+        SM_CHUNK_SET_FLAGS(pivot_chunk.m_data[0], idx / SM_BITS_PER_VECTOR, SM_PAYLOAD_MIXED);
+        /* and set the bit at that index in this chunk. */
+        pivot_chunk.m_data[1] |= (__sm_bitvec_t)1 << (idx % SM_BITS_PER_VECTOR);
+        sep->ex[0].start = sep->target.start;
+        sep->ex[0].end = sep->target.start + sep->target.length - 1;
+        break;
+      } else {
+        // TODO... we can't fit a pivot in this space... yikes! what now?
+        // reduce capacity of the RLE chunk and recurse?
+        return -1;
+      }
+    }
+
+    /* The pivot's range is central, there will be three chunks in total. */
+    num_chunks = 2;
+    sep->ex[0].start = sep->target.start;
+    sep->ex[0].end = aligned_idx - 1;
+    sep->ex[1].start = aligned_idx + SM_CHUNK_MAX_CAPACITY;
+    sep->ex[1].end = sep->target.length - 1;
+    /* Move the pivot chunk over to make room for the new left chunk. */
+    size_t amt = SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) * 2;
+    memmove((uint8_t *)((uintptr_t)sep->buf + amt), sep->buf, amt);
+    memset(sep->buf, 0, amt);
+    /* Used later for constructing the remaining left and right chunks */
+    sep->ex[0].p = sep->buf;
+    sep->ex[1].p = (uint8_t *)((uintptr_t)sep->buf + amt * 2);
+    /* Calculate space needed in the buffer, reuse the left chunk bytes. */
+    sep->expand_by = (amt * 2) + sizeof(__sm_bitvec_t);
+    __sm_assert(sep->ex[0].start < sep->ex[0].end);
+    __sm_assert(sep->ex[1].start < sep->ex[1].end);
+  } while (0);
+
+  for (int i = 0; i < 2; i++) {
+    if (sep->ex[i].p) {
+      /* First assign the starting offset ... */
+      *(__sm_idx_t *)sep->ex[i].p = sep->ex[i].start;
+      /* ... then, construct a chunk ... */
+      __sm_chunk_init(&lrc, sep->ex[i].p + SM_SIZEOF_OVERHEAD);
+      /* ... determine the type of chunk required ... */
+      if (sep->ex[i].end - sep->ex[i].start + 1 > SM_CHUNK_MAX_CAPACITY) {
+        /* ... we need a run-length encoding (RLE), chunk ... */
+        __sm_chunk_set_rle(&lrc);
+        /* ... now assign the length ... */
+        __sm_chunk_rle_set_length(&lrc, sep->ex[i].end - sep->ex[i].start + 1);
+        /* ... a few things differ left to right ... */
+        if (i == 0) {
+          /* ... left: extend capacity to the start of the pivot chunk ... */
+          __sm_chunk_rle_set_capacity(&lrc, aligned_idx - sep->ex[i].start);
+          /* ... and adjust the pivot chunk and start of lr[1] in buf ... */
+          size_t amt = SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) * 2;
+          memmove((uint8_t *)((uintptr_t)sep->buf + SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t)), (uint8_t *)((uintptr_t)sep->buf + amt), amt);
+          memset((uint8_t *)((uintptr_t)sep->buf + SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) + amt), 0, sizeof(__sm_bitvec_t));
+          if (sep->ex[1].p) {
+            sep->ex[1].p = (uint8_t *)((uintptr_t)sep->ex[1].p - sizeof(__sm_bitvec_t));
+          }
+        } else {
+          /* ... right: extend capacity to max or the start of next chunk */
+          size_t right_offset = sep->target.offset + SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t);
+          __sm_chunk_rle_set_capacity(&lrc, __sm_chunk_rle_capacity_limit(map, aligned_idx, right_offset));
+        }
+        /* ... and our size estimate shrinks. */
+        sep->expand_by -= sizeof(__sm_bitvec_t);
+      } else {
+        /* ... we need a new sparse chunk, how long should it be? ... */
+        size_t lrl = sep->ex[i].end - sep->ex[i].start + 1;
+        /* ... how many flags can we mark as all ones? ... */
+        if (lrl > SM_BITS_PER_VECTOR) {
+          lrc.m_data[0] = ~(__sm_bitvec_t)0 >> ((SM_FLAGS_PER_INDEX - (lrl / SM_BITS_PER_VECTOR)) * 2);
+        }
+        /* ... do we have a mixed flag to create and vector to assign? ... */
+        if (lrl % SM_BITS_PER_VECTOR) {
+          SM_CHUNK_SET_FLAGS(lrc.m_data[0], (aligned_idx + lrl) / SM_BITS_PER_VECTOR, SM_PAYLOAD_MIXED);
+          lrc.m_data[1] |= ~(__sm_bitvec_t)0 >> (SM_BITS_PER_VECTOR - (lrl % SM_BITS_PER_VECTOR));
+        } else {
+          /* ... earlier size estimates were all pessimistic, adjust them ... */
+          if (i == 0) {
+            /* ... left: adjust the pivot chunk and start of lr[1] in buf ... */
+            size_t amt = SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) * 2;
+            memmove((uint8_t *)((uintptr_t)sep->buf + SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t)), (uint8_t *)((uintptr_t)sep->buf + amt), amt);
+            memset((uint8_t *)((uintptr_t)sep->buf + SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) + amt), 0, sizeof(__sm_bitvec_t));
+            if (sep->ex[1].p) {
+              sep->ex[1].p = (uint8_t *)((uintptr_t)sep->ex[1].p - sizeof(__sm_bitvec_t));
+            }
+          }
+          /* ... if not, our size estimate shrinks ... */
+          sep->expand_by -= sizeof(__sm_bitvec_t);
+        }
+      }
+      // __sm_when_diag({ /* Sanity check the chunk */ // fprintf(stdout, "\n%s\n", QCC_showChunk(lr[i], 0)); });
+    }
+  }
+
+  /* Determine if we have room for this construct. */
+  if (map->m_data_used + sep->expand_by > map->m_capacity) {
+    errno = ENOSPC;
+    return -1;
+  }
+
+  /* Let's knit this into place within the map. */
+  size_t amt = SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t);
+  __sm_insert_data(map, sep->target.offset + amt, sep->buf + amt, sep->expand_by);
+  memcpy(sep->target.p, sep->buf, sep->expand_by + amt);
+  __sm_set_chunk_count(map, __sm_get_chunk_count(map) + num_chunks);
+
+  return 0;
+}
+
 /** @brief Merges into the chunk at \b offset all set bits from \b src.
  *
  * @param[in] map The map the chunk belongs too.
@@ -1370,11 +1686,6 @@ __sm_merge_chunk(sparsemap_t *map, sparsemap_idx_t src_start, sparsemap_idx_t ds
     }
   }
 }
-
-/*
- * The following is the "Sparsemap" implementation, it uses chunks (code above)
- * and is the public API for this compressed bitmap representation.
- */
 
 void
 sparsemap_clear(sparsemap_t *map)
@@ -1457,8 +1768,10 @@ sparsemap_set_data_size(sparsemap_t *map, uint8_t *data, size_t size)
 {
   size_t data_size = (size * sizeof(uint8_t));
 
-  /* If this sparsemap was allocated by the sparsemap() API and we're not handed
-   * a new data, it's up to us to resize it. */
+  /*
+   * If this sparsemap was allocated by the sparsemap() API and we're not handed
+   * a new data, it's up to us to resize it.
+   */
   if (data == NULL && (uintptr_t)map->m_data == (uintptr_t)map + sizeof(sparsemap_t) && size > map->m_capacity) {
 
     /* Ensure that m_data is 8-byte aligned. */
@@ -1475,8 +1788,10 @@ sparsemap_set_data_size(sparsemap_t *map, uint8_t *data, size_t size)
     m->m_data = (uint8_t *)(((uintptr_t)m + sizeof(sparsemap_t)) & ~(uintptr_t)7);
     __sm_when_diag({ __sm_assert(IS_8_BYTE_ALIGNED(m->m_data)); }) return m;
   } else {
-    /* NOTE: It is up to the caller to realloc their buffer and provide it here
-     * for reassignment. */
+    /*
+     * NOTE: It is up to the caller to realloc their buffer and provide it here
+     * for reassignment.
+     */
     if (data != NULL && data != map->m_data) {
       map->m_data = data;
     }
@@ -1522,8 +1837,10 @@ sparsemap_is_set(sparsemap_t *map, sparsemap_idx_t idx)
   __sm_chunk_t chunk;
   __sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
 
-  /* Determine if the bit is out of bounds of the __sm_chunk_t; if yes then
-   * the bit is not set. */
+  /*
+   * Determine if the bit is out of bounds of the __sm_chunk_t; if yes then
+   * the bit is not set.
+   */
   if (idx < start || (__sm_idx_t)idx - start >= __sm_chunk_get_capacity(&chunk)) {
     return false;
   }
@@ -1551,10 +1868,12 @@ sparsemap_unset(sparsemap_t *map, sparsemap_idx_t idx)
     goto done;
   }
 
-  /* Try to locate a chunk for this idx.  We could find that:
+  /*
+   * Try to locate a chunk for this idx.  We could find that:
    * - the first chunk's offset is greater than the index, or
    * - the index is beyond the end of the last chunk, or
-   * - we found a chunk that can contain this index. */
+   * - we found a chunk that can contain this index.
+   */
   uint8_t *p = __sm_get_chunk_data(map, offset);
   __sm_idx_t start = *(__sm_idx_t *)p;
   __sm_assert(start == __sm_get_chunk_aligned_offset(start));
@@ -1571,19 +1890,23 @@ sparsemap_unset(sparsemap_t *map, sparsemap_idx_t idx)
   size_t capacity = __sm_chunk_get_capacity(&chunk);
 
   if (idx - start >= capacity) {
-    /* Our search resulted in a chunk however it's capacity doesn't encompass
-     * this index, so again a no-op. */
+    /*
+     * Our search resulted in a chunk however it's capacity doesn't encompass
+     * this index, so again a no-op.
+     */
     goto done;
   }
 
   if (__sm_chunk_is_rle(&chunk)) {
-    /* Our search resulted in a chunk that is run-length encoded (RLE).  There
+    /*
+     * Our search resulted in a chunk that is run-length encoded (RLE).  There
      * are three possibilities at this point: 1) the index is at the end of the
      * run, so we just shorten then length; 2) the index is between start and
      * end [start, end) so we have to split this chunk up; 3) the index is
      * beyond the length but within the capacity, then clearing it is a no-op.
      * If the chunk length shrinks to the max capacity of sparse encoding we
-     * have to transition its encoding. */
+     * have to transition its encoding.
+     */
 
     /* Is the 0-based index beyond the run length? */
     size_t length = __sm_chunk_rle_get_length(&chunk);
@@ -1602,7 +1925,8 @@ sparsemap_unset(sparsemap_t *map, sparsemap_idx_t idx)
       goto done;
     }
 
-    /* Now that we've addressed (1) and (3) we have to work on (2) where the
+    /*
+     * Now that we've addressed (1) and (3) we have to work on (2) where the
      * index is within the body of this RLE chunk. Chunks must have an aligned
      * starting offset, so let's first find what we'll call the "pivot" chunk
      * wherein we'll find the index we need to clear. That chunk will be sparse.
@@ -1820,7 +2144,7 @@ sparsemap_unset(sparsemap_t *map, sparsemap_idx_t idx)
   }
 
 done:;
-  //__sm_when_diag({ fprintf(stdout, "\n++++++++++++++++++++++++++++++ unset: %lu\n%s\n", idx, QCC_showSparsemap(map, 0)); });
+  __sm_when_diag({ fprintf(stdout, "\n++++++++++++++++++++++++++++++ unset: %lu\n%s\n", idx, QCC_showSparsemap(map, 0)); });
   return ret_idx;
 }
 
@@ -1879,16 +2203,20 @@ sparsemap_set(sparsemap_t *map, sparsemap_idx_t idx)
   sparsemap_idx_t ret_idx = idx;
   __sm_assert(sparsemap_get_size(map) >= SM_SIZEOF_OVERHEAD);
 
-  /* Setting a bit could require an additional vector, let's ensure we have that
-   * space available in the buffer first, or ENOMEM now. */
+  /*
+   * Setting a bit could require an additional vector, let's ensure we have that
+   * space available in the buffer first, or ENOMEM now.
+   */
   SM_ENOUGH_SPACE(SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t));
 
   /* Determine if there is a chunk that could contain this index. */
   size_t offset = (size_t)__sm_get_chunk_offset(map, idx);
 
   if ((ssize_t)offset == -1) {
-    /* No chunks exist, the map is empty, so we must append a new chunk to the
-     * end of the buffer and initialize it so that it can contain this index. */
+    /*
+     * No chunks exist, the map is empty, so we must append a new chunk to the
+     * end of the buffer and initialize it so that it can contain this index.
+     */
     uint8_t buf[SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) * 2] = { 0 };
     __sm_append_data(map, &buf[0], sizeof(buf));
     uint8_t *p = __sm_get_chunk_data(map, 0);
@@ -1900,19 +2228,23 @@ sparsemap_set(sparsemap_t *map, sparsemap_idx_t idx)
     goto done;
   }
 
-  /* Try to locate a chunk for this idx.  We could find that:
+  /*
+   * Try to locate a chunk for this idx.  We could find that:
    *  - the first chunk's offset is greater than the index, or
    *  - the index is beyond the end of the last chunk, or
-   *  - we found a chunk that can contain this index. */
+   *  - we found a chunk that can contain this index.
+   */
   uint8_t *p = __sm_get_chunk_data(map, offset);
   __sm_idx_t start = *(__sm_idx_t *)p;
   __sm_assert(start == __sm_get_chunk_aligned_offset(start));
 
   if (idx < start) {
-    /* Our search resulted in the first chunk that starts after the index but
+    /*
+     * Our search resulted in the first chunk that starts after the index but
      * that means there is no chunk that can contain this index, so we need to
      * insert a new chunk before this one and initialize it so that it can
-     * contain this index. */
+     * contain this index.
+     */
     uint8_t buf[SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) * 2] = { 0 };
     __sm_insert_data(map, offset, &buf[0], sizeof(buf));
     /* NOTE: insert moves the memory over meaning `p` is now the new chunk */
@@ -1929,16 +2261,19 @@ sparsemap_set(sparsemap_t *map, sparsemap_idx_t idx)
   size_t capacity = __sm_chunk_get_capacity(&chunk);
 
   if (capacity < SM_CHUNK_MAX_CAPACITY && idx - start < SM_CHUNK_MAX_CAPACITY) {
-    /* Special case, we have a sparse chunk with one or more flags set to
+    /*
+     * Special case, we have a sparse chunk with one or more flags set to
      * SM_PAYLOAD_NONE which reduces the carrying capacity of the chunk. In
-     * this case we should remove those flags and try again. */
+     * this case we should remove those flags and try again.
+     */
     __sm_assert(__sm_chunk_is_rle(&chunk) == false);
     __sm_chunk_increase_capacity(&chunk, SM_CHUNK_MAX_CAPACITY);
     capacity = __sm_chunk_get_capacity(&chunk);
   }
 
   if (chunk.m_data[0] == ~(__sm_bitvec_t)0 && idx - start == SM_CHUNK_MAX_CAPACITY) {
-    /* Our search resulted in a chunk that is full of ones and this index is the
+    /*
+     * Our search resulted in a chunk that is full of ones and this index is the
      * next one after the capacity, we have a run of ones longer than the
      * capacity of the sparse encoding, let's transition this chunk to
      * run-length encoding (RLE).
@@ -1948,7 +2283,8 @@ sparsemap_set(sparsemap_t *map, sparsemap_idx_t idx)
      *
      * ALSO: Keep in mind the RLE "length" is the current length of 1s in the
      * run, so in this case we transition from 2048 to a length of 2049.
-     * in this run. */
+     * in this run.
+     */
 
     __sm_chunk_set_rle(&chunk);
     __sm_chunk_rle_set_length(&chunk, SM_CHUNK_MAX_CAPACITY + 1);
@@ -1958,56 +2294,38 @@ sparsemap_set(sparsemap_t *map, sparsemap_idx_t idx)
 
   /* Is this an RLE chunk */
   if (__sm_chunk_is_rle(&chunk)) {
+    size_t length = __sm_chunk_rle_get_length(&chunk);
+
     /* Is the index within its range, or at the end? */
     if (idx >= start && idx - start < capacity) {
-      /* This RLE contains the bits in [start, start + length] so the index of
+      /*
+       * This RLE contains the bits in [start, start + length] so the index of
        * the last bit in this RLE chunk is `start + length - 1` which is why
-       * we test index (0-based) against current length (1-based) below. */
-      size_t length = __sm_chunk_rle_get_length(&chunk);
+       * we test index (0-based) against current length (1-based) below.
+       */
       if ((idx - start) == length) {
         __sm_chunk_rle_set_length(&chunk, length + 1);
         __sm_assert(__sm_chunk_rle_get_length(&chunk) == length + 1);
         goto done;
       }
     }
-    /* We've been asked to set a bit that is within this RLE chunk's range but
-     * not within its run.  That means this chunk's capacity must shrink, and
-     * we need a new sparse chunk to hold this value. */
-    __sm_chunk_t new_chunk;
-    uint8_t buf[SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) * 2] = { 0 };
-    uint8_t *new_p = buf;
-    /* Find out where the chunk should align to hold this idx ... */
-    size_t aligned_idx = __sm_get_chunk_aligned_offset(idx);
-    /* ... check for enough free space ... */
-    size_t expand_by = SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) * 2;
-    SM_ENOUGH_SPACE(expand_by);
-    /* ... begin mutations, first shrink the RLE chunk ... */
-    __sm_chunk_rle_set_capacity(&chunk, aligned_idx - start - 1);
-    /* ... set the starting index for the new chunk ... */
-    *(__sm_idx_t *)new_p = aligned_idx;
-    __sm_chunk_init(&new_chunk, new_p + SM_SIZEOF_OVERHEAD);
-    /* ... set the flag for the position containing the index to mixed ... */
-    SM_CHUNK_SET_FLAGS(new_chunk.m_data[0], idx / SM_BITS_PER_VECTOR, SM_PAYLOAD_MIXED);
-    /* ... and set the bit at that index in this new chunk. */
-    new_chunk.m_data[1] = (__sm_bitvec_t)1 << (idx % SM_BITS_PER_VECTOR);
-    __sm_set_chunk_count(map, __sm_get_chunk_count(map) + 1);
-    __sm_assert(__sm_chunk_get_capacity(&chunk) + start + 1 == aligned_idx);
-    __sm_when_diag({
-      /* Sanity check the chunk */
-      // fprintf(stdout, "\n%s\n", QCC_showSparsemap(map, 0));
-      for (size_t j = 0; j < SM_CHUNK_MAX_CAPACITY; j++) {
-        bool expected = (j + aligned_idx == idx) ? true : false;
-        __sm_assert(__sm_chunk_is_set(&new_chunk, j) == expected);
-      }
-    });
 
+    /*
+     * We've been asked to set a bit that is within this RLE chunk's range but
+     * not within its run.  That means this chunk's capacity must shrink, and
+     * we need a new sparse chunk to hold this value.
+     */
+    __sm_chunk_sep_t sep = { .target = { .p = p, .offset = offset, .chunk = &chunk, .start = start, .length = length, .capacity = capacity } };
+    SM_ENOUGH_SPACE(__sm_separate_rle_chunk(map, &sep, idx, 1));
     goto done;
   }
 
   if (idx - start >= capacity) {
-    /* Our search resulted in a chunk however it's capacity doesn't encompass
+    /*
+     * Our search resulted in a chunk however it's capacity doesn't encompass
      * this index, so we need to insert a new chunk after this one and
-     * initialize it so that it can contain this index.  */
+     * initialize it so that it can contain this index.
+     */
     uint8_t buf[SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) * 2] = { 0 };
     size_t size = __sm_chunk_get_size(&chunk);
     offset += (SM_SIZEOF_OVERHEAD + size);
@@ -2102,7 +2420,7 @@ sparsemap_set(sparsemap_t *map, sparsemap_idx_t idx)
   }
 
 done:;
-  //__sm_when_diag({ fprintf(stdout, "\n++++++++++++++++++++++++++++++ set: %lu\n%s\n", idx, QCC_showSparsemap(map, 0)); });
+  __sm_when_diag({ fprintf(stdout, "\n++++++++++++++++++++++++++++++ set: %lu\n%s\n", idx, QCC_showSparsemap(map, 0)); });
   return ret_idx;
 }
 
@@ -2734,13 +3052,13 @@ _tst_pow(double base, int exponent)
 static char *
 _qcc_format_chunk(__sm_idx_t start, __sm_chunk_t *chunk, bool none)
 {
-  char *buf = NULL;
+  size_t amt = sizeof(wchar_t) * ((SM_FLAGS_PER_INDEX * 16) + (SM_BITS_PER_VECTOR * 64) + 16) * 2;
+  char *buf = (char *)malloc(sizeof(wchar_t) * ((SM_FLAGS_PER_INDEX * 16) + (SM_BITS_PER_VECTOR * 64) + 16) * 2);
+  ;
   __sm_bitvec_t desc = chunk->m_data[0];
 
-  buf = malloc(sizeof(char) * ((SM_FLAGS_PER_INDEX * 16) + (SM_BITS_PER_VECTOR * 64) + 16) * 2);
-
   if (!__sm_chunk_is_rle(chunk)) {
-    char desc_str[(2 * SM_FLAGS_PER_INDEX) + 1] = { 0 };
+    char desc_str[((2 * SM_FLAGS_PER_INDEX) + 1) * sizeof(wchar_t)] = { 0 };
     char *str = desc_str;
     int mixed = 0;
     for (int i = SM_FLAGS_PER_INDEX - 1; i >= 0; i--) {
@@ -2761,12 +3079,15 @@ _qcc_format_chunk(__sm_idx_t start, __sm_chunk_t *chunk, bool none)
         str += sprintf(str, "①");
         mixed++;
         break;
+      default:
       }
     }
     str = buf + sprintf(buf, "%.10u\t%s%s", start, desc_str, mixed ? " :: " : "");
     for (int i = 0; i < mixed; i++) {
       // str += sprintf(str, "0x%0lX%s", chunk->m_data[1 + i], i + 1 < mixed ? " " : "");
-      str += sprintf(str, "%#018" PRIx64 "%s", chunk->m_data[1 + i], i + 1 < mixed ? " " : "");
+      size_t n = snprintf(str, amt - 1, "%#018" PRIx64 "%s", chunk->m_data[1 + i], i + 1 < mixed ? " " : "");
+      str += n;
+      amt -= n;
     }
   } else {
     // sprintf(buf, "%.10u\t1»%zu of %zu", start, __sm_chunk_rle_get_length(chunk), __sm_chunk_rle_get_capacity(chunk));
