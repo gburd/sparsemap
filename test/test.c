@@ -43,21 +43,33 @@ struct user_data {
 
 /* -------------------------- Supporting Functions for Testing */
 
-void
+size_t
+populate_map_rle(sparsemap_t *map, size_t loc, size_t num, size_t amount)
+{
+  size_t i, len = munit_rand_int_range(1, num) * amount;
+  for (i = 0; i < len; i++) {
+    sparsemap_set(map, loc + i);
+  }
+  return i;
+}
+
+size_t
 populate_map(sparsemap_t *map, int size, int max_value)
 {
   int array[size];
-  size_t before;
+  size_t i, before;
 
   setup_test_array(array, size, max_value);
   shuffle(array, size);
   before = sparsemap_count(map);
-  for (int i = 0; i < size; i++) {
+  for (i = 0; i < size; i++) {
     sparsemap_set(map, array[i]);
     bool set = sparsemap_is_set(map, array[i]);
     assert_true(set);
   }
   assert_true(sparsemap_count(map) == before + size);
+
+  return i;
 }
 
 static void *
@@ -350,6 +362,7 @@ test_api_get_capacity_setup(const MunitParameter params[], void *user_data)
 
   sparsemap_init(map, buf, 1024);
   populate_map(map, 1024, 3 * 1024);
+  populate_map_rle(map, 3 * 1024, 5, 4096);
 
   return (void *)map;
 }
@@ -407,6 +420,13 @@ test_api_is_set(const MunitParameter params[], void *data)
   sparsemap_set(map, 42);
   assert_true(sparsemap_is_set(map, 42));
 
+  sparsemap_clear(map);
+  size_t n = populate_map_rle(map, 0, 10, 2718);
+
+  for (size_t i = 0; i < n; i++) {
+    assert_true(sparsemap_is_set(map, i));
+  }
+
   return MUNIT_OK;
 }
 
@@ -460,6 +480,7 @@ test_api_get_size_setup(const MunitParameter params[], void *user_data)
 
   sparsemap_init(map, buf, 1024);
   populate_map(map, 1024, 3 * 1024);
+  populate_map_rle(map, 3 * 1024, 5, 4096);
 
   return (void *)map;
 }
@@ -527,6 +548,10 @@ test_api_count(const MunitParameter params[], void *data)
     sparsemap_set(map, i + 13);
   }
   assert_true(sparsemap_count(map) == 512);
+
+  sparsemap_clear(map);
+  size_t n = populate_map_rle(map, 3 * 1024, 7, 4001);
+  assert_true(sparsemap_count(map) == n);
 
   sparsemap_clear(map);
   assert_true(sparsemap_count(map) == 0);
@@ -652,6 +677,16 @@ test_api_get_end_offset(const MunitParameter params[], void *data)
   sparsemap_set(map, 3087);
   sparsemap_set(map, 13012);
   assert_true(sparsemap_get_ending_offset(map) == 13012);
+
+  sparsemap_clear(map);
+  size_t n = populate_map_rle(map, 13012, 10, 2718);
+  size_t exp = n + 13012 - 1;
+  size_t eoff = sparsemap_get_ending_offset(map);
+  assert_true(sparsemap_get_ending_offset(map) == 13012 + n - 1);
+  fprintf(stdout, "\n%s\n", QCC_showSparsemap(map, 0));
+  sparsemap_set(map, 13012 + n + 100);
+  fprintf(stdout, "\n%s\n", QCC_showSparsemap(map, 0));
+  assert_true(sparsemap_get_ending_offset(map) == 13112 + n - 1);
 
   return MUNIT_OK;
 }
