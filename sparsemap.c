@@ -1386,9 +1386,77 @@ __sm_remove_data(sparsemap_t *map, size_t offset, size_t gap_size)
  */
 // TODO __sparsemap_coalesce(sparsemap_t *map)
 static int
-__sm_coalesce_chunk(sparsemap_t *map, __sm_chunk_t *chunk)
+__sm_coalesce_chunk(sparsemap_t *map, __sm_chunk_t *chunk, size_t offset, __sm_idx_t start, uint8_t *p)
 {
-  // TODO
+  /* Did this chunk become all ones, can we compact it with adjacent chunks? */
+  size_t run_length = __sm_chunk_get_run_length(chunk);
+  if (run_length > 0) {
+    __sm_chunk_t adj;
+
+    /* Is there a previous chunk? */
+    if (offset > 0) {
+      size_t adj_offset = (size_t)__sm_get_chunk_offset(map, start - 1);
+      if (adj_offset < offset) {
+        uint8_t *adj_p = __sm_get_chunk_data(map, adj_offset);
+        __sm_idx_t adj_start = *(__sm_idx_t *)adj_p;
+        __sm_chunk_init(&adj, adj_p + SM_SIZEOF_OVERHEAD);
+        /* Is the adjacent chunk on the left RLE or a sparse chunk of all ones? */
+        if (__sm_chunk_is_rle(&adj) || adj.m_data[0] == ~(__sm_bitvec_t)0) {
+          /* Does it align with this full sparse chunk? */
+          size_t adj_length = __sm_chunk_get_run_length(&adj);
+          if (adj_start + adj_length == start) {
+            if (SM_CHUNK_MAX_CAPACITY + run_length < SM_CHUNK_RLE_MAX_LENGTH) {
+              /* The stars have aligned, transform to RLE and combine them! */
+              // __sm_when_diag({ fprintf(stdout, "\n%s\n", QCC_showChunk(adj_p, 0)); });
+              // __sm_when_diag({ fprintf(stdout, "\n%s\n", QCC_showChunk(p, 0)); });
+              __sm_chunk_set_rle(&adj);
+              __sm_chunk_rle_set_length(&adj, adj_length + run_length);
+              __sm_remove_data(map, offset, SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(chunk));
+              __sm_chunk_rle_set_capacity(&adj, __sm_chunk_rle_capacity_limit(map, adj_start, adj_offset));
+              __sm_set_chunk_count(map, __sm_get_chunk_count(map) - 1);
+              // __sm_when_diag({ fprintf(stdout, "\n%s\n", QCC_showChunk(adj_p, 0)); });
+
+              /* Now chunk is shifted to the left, it becomes the adjacent chunk. */
+              p = adj_p;
+              offset = adj_offset;
+              start = adj_start;
+              __sm_chunk_init(chunk, p + SM_SIZEOF_OVERHEAD);
+            }
+          }
+        }
+      }
+    }
+
+    /* Is there a next chunk? */
+    if (__sm_chunk_is_rle(chunk) || chunk->m_data[0] == ~(__sm_bitvec_t)0) {
+      size_t adj_offset = offset + SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t);
+      if (adj_offset < map->m_data_used - (SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t))) {
+        uint8_t *adj_p = __sm_get_chunk_data(map, adj_offset);
+        __sm_idx_t adj_start = *(__sm_idx_t *)adj_p;
+        __sm_chunk_init(&adj, adj_p + SM_SIZEOF_OVERHEAD);
+        /* Is the adjacent right chunk RLE or a sparse with a run of ones? */
+        size_t adj_length = __sm_chunk_get_run_length(&adj);
+        if (adj_length) {
+          /* Does it align with this full sparse chunk? */
+          size_t length = __sm_chunk_get_run_length(chunk);
+          if (start + length == adj_start) {
+            if (adj_length + length < SM_CHUNK_RLE_MAX_LENGTH) {
+              /* The stars have aligned, transform to RLE and combine them! */
+              // __sm_when_diag({ fprintf(stdout, "\n%s\n", QCC_showChunk(p, 0)); });
+              // __sm_when_diag({ fprintf(stdout, "\n%s\n", QCC_showChunk(adj_p, 0)); });
+              __sm_chunk_rle_set_length(chunk, length + adj_length);
+              __sm_remove_data(map, adj_offset, SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&adj));
+              __sm_chunk_set_rle(chunk);
+              __sm_chunk_rle_set_capacity(chunk, __sm_chunk_rle_capacity_limit(map, start, offset));
+              __sm_set_chunk_count(map, __sm_get_chunk_count(map) - 1);
+              // __sm_when_diag({ fprintf(stdout, "\n%s\n", QCC_showChunk(p, 0)); });
+            }
+          }
+        }
+      }
+    }
+  }
+
   return 0;
 }
 
@@ -1966,6 +2034,7 @@ sparsemap_unset(sparsemap_t *map, sparsemap_idx_t idx)
   }
 
 done:;
+  __sm_coalesce_chunk(map, &chunk, offset, start, p);
   //__sm_when_diag({ fprintf(stdout, "\n++++++++++++++++++++++++++++++ unset: %lu\n%s\n", idx, QCC_showSparsemap(map, 0)); });
   return ret_idx;
 }
@@ -2172,75 +2241,8 @@ sparsemap_set(sparsemap_t *map, sparsemap_idx_t idx)
     goto done;
   }
 
-  /* Did this chunk become all ones, can we compact it with adjacent chunks? */
-  size_t run_length = __sm_chunk_get_run_length(&chunk);
-  if (run_length > 0) {
-    __sm_chunk_t adj;
-
-    /* Is there a previous chunk? */
-    if (offset > 0) {
-      size_t adj_offset = (size_t)__sm_get_chunk_offset(map, start - 1);
-      if (adj_offset < offset) {
-        uint8_t *adj_p = __sm_get_chunk_data(map, adj_offset);
-        __sm_idx_t adj_start = *(__sm_idx_t *)adj_p;
-        __sm_chunk_init(&adj, adj_p + SM_SIZEOF_OVERHEAD);
-        /* Is the adjacent chunk on the left RLE or a sparse chunk of all ones? */
-        if (__sm_chunk_is_rle(&adj) || adj.m_data[0] == ~(__sm_bitvec_t)0) {
-          /* Does it align with this full sparse chunk? */
-          size_t adj_length = __sm_chunk_get_run_length(&adj);
-          if (adj_start + adj_length == start) {
-            if (SM_CHUNK_MAX_CAPACITY + run_length < SM_CHUNK_RLE_MAX_LENGTH) {
-              /* The stars have aligned, transform to RLE and combine them! */
-              // __sm_when_diag({ fprintf(stdout, "\n%s\n", QCC_showChunk(adj_p, 0)); });
-              // __sm_when_diag({ fprintf(stdout, "\n%s\n", QCC_showChunk(p, 0)); });
-              __sm_chunk_set_rle(&adj);
-              __sm_chunk_rle_set_length(&adj, adj_length + run_length);
-              __sm_remove_data(map, offset, SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&chunk));
-              __sm_chunk_rle_set_capacity(&adj, __sm_chunk_rle_capacity_limit(map, adj_start, adj_offset));
-              __sm_set_chunk_count(map, __sm_get_chunk_count(map) - 1);
-              // __sm_when_diag({ fprintf(stdout, "\n%s\n", QCC_showChunk(adj_p, 0)); });
-
-              /* Now chunk is shifted to the left, it becomes the adjacent chunk. */
-              p = adj_p;
-              offset = adj_offset;
-              start = adj_start;
-              __sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
-            }
-          }
-        }
-      }
-    }
-
-    /* Is there a next chunk? */
-    if (__sm_chunk_is_rle(&chunk) || chunk.m_data[0] == ~(__sm_bitvec_t)0) {
-      size_t adj_offset = offset + SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t);
-      if (adj_offset < map->m_data_used - (SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t))) {
-        uint8_t *adj_p = __sm_get_chunk_data(map, adj_offset);
-        __sm_idx_t adj_start = *(__sm_idx_t *)adj_p;
-        __sm_chunk_init(&adj, adj_p + SM_SIZEOF_OVERHEAD);
-        /* Is the adjacent right chunk RLE or a sparse with a run of ones? */
-        size_t adj_length = __sm_chunk_get_run_length(&adj);
-        if (adj_length) {
-          /* Does it align with this full sparse chunk? */
-          size_t length = __sm_chunk_get_run_length(&chunk);
-          if (start + length == adj_start) {
-            if (adj_length + length < SM_CHUNK_RLE_MAX_LENGTH) {
-              /* The stars have aligned, transform to RLE and combine them! */
-              // __sm_when_diag({ fprintf(stdout, "\n%s\n", QCC_showChunk(p, 0)); });
-              // __sm_when_diag({ fprintf(stdout, "\n%s\n", QCC_showChunk(adj_p, 0)); });
-              __sm_chunk_rle_set_length(&chunk, length + adj_length);
-              __sm_remove_data(map, adj_offset, SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&adj));
-              __sm_chunk_set_rle(&chunk);
-              __sm_chunk_rle_set_capacity(&chunk, __sm_chunk_rle_capacity_limit(map, start, offset));
-              __sm_set_chunk_count(map, __sm_get_chunk_count(map) - 1);
-              // __sm_when_diag({ fprintf(stdout, "\n%s\n", QCC_showChunk(p, 0)); });
-            }
-          }
-        }
-      }
-    }
-  }
-
+  // TODO: why does this fail if placed after done?
+  __sm_coalesce_chunk(map, &chunk, offset, start, p);
 done:;
   //__sm_when_diag({ fprintf(stdout, "\n++++++++++++++++++++++++++++++ set: %lu\n%s\n", idx, QCC_showSparsemap(map, 0)); });
   return ret_idx;
