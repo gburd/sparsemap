@@ -814,6 +814,14 @@ __sm_chunk_select(__sm_chunk_t *chunk, ssize_t n, ssize_t *offset, bool value)
 /**
  * @brief Ranks bits within the range [from, to].
  *
+ * Scans the \b chunk until after \b from bits (of any value) have passed and
+ * then begins counting the bits that match \b value. The result should never be
+ * greater than \b to + 1.  The range is inclusive and indexes are
+ * 0-based. Calling this function with `from = 0` and `to = 0`, which is the
+ * range [0, 0], will compare 1 bit at the position 0 against value. The range
+ * [0, 9] will examine 10 bits, starting with the 0th and ending with the 9th and
+ * return at most a count of 10.
+ *
  * @param[out] rank Additional results, remaining bits and last position.
  * @param[in] state The state of bits, set or unset, to rank.
  * @param[in] chunk The chunk to examine.
@@ -822,7 +830,7 @@ __sm_chunk_select(__sm_chunk_t *chunk, ssize_t n, ssize_t *offset, bool value)
  * @return the sum of the set bits in the range [from, to], 0 if none.
  */
 static size_t
-__sm_chunk_rank_(__sm_chunk_rank_t *rank, bool state, __sm_chunk_t *chunk, size_t from, size_t to)
+__sm_chunk_rank(__sm_chunk_rank_t *rank, bool state, __sm_chunk_t *chunk, size_t from, size_t to)
 {
   size_t amt = 0;
   size_t cap = __sm_chunk_get_capacity(chunk);
@@ -971,42 +979,6 @@ done:;
   return amt;
 }
 
-/** @brief Counts the bits matching \b value in the range [0, \b idx]
- * inclusive after ignoring the first \b offset bits in the chunk.
- *
- * Scans the \b chunk until after \b offset bits (of any value) have
- * passed and then begins counting the bits that match \b value. The
- * result should never be greater than \b idx + 1 maxing out at
- * SM_BITS_PER_VECTOR.  A range of [0, 0] will count 1 bit at \b offset
- * + 1 in this chunk.  A range of [0, 9] will count 10 bits, starting
- * with the 0th and ending with the 9th and return at most a count of
- * 10.
- *
- * @param[in] chunk The chunk in question.
- * @param[in,out] begin Decreases \b offset by the number of bits ignored,
- * at most by SM_BITS_PER_VECTOR if sparse or SM_CHUNK_RLE_MAX_CAPACITY if RLE.
- * @param[in] end The ending value of the range (inclusive) to count.
- * @param[out] pos_in_chunk The position of the last bit examined in this chunk,
- * always
- * <= SM_BITS_PER_VECTOR, used when counting unset bits that fall within this
- * chunk's range but after the last set bit.
- * @param[out] last_bitvec The last __sm_bitvec_t, masked and shifted, so as to be able
- * to examine the bits used in the last portion of the ranking as a way to
- * skip forward during a #span() operation.
- * @param[in] value Informs what we're seeking, set or unset bits.
- * @returns the count of the bits matching \b value within the range.
- */
-static size_t
-__sm_chunk_rank(__sm_chunk_t *chunk, size_t *begin, size_t end, size_t *pos_in_chunk, __sm_bitvec_t *last_bitvec, bool value)
-{
-  __sm_chunk_rank_t rank;
-  size_t amt = __sm_chunk_rank_(&rank, value, chunk, *begin, end);
-  *pos_in_chunk = rank.pos;
-  *begin = rank.pos > *begin ? 0 : *begin - rank.pos;
-  *last_bitvec = rank.rem;
-  return amt;
-}
-
 /** @brief Calls \b scanner with sm_bitmap_t for each vector in this chunk.
  *
  * Decompresses the whole chunk into separate bitmaps then calls visitor's
@@ -1118,7 +1090,7 @@ __sm_get_chunk_data(sparsemap_t *map, size_t offset)
   return &map->m_data[SM_SIZEOF_OVERHEAD + offset];
 }
 
-/**
+/** @brief
  * TODO only call this with an offset of an RLE chunk
  */
 static size_t
@@ -2709,8 +2681,12 @@ __sm_rank_vec(sparsemap_t *map, size_t begin, size_t end, bool value, __sm_bitve
     __sm_chunk_init(&chunk, p);
 
     /* Count all the set/unset inside this chunk within the range. */
-    amt = __sm_chunk_rank(&chunk, &begin, end - start, &pos, vec, value);
+    __sm_chunk_rank_t rank;
+    amt = __sm_chunk_rank(&rank, value, &chunk, begin, end - start);
     result += amt;
+    pos = rank.pos;
+    begin = rank.pos > begin ? 0 : begin - rank.pos;
+    //vec = rank.rem;
     p += __sm_chunk_get_size(&chunk);
   }
   /* Count any additional unset bits that fall outside the last chunk but
