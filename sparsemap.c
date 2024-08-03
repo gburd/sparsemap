@@ -1988,6 +1988,7 @@ __sparsemap_set(sparsemap_t *map, sparsemap_idx_t idx, uint8_t *p, size_t offset
 sparsemap_idx_t
 sparsemap_set(sparsemap_t *map, sparsemap_idx_t idx)
 {
+  __sm_chunk_t chunk;
   sparsemap_idx_t ret_idx = idx;
   __sm_assert(sparsemap_get_size(map) >= SM_SIZEOF_OVERHEAD);
 
@@ -2013,6 +2014,9 @@ sparsemap_set(sparsemap_t *map, sparsemap_idx_t idx)
 
     __sm_bitvec_t *v = (__sm_bitvec_t *)(uintptr_t)p + SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t);
     ret_idx = __sparsemap_set(map, idx, p, 0, v);
+
+    __sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
+    offset = 0;
     goto done;
   }
 
@@ -2044,7 +2048,6 @@ sparsemap_set(sparsemap_t *map, sparsemap_idx_t idx)
     goto done;
   }
 
-  __sm_chunk_t chunk;
   __sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
   size_t capacity = __sm_chunk_get_capacity(&chunk);
 
@@ -2138,9 +2141,8 @@ sparsemap_set(sparsemap_t *map, sparsemap_idx_t idx)
     goto done;
   }
 
-  // TODO: why does this fail if placed after done?
-  __sm_coalesce_chunk(map, &chunk, offset, start, p);
 done:;
+  __sm_coalesce_chunk(map, &chunk, offset, start, p);
   //__sm_when_diag({ fprintf(stdout, "\n++++++++++++++++++++++++++++++ set: %lu\n%s\n", idx, QCC_showSparsemap(map, 0)); });
   return ret_idx;
 }
