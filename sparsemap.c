@@ -1090,8 +1090,18 @@ __sm_get_chunk_data(sparsemap_t *map, size_t offset)
   return &map->m_data[SM_SIZEOF_OVERHEAD + offset];
 }
 
-/** @brief
- * TODO only call this with an offset of an RLE chunk
+/** @brief Either max capacity or limited by next chunk.
+ *
+ * Use this function to determine the available room (capacity) in bits between
+ * the end of an RLE chunk and the beginning of the next chunk (if one exists).
+ * This function will assume that \b offset is the location of an RLE chunk and
+ * then using that probe for the start of the next chunk.
+ *
+ * @param[in] map The map containing the RLE chunk.
+ * @param[in] start The starting index of the RLE chunk.
+ * @param[in] offset The offset in m_data of the RLE chunk.
+ * @return a value between [0, SM_CHUNK_RLE_MAX_CAPACITY] based on the
+ * position/existence of the next chunk in the map.
  */
 static size_t
 __sm_chunk_rle_capacity_limit(sparsemap_t *map, __sm_idx_t start, size_t offset)
@@ -1931,7 +1941,9 @@ sparsemap_unset(sparsemap_t *map, sparsemap_idx_t idx)
   }
 
 done:;
-  __sm_coalesce_chunk(map, &chunk, offset, start, p);
+  if (offset != SPARSEMAP_IDX_MAX) {
+    __sm_coalesce_chunk(map, &chunk, offset, start, p);
+  }
   //__sm_when_diag({ fprintf(stdout, "\n++++++++++++++++++++++++++++++ unset: %lu\n%s\n", idx, QCC_showSparsemap(map, 0)); });
   return ret_idx;
 }
