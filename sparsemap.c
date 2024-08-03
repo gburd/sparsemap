@@ -847,9 +847,8 @@ __sm_chunk_rank(__sm_chunk_rank_t *rank, bool state, __sm_chunk_t *chunk, size_t
 
   if (SM_IS_CHUNK_RLE(chunk)) {
     /* This is a run-length (RLE) encoded chunk. */
-
     size_t end = __sm_chunk_rle_get_length(chunk) - 1;
-    rank->rem = 0; // TODO
+    rank->rem = 0;
     if (state) {
       if (from <= end) {
         amt = to - from + 1;
@@ -1173,11 +1172,14 @@ __sm_get_size_impl(sparsemap_t *map)
 
 /** @brief Provides the byte offset of the chunk containing the bit at \b idx.
  *
- * TODO...
+ * Chunks live within the m_data buffer space, this function will find the
+ * 0-based offset into that buffer of the chunk containing idx if one exists.
+ * If the index falls outside of all chunks it returns the offset of the chunk
+ * before the idx, if there are no chunks in the map it returns -1.
  *
  * @param[in] map A sparsemap_t.
  * @param[in] idx Seeking the offset of a chunk for this index.
- * @returns the offset of the __sm_chunk_t in m_data, or -1 if there
+ * @returns the offset of the chunk in m_data that contains idx, or -1 if there
  * are no chunks.
  */
 static ssize_t
@@ -1292,7 +1294,6 @@ __sm_remove_data(sparsemap_t *map, size_t offset, size_t gap_size)
  *
  * @returns the number of chunks to be removed from the map
  */
-// TODO __sparsemap_coalesce(sparsemap_t *map)
 static int
 __sm_coalesce_chunk(sparsemap_t *map, __sm_chunk_t *chunk, size_t offset, __sm_idx_t start, uint8_t *p)
 {
