@@ -341,21 +341,24 @@ void sparsemap_scan(sparsemap_t *map, void (*scanner)(uint32_t vec[], size_t n, 
  * @param[in] source The bitmap to merge into \b destination.
  * @returns 0 on success, or sets errno to ENOSPC and returns the amount of
  * additional space required to successfully merge the maps.
+ * @todo change return to SPARSEMAP_IDX_MAX on ENOSPC to match other functions
  */
 int sparsemap_merge(sparsemap_t *destination, sparsemap_t *source);
 
-/** @brief Splits the bitmap by assigning all bits starting at \b offset to the
+/** @brief Splits the bitmap by assigning all bits starting at \b idx to the
  * \b other bitmap while removing them from \b map.
  *
- * The \b other bitmap is expected to be empty.
+ * Splits into [start, idx), and [idx, end]. The \b other bitmap is
+ * expected to be empty.
  *
  * @param[in] map The sparsemap reference.
- * @param[in] offset The 0-based offset into the bitmap at which to split, if
+ * @param[in] idx The 0-based idx into the bitmap at which to split, if
  * set to SPARSEMAP_IDX_MAX then the bits will be evenly split.
  * @param[in] other The bitmap into which we place the split.
- * @returns the offset at which the map was split
+ * @returns the idx at which the map was split, or sets errno to ENOSPC and
+ * returns SPARSEMAP_IDX_MAX.
  */
-sparsemap_idx_t sparsemap_split(sparsemap_t *map, sparsemap_idx_t offset, sparsemap_t *other);
+sparsemap_idx_t sparsemap_split(sparsemap_t *map, sparsemap_idx_t idx, sparsemap_t *other);
 
 /** @brief Finds the index of the \b n'th bit set to \b value.
  *

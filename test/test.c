@@ -683,9 +683,9 @@ test_api_get_end_offset(const MunitParameter params[], void *data)
   size_t exp = n + 13012 - 1;
   size_t eoff = sparsemap_get_ending_offset(map);
   assert_true(sparsemap_get_ending_offset(map) == 13012 + n - 1);
-  //fprintf(stdout, "\n%s\n", QCC_showSparsemap(map, 0));
+  // fprintf(stdout, "\n%s\n", QCC_showSparsemap(map, 0));
   sparsemap_set(map, 13012 + n + 100);
-  //fprintf(stdout, "\n%s\n", QCC_showSparsemap(map, 0));
+  // fprintf(stdout, "\n%s\n", QCC_showSparsemap(map, 0));
   assert_true(sparsemap_get_ending_offset(map) == 13112 + n);
 
   return MUNIT_OK;
@@ -789,6 +789,7 @@ test_api_split_tear_down(void *fixture)
 static MunitResult
 test_api_split(const MunitParameter params[], void *data)
 {
+  sparsemap_idx_t offset;
   sparsemap_t *map = (sparsemap_t *)data;
   uint8_t buf[1024] = { 0 };
   sparsemap_t portion;
@@ -797,6 +798,39 @@ test_api_split(const MunitParameter params[], void *data)
   assert_ptr_not_null(map);
 
   sparsemap_init(&portion, buf, 1024);
+
+  for (int i = 0; i <= 4096; i++) {
+#if 1
+    size_t amt = 0;
+#else
+    size_t amt = populate_map_rle(map, i, 7, 8178);
+#endif
+    for (sparsemap_idx_t j = i; j < amt + 2048; j++) {
+#if 1
+      sparsemap_clear(map);
+      amt = populate_map_rle(map, i, 7, 8178);
+#endif
+      sparsemap_clear(&portion);
+      size_t rank = i == j ? 0 : sparsemap_rank(map, i, j - 1, true);
+      offset = sparsemap_split(map, j, &portion);
+      if (sparsemap_count(map) != rank) {
+        fprintf(stdout, "yikes");
+      }
+      assert_true(sparsemap_count(map) == rank);
+      if (sparsemap_count(&portion) != amt - rank) {
+        fprintf(stdout, "yikes");
+      }
+      assert_true(sparsemap_count(&portion) == amt - rank);
+#if 0
+      sparsemap_merge(map, &portion);
+      if (*(uint32_t *)map->m_data != 1) {
+        fprintf(stdout, "yikes");
+      }
+#endif
+    }
+  }
+  sparsemap_clear(map);
+  sparsemap_clear(&portion);
 
   for (sparsemap_idx_t off = 0; off < 1024; off++) {
     for (sparsemap_idx_t seg = 0; seg < 10 * 1024; seg += 1024) {
@@ -833,7 +867,7 @@ test_api_split(const MunitParameter params[], void *data)
     assert_false(sparsemap_is_set(&portion, i));
   }
 
-  sparsemap_idx_t offset = sparsemap_split(map, SPARSEMAP_IDX_MAX, &portion);
+  offset = sparsemap_split(map, SPARSEMAP_IDX_MAX, &portion);
 
   for (sparsemap_idx_t i = 0; i < offset; i++) {
     assert_true(sparsemap_is_set(map, i));

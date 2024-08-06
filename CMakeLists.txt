@@ -15,7 +15,7 @@ set(SOURCE_DIR .)
 set(HEADER_DIR . test)
 
 set(COMMON_CMAKE_C_FLAGS "-std=c11 -Wall -Wextra -Wpedantic")
-set(CMAKE_C_FLAGS_DEBUG "-DSPARSEMAP_DIAGNOSTIC -DSPARSEMAP_TESTING -DDEBUG -g -Og")
+set(CMAKE_C_FLAGS_DEBUG "-DSPARSEMAP_DIAGNOSTIC -DSPARSEMAP_TESTING -DDEBUG -g -O0")
 set(CMAKE_C_FLAGS_PROFILE "-DSPARSEMAP_DIAGNOSTIC -DSPARSEMAP_TESTING -DDEBUG -g -Og -fsanitize=address,leak,object-size,pointer-compare,pointer-subtract,null,return,bounds,pointer-overflow,undefined -fsanitize-address-use-after-scope")
 set(CMAKE_C_FLAGS_RELEASE "-Ofast")
 
