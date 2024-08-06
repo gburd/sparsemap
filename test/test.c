@@ -814,11 +814,11 @@ test_api_split(const MunitParameter params[], void *data)
       size_t rank = i == j ? 0 : sparsemap_rank(map, i, j - 1, true);
       offset = sparsemap_split(map, j, &portion);
       if (sparsemap_count(map) != rank) {
-        fprintf(stdout, "yikes");
+        fprintf(stdout, "exp: %lu\tgot: %lu", rank, sparsemap_count(map));
       }
       assert_true(sparsemap_count(map) == rank);
       if (sparsemap_count(&portion) != amt - rank) {
-        fprintf(stdout, "yikes");
+        fprintf(stdout, "exp: %lu\tgot: %lu", amt - rank, sparsemap_count(&portion));
       }
       assert_true(sparsemap_count(&portion) == amt - rank);
 #if 0
