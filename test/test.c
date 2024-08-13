@@ -799,36 +799,25 @@ test_api_split(const MunitParameter params[], void *data)
 
   sparsemap_init(&portion, buf, 1024);
 
-  for (int i = 0; i <= 4096; i++) {
-#if 1
-    size_t amt = 0;
-#else
-    size_t amt = populate_map_rle(map, i, 7, 8178);
-#endif
-    for (sparsemap_idx_t j = i; j < amt + 2048; j++) {
-#if 1
-      sparsemap_clear(map);
-      amt = populate_map_rle(map, i, 7, 8178);
-#endif
-      sparsemap_clear(&portion);
-      size_t rank = i == j ? 0 : sparsemap_rank(map, i, j - 1, true);
-      offset = sparsemap_split(map, j, &portion);
-      if (sparsemap_count(map) != rank) {
-        fprintf(stdout, "exp: %lu\tgot: %lu", rank, sparsemap_count(map));
-      }
-      assert_true(sparsemap_count(map) == rank);
-      if (sparsemap_count(&portion) != amt - rank) {
-        fprintf(stdout, "exp: %lu\tgot: %lu", amt - rank, sparsemap_count(&portion));
-      }
-      assert_true(sparsemap_count(&portion) == amt - rank);
-#if 0
-      sparsemap_merge(map, &portion);
-      if (*(uint32_t *)map->m_data != 1) {
-        fprintf(stdout, "yikes");
-      }
-#endif
+  size_t amt = populate_map_rle(map, 0, 7, 8178);
+  for (sparsemap_idx_t i = 0; i < amt + 2049; i++) {
+    sparsemap_clear(&portion);
+    size_t rank = sparsemap_rank(map, 0, i, true);
+    offset = sparsemap_split(map, i + 1, &portion);
+    if (sparsemap_count(map) != rank) {
+      fprintf(stdout, "exp: %lu\tgot: %lu", rank, sparsemap_count(map));
+    }
+    assert_true(sparsemap_count(map) == rank);
+    if (sparsemap_count(&portion) != amt - rank) {
+      fprintf(stdout, "exp: %lu\tgot: %lu", amt - rank, sparsemap_count(&portion));
+    }
+    assert_true(sparsemap_count(&portion) == amt - rank);
+    sparsemap_merge(map, &portion);
+    if (*(uint32_t *)map->m_data != 1) {
+      fprintf(stdout, "yikes");
     }
   }
+
   sparsemap_clear(map);
   sparsemap_clear(&portion);
 

@@ -84,11 +84,15 @@ char *QCC_showSparsemap(void *value, int len);
 char *QCC_showChunk(void *value, int len);
 static char *_qcc_format_chunk(__sm_idx_t start, __sm_chunk_t *chunk, bool none);
 
-static void
-__sm_diag_map(const char *msg, sparsemap_t *map)
+static void __attribute__((format(printf, 2, 3)))
+__sm_diag_map(sparsemap_t *map, const char *fmt, ...)
 {
+  va_list args = { 0 };
+  va_start(args, fmt);
+  vfprintf(stdout, fmt, args);
+  va_end(args);
   char *s = QCC_showSparsemap(map, 0);
-  fprintf(stdout, "%s\n%s\n", msg, s);
+  fprintf(stdout, "\n%s\n", s);
   free(s);
 }
 
@@ -2415,6 +2419,7 @@ sparsemap_merge(sparsemap_t *destination, sparsemap_t *source)
     return 0;
   }
 
+  // TODO: rethink this method of estimating space... seems off to me now...
   ssize_t remaining_capacity = destination->m_capacity - destination->m_data_used -
     (source->m_data_used + src_count * (SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) * 2));
 
@@ -2424,11 +2429,23 @@ sparsemap_merge(sparsemap_t *destination, sparsemap_t *source)
     return -remaining_capacity;
   }
 
+  /*
+   * Strategy here it to walk the ordered set of chunks in the source map
+   * examining each one against the current destination chunk.  This is similar
+   * to a merge sort with two cursors, one in src and one in dst.  Then there
+   * are a number of cases to consider:
+   * - src proceeds dst
+   * - src follows dst
+   * - src and dst overlap
+   *   - perfect overlap
+   *   - non-uniform overlap
+   */
   src = __sm_get_chunk_data(source, 0);
   while (src_count) {
     __sm_idx_t src_start = *(__sm_idx_t *)src;
     __sm_chunk_t src_chunk;
     __sm_chunk_init(&src_chunk, src + SM_SIZEOF_OVERHEAD);
+    bool src_is_rle = SM_IS_CHUNK_RLE(&src_chunk);
     size_t src_capacity = __sm_chunk_get_capacity(&src_chunk);
     ssize_t dst_offset = __sm_get_chunk_offset(destination, src_start);
     if (dst_offset >= 0) {
@@ -2436,34 +2453,41 @@ sparsemap_merge(sparsemap_t *destination, sparsemap_t *source)
       __sm_idx_t dst_start = *(__sm_idx_t *)dst;
       __sm_chunk_t dst_chunk;
       __sm_chunk_init(&dst_chunk, dst + SM_SIZEOF_OVERHEAD);
+      bool dst_is_rle = SM_IS_CHUNK_RLE(&dst_chunk);
       size_t dst_capacity = __sm_chunk_get_capacity(&dst_chunk);
 
       /* Try to expand the capacity if there's room before the start of the next chunk. */
-      if (src_start == dst_start && dst_capacity < src_capacity) {
-        ssize_t nxt_offset = __sm_get_chunk_offset(destination, dst_start + dst_capacity + 1);
-        uint8_t *nxt_dst = __sm_get_chunk_data(destination, nxt_offset);
-        __sm_idx_t nxt_dst_start = *(__sm_idx_t *)nxt_dst;
-        if (nxt_dst_start > dst_start + src_capacity) {
-          __sm_chunk_increase_capacity(&dst_chunk, src_capacity);
-          dst_capacity = __sm_chunk_get_capacity(&dst_chunk);
+      if (!(src_is_rle || dst_is_rle)) {
+        if (src_start == dst_start && dst_capacity < src_capacity) {
+          ssize_t nxt_offset = __sm_get_chunk_offset(destination, dst_start + dst_capacity + 1);
+          uint8_t *nxt_dst = __sm_get_chunk_data(destination, nxt_offset);
+          __sm_idx_t nxt_dst_start = *(__sm_idx_t *)nxt_dst;
+          if (nxt_dst_start > dst_start + src_capacity) {
+            __sm_chunk_increase_capacity(&dst_chunk, src_capacity);
+            dst_capacity = __sm_chunk_get_capacity(&dst_chunk);
+          }
         }
       }
 
-      /* Source chunk precedes next destination chunk. */
+      /* Source chunk (sparse/RLE) precedes next destination chunk. */
       if ((src_start + src_capacity) <= dst_start) {
         size_t src_size = __sm_chunk_get_size(&src_chunk);
         ssize_t offset = __sm_get_chunk_offset(destination, dst_start);
+        /* Insert a copy of the src chunk in dst at the proper offset. */
         __sm_insert_data(destination, offset, src, SM_SIZEOF_OVERHEAD + src_size);
-        /* Update the chunk count and data_used. */
+        /* Update the chunk count in dst. */
         __sm_set_chunk_count(destination, __sm_get_chunk_count(destination) + 1);
+
+        /* Move to the next src chunk. */
         src_count--;
         src += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&src_chunk);
         continue;
       }
 
-      /* Source chunk follows next destination chunk. */
+      /* Source chunk (sparse/RLE) follows next destination chunk. */
       if (src_start >= (dst_start + dst_capacity)) {
         size_t src_size = __sm_chunk_get_size(&src_chunk);
+        /* Insert or append a copy of the src chunk in dst. */
         if (dst_offset == __sm_get_chunk_offset(destination, SPARSEMAP_IDX_MAX)) {
           __sm_append_data(destination, src, SM_SIZEOF_OVERHEAD + src_size);
         } else {
@@ -2472,14 +2496,42 @@ sparsemap_merge(sparsemap_t *destination, sparsemap_t *source)
         }
         /* Update the chunk count and data_used. */
         __sm_set_chunk_count(destination, __sm_get_chunk_count(destination) + 1);
+
+        /* Move to the next src chunk. */
         src_count--;
         src += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&src_chunk);
         continue;
       }
 
-      /* Source and destination and a perfect overlapping pair. */
+      /* At this point we know that the dst chunk and src chunk overlap. */
+      size_t src_length = __sm_chunk_rle_get_length(&src_chunk);
+      size_t dst_length = __sm_chunk_rle_get_length(&dst_chunk);
+      size_t src_capacity = __sm_chunk_get_capacity(&src_chunk);
+
+      if (src_is_rle && dst_is_rle) {
+        /* Both src and dst are RLE ... */
+        __sm_chunk_rle_set_capacity(&dst_chunk, __sm_chunk_rle_capacity_limit(destination, src_start, dst_offset));
+        if (src_length >= dst_length) {
+          /* ... and src is larger than dst. */
+          __sm_chunk_rle_set_length(&dst_chunk, __sm_chunk_rle_get_length(&src_chunk));
+        }
+        if (src_start <= dst_start) {
+          /* ... and src starts before dst. */
+          *(__sm_idx_t *)dst = src_start;
+        }
+
+        /* Move to the next src chunk. */
+        src_count--;
+        src += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&src_chunk);
+        continue;
+      }
+
+      /* Source and destination start at the same point. */
       if (src_start == dst_start && src_capacity == dst_capacity) {
+        /* Source and destination and a perfect overlapping non-RLE pair. */
         __sm_merge_chunk(destination, src_start, dst_start, dst_capacity, &dst_chunk, &src_chunk);
+
+        /* Move to the next src chunk. */
         src_count--;
         src += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&src_chunk);
         continue;
@@ -2496,11 +2548,17 @@ sparsemap_merge(sparsemap_t *destination, sparsemap_t *source)
             sparsemap_set(destination, n);
           }
         }
+
+        /* Move to the next src chunk. */
         src_count--;
         src += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&src_chunk);
         continue;
       }
+
+      abort();
     } else {
+      /* A negative destination offset indicates an empty map. */
+
       if (src_start >= dst_ending_offset) {
         /* Starting offset is after destination chunks, so append data. */
         size_t src_size = __sm_chunk_get_size(&src_chunk);
@@ -2509,6 +2567,7 @@ sparsemap_merge(sparsemap_t *destination, sparsemap_t *source)
         /* Update the chunk count and data_used. */
         __sm_set_chunk_count(destination, __sm_get_chunk_count(destination) + 1);
 
+        /* Move to the next src chunk. */
         src_count--;
         src += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&src_chunk);
         continue;
@@ -2521,6 +2580,7 @@ sparsemap_merge(sparsemap_t *destination, sparsemap_t *source)
         /* Update the chunk count and data_used. */
         __sm_set_chunk_count(destination, __sm_get_chunk_count(destination) + 1);
 
+        /* Move to the next src chunk. */
         src_count--;
         src += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&src_chunk);
         continue;
@@ -2542,7 +2602,7 @@ sparsemap_split(sparsemap_t *map, sparsemap_idx_t idx, sparsemap_t *other)
 
   __sm_assert(sparsemap_count(other) == 0);
 
-  __sm_when_diag({ __sm_diag_map("========== START:", map); });
+  __sm_when_diag({ __sm_diag_map(map, "========== START: %lu", idx); });
 
   /*
    * According to the API when idx is SPARSEMAP_IDX_MAX the client is
@@ -2651,7 +2711,7 @@ sparsemap_split(sparsemap_t *map, sparsemap_idx_t idx, sparsemap_t *other)
       memcpy(src, sep.buf, sep.expand_by + SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t));
       __sm_set_chunk_count(map, __sm_get_chunk_count(map) + (sep.count - 1));
 
-      __sm_when_diag({ __sm_diag_map("========== PREPARED:", map); });
+      __sm_when_diag({ __sm_diag_map(map, "========== PREPARED:"); });
       return sparsemap_split(map, idx, other);
     }
 
@@ -2714,8 +2774,8 @@ sparsemap_split(sparsemap_t *map, sparsemap_idx_t idx, sparsemap_t *other)
   __sm_coalesce_map(other);
 
   __sm_when_diag({
-    __sm_diag_map("SRC", map);
-    __sm_diag_map("DST", other);
+    __sm_diag_map(map, "SRC");
+    __sm_diag_map(other, "DST");
   });
 
   return idx;
