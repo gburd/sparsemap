@@ -686,7 +686,7 @@ test_api_get_end_offset(const MunitParameter params[], void *data)
   // fprintf(stdout, "\n%s\n", QCC_showSparsemap(map, 0));
   sparsemap_set(map, 13012 + n + 100);
   // fprintf(stdout, "\n%s\n", QCC_showSparsemap(map, 0));
-  assert_true(sparsemap_get_ending_offset(map) == 13112 + n);
+  assert_true(sparsemap_get_ending_offset(map) == 13012 + 100 + n);
 
   return MUNIT_OK;
 }

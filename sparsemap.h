@@ -112,7 +112,7 @@ sparsemap_t *sparsemap(size_t size);
  *
  * @param[in] other The sparsemap to copy.
  */
-sparsemap_t *sparsemap_copy(sparsemap_t *other);
+sparsemap_t *sparsemap_copy(const sparsemap_t *other);
 
 /** @brief Allocate a new, empty sparsemap_t that references (wraps) the buffer
  * \b data of \b size bytes to use for storage of bitmap data.
@@ -206,7 +206,7 @@ sparsemap_t *sparsemap_set_data_size(sparsemap_t *map, uint8_t *data, size_t siz
  * @returns an estimate for remaining capacity that approaches 0.0 when full or
  * 100.0 when empty
  */
-double sparsemap_capacity_remaining(sparsemap_t *map);
+double sparsemap_capacity_remaining(const sparsemap_t *map);
 
 /** @brief Returns the capacity of the underlying byte array in bytes.
  *
@@ -216,7 +216,7 @@ double sparsemap_capacity_remaining(sparsemap_t *map);
  * @param[in] map The sparsemap reference.
  * @returns byte size of the buffer used for storing bitmap data
  */
-size_t sparsemap_get_capacity(sparsemap_t *map);
+size_t sparsemap_get_capacity(const sparsemap_t *map);
 
 /** @brief Returns the value of a bit at index \b idx, either true for "set" (1)
  * or \b false for "unset" (0).
@@ -285,7 +285,7 @@ size_t sparsemap_get_size(sparsemap_t *map);
  * @param[in] map The sparsemap reference.
  * @returns a pointer to the data buffer used for the map
  */
-void *sparsemap_get_data(sparsemap_t *map);
+void *sparsemap_get_data(const sparsemap_t *map);
 
 /** @brief Returns the number of elements in the map.
  *
@@ -302,7 +302,7 @@ size_t sparsemap_count(sparsemap_t *map);
  * @param[in] map The sparsemap reference.
  * @returns the offset of the first bit set in the map
  */
-sparsemap_idx_t sparsemap_get_starting_offset(sparsemap_t *map);
+sparsemap_idx_t sparsemap_get_starting_offset(const sparsemap_t *map);
 
 /** @brief Returns the offset of the last bit set in the map.
  *
@@ -312,7 +312,7 @@ sparsemap_idx_t sparsemap_get_starting_offset(sparsemap_t *map);
  * @param[in] map The sparsemap reference.
  * @returns the offset of the index bit set in the map
  */
-sparsemap_idx_t sparsemap_get_ending_offset(sparsemap_t *map);
+sparsemap_idx_t sparsemap_get_ending_offset(const sparsemap_t *map);
 
 /** @brief Returns the percent of bits set in the map.
  *
@@ -331,7 +331,7 @@ double sparsemap_fill_factor(sparsemap_t *map);
  * @param[in] skip Start the scan after \b skip position in the map.
  * @param[in] aux Auxiliary information passed to the scanner.
  */
-void sparsemap_scan(sparsemap_t *map, void (*scanner)(uint32_t vec[], size_t n, void *aux), size_t skip, void *aux);
+void sparsemap_scan(const sparsemap_t *map, void (*scanner)(uint32_t vec[], size_t n, void *aux), size_t skip, void *aux);
 
 /** @brief Merges the values from \b source into \b destination, \b source is unchanged.
  *
@@ -343,7 +343,7 @@ void sparsemap_scan(sparsemap_t *map, void (*scanner)(uint32_t vec[], size_t n, 
  * additional space required to successfully merge the maps.
  * @todo change return to SPARSEMAP_IDX_MAX on ENOSPC to match other functions
  */
-int sparsemap_merge(sparsemap_t *destination, sparsemap_t *source);
+size_t sparsemap_merge(sparsemap_t *destination, sparsemap_t *source);
 
 /** @brief Splits the bitmap by assigning all bits starting at \b idx to the
  * \b other bitmap while removing them from \b map.
