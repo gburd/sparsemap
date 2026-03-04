@@ -39,6 +39,7 @@ TEST_SOURCES = tests/test.c tests/common.c tests/munit.c tests/qc.c \
                tests/roaring.c tests/tdigest.c tests/midl.c
 TEST_OBJECTS = $(TEST_SOURCES:.c=.o)
 TEST_BINARY = tests/test
+TEST_LIB_OBJECT = src/sparsemap_testing.o
 
 RLE_TEST_SOURCES = tests/test_rle_standalone.c
 RLE_TEST_OBJECTS = $(RLE_TEST_SOURCES:.c=.o)
@@ -90,21 +91,28 @@ $(LIB_SHARED): $(LIB_OBJECTS)
 	$(CC) -shared -o $@ $^ $(LDFLAGS) $(LIBS)
 
 src/sparsemap.o: src/sparsemap.c $(LIB_HEADERS)
-	$(CC) $(CFLAGS) -c -o $@ $<
+	$(CC) -std=gnu11 -Wall -Wextra -Werror -I./include $(if $(DEBUG),-g -O0 -DDEBUG,-O3) $(if $(DIAGNOSTIC),-DSPARSEMAP_DIAGNOSTIC) -c -o $@ $<
 
 # Test targets
 tests: CFLAGS += -DSPARSEMAP_TESTING -I./tests
 tests: CFLAGS := $(filter-out -Werror,$(CFLAGS))
 tests: $(TEST_BINARY) $(RLE_TEST_BINARY) $(SOAK_BINARY)
 
-$(TEST_BINARY): $(TEST_OBJECTS) $(LIB_STATIC)
-	$(CC) $(CFLAGS) -o $@ $(TEST_OBJECTS) $(LIB_STATIC) $(LDFLAGS) $(LIBS)
+$(TEST_BINARY): $(TEST_OBJECTS) $(TEST_LIB_OBJECT) $(LIB_STATIC)
+	$(CC) $(CFLAGS) -o $@ $(TEST_OBJECTS) $(TEST_LIB_OBJECT) $(LIB_STATIC) $(LDFLAGS) $(LIBS)
+
+# Build testing-enabled version of library for QuickCheck functions
+src/sparsemap_testing.o: src/sparsemap.c $(LIB_HEADERS)
+	$(CC) -std=gnu11 -Wall -Wextra -I./include -I./tests $(if $(DEBUG),-g -O0 -DDEBUG,-O3) $(if $(DIAGNOSTIC),-DSPARSEMAP_DIAGNOSTIC) -DSPARSEMAP_TESTING -c -o $@ $<
 
 $(RLE_TEST_BINARY): $(RLE_TEST_OBJECTS) $(LIB_STATIC)
-	$(CC) $(CFLAGS) -o $@ $(RLE_TEST_OBJECTS) $(LIB_STATIC) $(LDFLAGS) $(LIBS)
+	$(CC) -o $@ $(RLE_TEST_OBJECTS) $(LIB_STATIC) $(LDFLAGS) $(LIBS)
 
 $(SOAK_BINARY): $(SOAK_OBJECTS) $(LIB_STATIC)
 	$(CC) $(CFLAGS) -o $@ $(SOAK_OBJECTS) $(LIB_STATIC) $(LDFLAGS) $(LIBS)
+
+tests/test_rle_standalone.o: tests/test_rle_standalone.c
+	$(CC) -std=gnu11 -Wall -Wextra -I./include -O3 -c -o $@ $<
 
 tests/%.o: tests/%.c
 	$(CC) $(CFLAGS) -DSPARSEMAP_TESTING -I./tests -c -o $@ $<
