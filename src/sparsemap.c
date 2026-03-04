@@ -3172,7 +3172,6 @@ sparsemap_split(sparsemap_t *map, sparsemap_idx_t idx, sparsemap_t *other)
   }
 
   /* (2): The idx falls within a chunk then it has to be split. */
-  fprintf(stderr, "After scan: idx=%lu i=%zu count=%zu in_middle=%d\n", idx, i, count, in_middle); fflush(stderr);
   if (in_middle) {
     __sm_chunk_t s_chunk, d_chunk;
     __sm_chunk_init(&s_chunk, src + SM_SIZEOF_OVERHEAD);
@@ -3227,10 +3226,7 @@ sparsemap_split(sparsemap_t *map, sparsemap_idx_t idx, sparsemap_t *other)
       __sm_set_chunk_count(map, __sm_get_chunk_count(map) + (sep.count - 1));
 
       //GSB __sm_when_diag({ __sm_diag_map(map, "========== PREPARED:"); });
-      fprintf(stderr, "DEBUG: About to recurse at idx=%lu, map chunks=%zu\n", idx, (size_t)__sm_get_chunk_count(map)); fflush(stderr);
-      sparsemap_idx_t result = sparsemap_split(map, idx, other);
-      fprintf(stderr, "DEBUG: Recursion returned result=%lu\n", result); fflush(stderr);
-      return result;
+      return sparsemap_split(map, idx, other);
     }
 
     /*
@@ -3261,25 +3257,22 @@ sparsemap_split(sparsemap_t *map, sparsemap_idx_t idx, sparsemap_t *other)
   }
 
   /* Now continue with all remaining chunks. */
+  /* Save the offset where moved chunks start, so we can truncate map later */
+  size_t split_offset = src - map->m_data;
   for (; i < count; i++) {
-    __sm_idx_t start = *(__sm_idx_t *)src;
-    src += SM_SIZEOF_OVERHEAD;
     __sm_chunk_t chunk;
-    __sm_chunk_init(&chunk, src);
+    __sm_chunk_init(&chunk, src + SM_SIZEOF_OVERHEAD);
     size_t s = __sm_chunk_get_size(&chunk);
 
-    *(__sm_idx_t *)dst = start;
-    dst += SM_SIZEOF_OVERHEAD;
-    memcpy(dst, src, s);
-    src += s;
-    dst += s;
+    /* Use append_data instead of direct pointer manipulation to handle empty 'other' map */
+    __sm_append_data(other, src, SM_SIZEOF_OVERHEAD + s);
+    src += SM_SIZEOF_OVERHEAD + s;
 
     moved++;
   }
 
-  /* Force new calculation. */
-  other->m_data_used = 0;
-  map->m_data_used = 0;
+  /* Truncate map to only include chunks before the split point */
+  map->m_data_used = split_offset;
 
   /* Update the Chunk counters. */
   __sm_set_chunk_count(map, __sm_get_chunk_count(map) - moved);
