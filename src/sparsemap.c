@@ -3105,7 +3105,6 @@ sparsemap_merge(sparsemap_t *destination, sparsemap_t *source)
 sparsemap_idx_t
 sparsemap_split(sparsemap_t *map, sparsemap_idx_t idx, sparsemap_t *other)
 {
-  int moved = 0;
   size_t i;
   const size_t count = __sm_get_chunk_count(map);
   bool in_middle = false;
@@ -3259,24 +3258,23 @@ sparsemap_split(sparsemap_t *map, sparsemap_idx_t idx, sparsemap_t *other)
   /* Now continue with all remaining chunks. */
   /* Save the offset where moved chunks start, so we can truncate map later */
   size_t split_offset = src - map->m_data;
-  for (; i < count; i++) {
+  size_t chunks_to_move = count - i;
+
+  for (size_t j = 0; j < chunks_to_move; j++) {
     __sm_chunk_t chunk;
     __sm_chunk_init(&chunk, src + SM_SIZEOF_OVERHEAD);
-    size_t s = __sm_chunk_get_size(&chunk);
+    size_t chunk_size = SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&chunk);
 
-    /* Use append_data instead of direct pointer manipulation to handle empty 'other' map */
-    __sm_append_data(other, src, SM_SIZEOF_OVERHEAD + s);
-    src += SM_SIZEOF_OVERHEAD + s;
+    /* Copy chunk to other */
+    __sm_append_data(other, src, chunk_size);
+    __sm_set_chunk_count(other, __sm_get_chunk_count(other) + 1);
 
-    moved++;
+    src += chunk_size;
   }
 
-  /* Truncate map to only include chunks before the split point */
+  /* Update chunk counts and force recalculation of data sizes */
+  __sm_set_chunk_count(map, __sm_get_chunk_count(map) - chunks_to_move);
   map->m_data_used = split_offset;
-
-  /* Update the Chunk counters. */
-  __sm_set_chunk_count(map, __sm_get_chunk_count(map) - moved);
-  __sm_set_chunk_count(other, __sm_get_chunk_count(other) + moved);
 
   __sm_assert(sparsemap_get_size(map) >= SM_SIZEOF_OVERHEAD);
   __sm_assert(sparsemap_get_size(other) > SM_SIZEOF_OVERHEAD);
