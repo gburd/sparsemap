@@ -27,6 +27,13 @@ ifdef TESTING
     CFLAGS += -DSPARSEMAP_TESTING
 endif
 
+# Coverage flags
+ifdef COVERAGE
+    CFLAGS += -fprofile-arcs -ftest-coverage -O0
+    LDFLAGS += -fprofile-arcs
+    # Note: -lgcov not needed on macOS/clang, coverage is built-in
+endif
+
 # Library
 LIB_STATIC = libsparsemap.a
 LIB_SHARED = libsparsemap.dylib
@@ -55,7 +62,7 @@ EXAMPLE_OBJECTS = $(EXAMPLE_SOURCES:.c=.o)
 EXAMPLE_BINARIES = $(EXAMPLE_SOURCES:.c=)
 EXAMPLE_COMMON = tests/common.o tests/munit.o tests/qc.o
 
-.PHONY: all clean install uninstall check examples help
+.PHONY: all clean install uninstall check examples help coverage coverage-report clean-coverage
 
 all: $(LIB_STATIC) $(LIB_SHARED)
 
@@ -63,24 +70,29 @@ help:
 	@echo "Sparsemap Simple Makefile"
 	@echo ""
 	@echo "Targets:"
-	@echo "  all           Build static and shared libraries (default)"
-	@echo "  tests         Build test suite"
-	@echo "  examples      Build example programs"
-	@echo "  check         Run tests"
-	@echo "  install       Install library and headers"
-	@echo "  uninstall     Remove installed files"
-	@echo "  clean         Remove built files"
+	@echo "  all              Build static and shared libraries (default)"
+	@echo "  tests            Build test suite"
+	@echo "  examples         Build example programs"
+	@echo "  check            Run tests"
+	@echo "  coverage         Build with coverage and generate report"
+	@echo "  coverage-report  Open coverage HTML report"
+	@echo "  clean-coverage   Remove coverage data"
+	@echo "  install          Install library and headers"
+	@echo "  uninstall        Remove installed files"
+	@echo "  clean            Remove built files"
 	@echo ""
 	@echo "Options:"
-	@echo "  PREFIX=/path  Installation prefix (default: /usr/local)"
-	@echo "  DEBUG=1       Enable debug build"
-	@echo "  DIAGNOSTIC=1  Enable diagnostic output"
-	@echo "  TESTING=1     Enable testing support"
+	@echo "  PREFIX=/path     Installation prefix (default: /usr/local)"
+	@echo "  DEBUG=1          Enable debug build"
+	@echo "  DIAGNOSTIC=1     Enable diagnostic output"
+	@echo "  TESTING=1        Enable testing support"
+	@echo "  COVERAGE=1       Enable coverage instrumentation"
 	@echo ""
 	@echo "Examples:"
 	@echo "  make -f Makefile.simple"
 	@echo "  make -f Makefile.simple DEBUG=1"
 	@echo "  make -f Makefile.simple tests check"
+	@echo "  make -f Makefile.simple coverage"
 	@echo "  make -f Makefile.simple PREFIX=/tmp/sparsemap install"
 
 # Library targets
@@ -91,7 +103,7 @@ $(LIB_SHARED): $(LIB_OBJECTS)
 	$(CC) -shared -o $@ $^ $(LDFLAGS) $(LIBS)
 
 src/sparsemap.o: src/sparsemap.c $(LIB_HEADERS)
-	$(CC) -std=gnu11 -Wall -Wextra -Werror -I./include $(if $(DEBUG),-g -O0 -DDEBUG,-O3) $(if $(DIAGNOSTIC),-DSPARSEMAP_DIAGNOSTIC) -c -o $@ $<
+	$(CC) -std=gnu11 -Wall -Wextra $(if $(COVERAGE),,-Werror) -I./include $(if $(DEBUG),-g -O0 -DDEBUG,-O3) $(if $(DIAGNOSTIC),-DSPARSEMAP_DIAGNOSTIC) $(if $(COVERAGE),-fprofile-arcs -ftest-coverage -O0) -c -o $@ $<
 
 # Test targets
 tests: CFLAGS += -DSPARSEMAP_TESTING -I./tests
@@ -103,7 +115,7 @@ $(TEST_BINARY): $(TEST_OBJECTS) $(TEST_LIB_OBJECT) $(LIB_STATIC)
 
 # Build testing-enabled version of library for QuickCheck functions
 src/sparsemap_testing.o: src/sparsemap.c $(LIB_HEADERS)
-	$(CC) -std=gnu11 -Wall -Wextra -I./include -I./tests $(if $(DEBUG),-g -O0 -DDEBUG,-O3) $(if $(DIAGNOSTIC),-DSPARSEMAP_DIAGNOSTIC) -DSPARSEMAP_TESTING -c -o $@ $<
+	$(CC) -std=gnu11 -Wall -Wextra -I./include -I./tests $(if $(DEBUG),-g -O0 -DDEBUG,-O3) $(if $(DIAGNOSTIC),-DSPARSEMAP_DIAGNOSTIC) $(if $(COVERAGE),-fprofile-arcs -ftest-coverage -O0) -DSPARSEMAP_TESTING -c -o $@ $<
 
 $(RLE_TEST_BINARY): $(RLE_TEST_OBJECTS) $(LIB_STATIC)
 	$(CC) -o $@ $(RLE_TEST_OBJECTS) $(LIB_STATIC) $(LDFLAGS) $(LIBS)
@@ -115,7 +127,7 @@ tests/test_rle_standalone.o: tests/test_rle_standalone.c
 	$(CC) -std=gnu11 -Wall -Wextra -I./include -O3 -c -o $@ $<
 
 tests/%.o: tests/%.c
-	$(CC) -std=gnu11 -Wall -Wextra -I./include -I./tests $(if $(DEBUG),-g -O0 -DDEBUG,-O3) $(if $(DIAGNOSTIC),-DSPARSEMAP_DIAGNOSTIC) -DSPARSEMAP_TESTING -c -o $@ $<
+	$(CC) -std=gnu11 -Wall -Wextra -I./include -I./tests $(if $(DEBUG),-g -O0 -DDEBUG,-O3) $(if $(DIAGNOSTIC),-DSPARSEMAP_DIAGNOSTIC) $(if $(COVERAGE),-fprofile-arcs -ftest-coverage -O0) -DSPARSEMAP_TESTING -c -o $@ $<
 
 # Example targets
 examples: CFLAGS += -I./tests
@@ -167,3 +179,35 @@ clean:
 	rm -f $(EXAMPLE_OBJECTS) $(EXAMPLE_BINARIES)
 	rm -f tests/*.o examples/*.o src/*.o
 	@echo "Cleaned build artifacts"
+
+# Coverage targets
+coverage: clean
+	@echo "Building with coverage instrumentation..."
+	@$(MAKE) -f Makefile.simple COVERAGE=1 DEBUG=1 tests
+	@echo "Running tests to generate coverage data..."
+	@./$(TEST_BINARY) || true
+	@echo ""
+	@echo "Generating coverage report..."
+	@mkdir -p coverage
+	@cd src && gcov -o . sparsemap_testing.gcda > ../coverage/gcov.log 2>&1 || true
+	@mv src/*.gcov coverage/ 2>/dev/null || true
+	@echo ""
+	@echo "Coverage Summary:"
+	@grep "Lines executed" coverage/gcov.log
+	@grep "Branches taken" coverage/gcov.log || true
+	@echo ""
+	@echo "Detailed coverage in coverage/sparsemap.c.gcov"
+	@echo "Run: less coverage/sparsemap.c.gcov"
+
+coverage-report:
+	@if [ -d coverage/html ]; then \
+		open coverage/html/index.html || xdg-open coverage/html/index.html || \
+		echo "Open coverage/html/index.html in your browser"; \
+	else \
+		echo "Run 'make -f Makefile.simple coverage' first"; \
+	fi
+
+clean-coverage:
+	rm -rf coverage *.gcov *.gcda *.gcno
+	rm -f src/*.gcda src/*.gcno tests/*.gcda tests/*.gcno
+	@echo "Cleaned coverage data"

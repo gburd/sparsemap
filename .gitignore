@@ -7,6 +7,8 @@
 *.dylib
 *.dll
 *.la
+*.gcno
+*.gcda
 
 # Test executables
 tests/test
