@@ -1,0 +1,34 @@
+Sparsemap Release Notes
+========================
+
+Version 1.0.0 (2026-03-04)
+--------------------------
+
+Initial release with:
+* Complete RLE (Run-Length Encoding) implementation
+* Sparse bitmap encoding with 2-bit flags
+* Efficient select() and scan() operations
+* Comprehensive test suite
+* Autoconf/Automake build system
+* MIT License
+
+Features:
+* Sparse, compressed bitmap storage
+* Best case: 2048 bits in 8 bytes
+* Worst case: 2048 bits uncompressed + 8 bytes overhead
+* RLE encoding for long runs of set bits
+* O(1) select for RLE chunks
+* Batch processing for scan operations
+
+API:
+* sparsemap_init()
+* sparsemap_set()
+* sparsemap_unset()
+* sparsemap_is_set()
+* sparsemap_select()
+* sparsemap_scan()
+* sparsemap_rank()
+* sparsemap_count()
+* And more...
+
+For detailed documentation, see README.md and doc/RLE_IMPLEMENTATION_SUMMARY.md
