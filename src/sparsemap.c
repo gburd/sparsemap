@@ -198,10 +198,25 @@ typedef struct {
 #define SM_IS_CHUNK_RLE(chunk) \
   (((*((__sm_bitvec_t *)(chunk)->m_data) & (((__sm_bitvec_t)0x3) << (SM_BITS_PER_VECTOR - 2))) >> (SM_BITS_PER_VECTOR - 2)) == SM_PAYLOAD_NONE)
 
-#define SM_RLE_FLAGS 0x4000000000000000
-#define SM_RLE_FLAGS_MASK 0xC000000000000000
-#define SM_RLE_CAPACITY_MASK 0x3FFFFFFF80000000
-#define SM_RLE_LENGTH_MASK 0x7FFFFFFF
+/*
+ * RLE (Run-Length Encoding) Format
+ *
+ * RLE chunks encode a contiguous run of set bits (1s) starting at offset 0.
+ * The entire chunk is represented by a single 64-bit descriptor word:
+ *
+ * Bits 63:62 = 01 (RLE flag, matches SM_PAYLOAD_NONE to distinguish from sparse)
+ * Bits 61:31 = Chunk capacity in bits (31 bits, max 2,147,483,647)
+ * Bits 30:0  = Run length in bits (31 bits, max 2,147,483,647)
+ *
+ * Example: If length=1000 and capacity=2048, bits 0-999 are set (1), bits 1000-2047 are unset (0).
+ *
+ * RLE chunks are immutable by design - any modification that would create gaps or
+ * partial runs causes the chunk to be converted to sparse encoding.
+ */
+#define SM_RLE_FLAGS 0x4000000000000000          /* Bits 63:62 = 01 */
+#define SM_RLE_FLAGS_MASK 0xC000000000000000     /* Mask for bits 63:62 */
+#define SM_RLE_CAPACITY_MASK 0x3FFFFFFF80000000  /* Mask for bits 61:31 (capacity) */
+#define SM_RLE_LENGTH_MASK 0x7FFFFFFF            /* Mask for bits 30:0 (length) */
 
 /**
  * @brief Checks if the given chunk is flagged as RLE encoded.
@@ -848,10 +863,18 @@ __sm_chunk_select(const __sm_chunk_t *chunk, ssize_t n, ssize_t *offset, const b
     }
   }
 
-  /* Sparse encoding path */
+  /*
+   * Sparse encoding path
+   *
+   * Algorithm: Iterate through flag bytes examining 2-bit descriptors for each 64-bit vector.
+   * Skip vectors that can't contain the target value (ZEROS when searching for 1s, ONES when
+   * searching for 0s). For MIXED vectors, use popcount to quickly check if we need to scan
+   * individual bits. Accumulate bit positions until we've found the nth occurrence.
+   */
   size_t ret = 0;
   register uint8_t *p = (uint8_t *)chunk->m_data;
   for (size_t i = 0; i < sizeof(__sm_bitvec_t); i++, p++) {
+    /* Quick skip: if flag byte is 0 (all NONE descriptors) and seeking 1s, skip 4 vectors */
     if (*p == 0 && value) {
       ret += (size_t)SM_FLAGS_PER_INDEX_BYTE * SM_BITS_PER_VECTOR;
       continue;
@@ -980,8 +1003,14 @@ __sm_chunk_rank(__sm_chunk_rank_t *rank, const bool value, const __sm_chunk_t *c
       }
     }
   } else {
-    /* This chunk has sparse encoding. */
-
+    /*
+     * Sparse encoding rank algorithm
+     *
+     * Strategy: Iterate through flag bytes and use popcounts for efficient bit counting.
+     * For ZEROS/ONES payloads, we know the count immediately (0 or 64). For MIXED payloads,
+     * extract the 64-bit vector and use hardware popcount. Apply range masks to only count
+     * bits within [from, to] range. This achieves O(chunks) performance instead of O(bits).
+     */
     uint8_t *vec = (uint8_t *)chunk->m_data;
     __sm_bitvec_t w, mw;
     uint64_t mask;
