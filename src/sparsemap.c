@@ -2764,8 +2764,8 @@ sparsemap_get_ending_offset(const sparsemap_t *map)
         relative_position += SM_BITS_PER_VECTOR;
         break;
       case SM_PAYLOAD_ONES:
+        offset = relative_position + SM_BITS_PER_VECTOR - 1;
         relative_position += SM_BITS_PER_VECTOR;
-        offset = relative_position;
         break;
       case SM_PAYLOAD_MIXED: {
         const __sm_bitvec_t w = chunk.m_data[1 + __sm_chunk_get_position(&chunk, (m * SM_FLAGS_PER_INDEX_BYTE) + n)];
@@ -2919,6 +2919,10 @@ sparsemap_merge(sparsemap_t *destination, sparsemap_t *source)
   if (src_count == 0) {
     return 0;
   }
+
+  /* Ensure m_data_used is calculated (may be 0 after split). */
+  sparsemap_get_size(destination);
+  sparsemap_get_size(source);
 
   // TODO: rethink this method of estimating space... seems off to me now...
   const ssize_t remaining_capacity = destination->m_capacity - destination->m_data_used -
@@ -3168,6 +3172,7 @@ sparsemap_split(sparsemap_t *map, sparsemap_idx_t idx, sparsemap_t *other)
   }
 
   /* (2): The idx falls within a chunk then it has to be split. */
+  fprintf(stderr, "After scan: idx=%lu i=%zu count=%zu in_middle=%d\n", idx, i, count, in_middle); fflush(stderr);
   if (in_middle) {
     __sm_chunk_t s_chunk, d_chunk;
     __sm_chunk_init(&s_chunk, src + SM_SIZEOF_OVERHEAD);
@@ -3212,13 +3217,20 @@ sparsemap_split(sparsemap_t *map, sparsemap_idx_t idx, sparsemap_t *other)
        * our index will fall inside a sparse chunk (that we just made).
        */
       SM_ENOUGH_SPACE(sep.expand_by);
-      __sm_insert_data(map, (src - map->m_data) + SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t), sep.buf + SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t),
+      /* Save src offset before insert, as insert will invalidate the pointer */
+      size_t src_offset = src - map->m_data;
+      __sm_insert_data(map, src_offset + SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t), sep.buf + SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t),
         sep.expand_by);
+      /* Recalculate src pointer after insert operation */
+      src = map->m_data + src_offset;
       memcpy(src, sep.buf, sep.expand_by + SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t));
       __sm_set_chunk_count(map, __sm_get_chunk_count(map) + (sep.count - 1));
 
       //GSB __sm_when_diag({ __sm_diag_map(map, "========== PREPARED:"); });
-      return sparsemap_split(map, idx, other);
+      fprintf(stderr, "DEBUG: About to recurse at idx=%lu, map chunks=%zu\n", idx, (size_t)__sm_get_chunk_count(map)); fflush(stderr);
+      sparsemap_idx_t result = sparsemap_split(map, idx, other);
+      fprintf(stderr, "DEBUG: Recursion returned result=%lu\n", result); fflush(stderr);
+      return result;
     }
 
     /*
