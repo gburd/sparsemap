@@ -1757,6 +1757,14 @@ __sm_separate_rle_chunk(sparsemap_t *map, __sm_chunk_sep_t *sep, const sparsemap
         }
       }
 
+      /* Move the pivot chunk over to make room for the new left chunk. */
+      memmove((uint8_t *)((uintptr_t)sep->buf + SM_SIZEOF_OVERHEAD + (sizeof(__sm_bitvec_t) * 2)), sep->buf, sep->pivot.size);
+      memset(sep->buf, 0, SM_SIZEOF_OVERHEAD + (sizeof(__sm_bitvec_t) * 2));
+      sep->pivot.p += SM_SIZEOF_OVERHEAD + (sizeof(__sm_bitvec_t) * 2);
+
+      /* Re-initialize pivot_chunk after the move */
+      __sm_chunk_init(&pivot_chunk, sep->pivot.p + SM_SIZEOF_OVERHEAD);
+
       /* Are we setting a bit beyond the length where we partially overlap? */
       if (state == 1 && idx > sep->target.start + sep->target.length) {
         /* Change only the flag at the position of the index to "mixed" ... */
@@ -1764,11 +1772,6 @@ __sm_separate_rle_chunk(sparsemap_t *map, __sm_chunk_sep_t *sep, const sparsemap
         /* and set the bit at that index in this chunk. */
         pivot_chunk.m_data[1] |= (__sm_bitvec_t)1 << (idx - aligned_idx) % SM_BITS_PER_VECTOR;
       }
-
-      /* Move the pivot chunk over to make room for the new left chunk. */
-      memmove((uint8_t *)((uintptr_t)sep->buf + SM_SIZEOF_OVERHEAD + (sizeof(__sm_bitvec_t) * 2)), sep->buf, sep->pivot.size);
-      memset(sep->buf, 0, SM_SIZEOF_OVERHEAD + (sizeof(__sm_bitvec_t) * 2));
-      sep->pivot.p += SM_SIZEOF_OVERHEAD + (sizeof(__sm_bitvec_t) * 2);
       /* Record information necessary to construct the left chunk. */
       sep->ex[0].start = sep->target.start;
       sep->ex[0].end = aligned_idx - 1;
@@ -1784,16 +1787,20 @@ __sm_separate_rle_chunk(sparsemap_t *map, __sm_chunk_sep_t *sep, const sparsemap
       /* Ensure the aligned chunk is fully in the range (length, capacity). */
       if (aligned_idx + SM_CHUNK_MAX_CAPACITY < sep->target.capacity) {
         pivot_chunk.m_data[0] = (__sm_bitvec_t)0;
+        /* Move the pivot chunk over to make room for the new left chunk. */
+        memmove((uint8_t *)((uintptr_t)sep->buf + SM_SIZEOF_OVERHEAD + (sizeof(__sm_bitvec_t) * 2)), sep->buf, sep->pivot.size);
+        memset(sep->buf, 0, SM_SIZEOF_OVERHEAD + (sizeof(__sm_bitvec_t) * 2));
+        sep->pivot.p += SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) * 2;
+
+        /* Re-initialize pivot_chunk after the move */
+        __sm_chunk_init(&pivot_chunk, sep->pivot.p + SM_SIZEOF_OVERHEAD);
+
         if (state == 1) {
           /* Change only the flag at the position of the index to "mixed" ... */
           SM_CHUNK_SET_FLAGS(pivot_chunk.m_data[0], (idx - aligned_idx) / SM_BITS_PER_VECTOR, SM_PAYLOAD_MIXED);
           /* and set the bit at that index in this chunk. */
           pivot_chunk.m_data[1] |= (__sm_bitvec_t)1 << (idx - aligned_idx) % SM_BITS_PER_VECTOR;
         }
-        /* Move the pivot chunk over to make room for the new left chunk. */
-        memmove((uint8_t *)((uintptr_t)sep->buf + SM_SIZEOF_OVERHEAD + (sizeof(__sm_bitvec_t) * 2)), sep->buf, sep->pivot.size);
-        memset(sep->buf, 0, SM_SIZEOF_OVERHEAD + (sizeof(__sm_bitvec_t) * 2));
-        sep->pivot.p += SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) * 2;
         /* Record information necessary to construct the left chunk. */
         sep->ex[0].start = sep->target.start;
         sep->ex[0].end = sep->target.start + sep->target.length - 1;
