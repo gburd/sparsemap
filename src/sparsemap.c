@@ -180,7 +180,7 @@ typedef struct {
     __sm_chunk_t c;
   } ex[2]; // 0 is "on the left", 1 is "on the right"
 
-  uint8_t buf[(SM_SIZEOF_OVERHEAD * (unsigned long)3) + (sizeof(__sm_bitvec_t) * 6)];
+  _Alignas(__sm_bitvec_t) uint8_t buf[(SM_SIZEOF_OVERHEAD * (unsigned long)3) + (sizeof(__sm_bitvec_t) * 6)];
   size_t expand_by;
   size_t count;
 } __sm_chunk_sep_t;
@@ -1382,10 +1382,11 @@ __sm_get_chunk_offset(const sparsemap_t *map, const sparsemap_idx_t idx)
     __sm_chunk_t chunk;
     __sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
     __sm_assert(s == __sm_get_chunk_aligned_offset(s));
-    if (s >= idx || idx < s + __sm_chunk_get_capacity(&chunk)) {
+    if (idx >= s + __sm_chunk_get_capacity(&chunk)) {
+      p += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&chunk);
+    } else {
       break;
     }
-    p += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&chunk);
   }
 
   return p - start;
@@ -2151,7 +2152,7 @@ sparsemap_capacity_remaining(const sparsemap_t *map)
   if (map->m_capacity == 0) {
     return 100.0;
   }
-  return (100 - (map->m_data_used / (double)map->m_capacity)) * 100;
+  return (1.0 - (map->m_data_used / (double)map->m_capacity)) * 100.0;
 }
 
 /**
@@ -2959,11 +2960,13 @@ sparsemap_merge(sparsemap_t *destination, sparsemap_t *source)
       if (!(src_is_rle || dst_is_rle)) {
         if (src_start == dst_start && dst_capacity < src_capacity) {
           const ssize_t nxt_offset = __sm_get_chunk_offset(destination, dst_start + dst_capacity + 1);
-          uint8_t *nxt_dst = __sm_get_chunk_data(destination, nxt_offset);
-          const __sm_idx_t nxt_dst_start = *(__sm_idx_t *)nxt_dst;
-          if (nxt_dst_start > dst_start + src_capacity) {
-            __sm_chunk_increase_capacity(&dst_chunk, src_capacity);
-            dst_capacity = __sm_chunk_get_capacity(&dst_chunk);
+          if (nxt_offset >= 0) {
+            uint8_t *nxt_dst = __sm_get_chunk_data(destination, nxt_offset);
+            const __sm_idx_t nxt_dst_start = *(__sm_idx_t *)nxt_dst;
+            if (nxt_dst_start > dst_start + src_capacity) {
+              __sm_chunk_increase_capacity(&dst_chunk, src_capacity);
+              dst_capacity = __sm_chunk_get_capacity(&dst_chunk);
+            }
           }
         }
       }
@@ -3073,7 +3076,12 @@ sparsemap_merge(sparsemap_t *destination, sparsemap_t *source)
         /* Source chunk precedes next destination chunk. */
         size_t src_size = __sm_chunk_get_size(&src_chunk);
         ssize_t offset = __sm_get_chunk_offset(destination, src_start);
-        __sm_insert_data(destination, offset, src, SM_SIZEOF_OVERHEAD + src_size);
+        if (offset < 0) {
+          /* Map is empty, append instead of insert. */
+          __sm_append_data(destination, src, SM_SIZEOF_OVERHEAD + src_size);
+        } else {
+          __sm_insert_data(destination, offset, src, SM_SIZEOF_OVERHEAD + src_size);
+        }
 
         /* Update the chunk count and data_used. */
         __sm_set_chunk_count(destination, __sm_get_chunk_count(destination) + 1);
@@ -3179,19 +3187,19 @@ sparsemap_split(sparsemap_t *map, sparsemap_idx_t idx, sparsemap_t *other)
 
       sparsemap_t stunt;
       __sm_chunk_t chunk;
-      uint8_t buf[(SM_SIZEOF_OVERHEAD * (unsigned long)3) + (sizeof(__sm_bitvec_t) * 6)] = { 0 };
+      _Alignas(__sm_bitvec_t) uint8_t buf[(SM_SIZEOF_OVERHEAD * (unsigned long)3) + (sizeof(__sm_bitvec_t) * 6)] = { 0 };
 
       /* Copy the source chunk into the buffer. */
       memcpy(buf + SM_SIZEOF_OVERHEAD, src, SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t));
       /* Set the number of chunks to 1 in our stunt map. */
-      buf[0] = (uint32_t)1;
+      *(uint32_t *)buf = (uint32_t)1;
       /* And initialize the stunt double chunk we need to split. */
       sparsemap_open(&stunt, buf, (SM_SIZEOF_OVERHEAD * (unsigned long)3) + (sizeof(__sm_bitvec_t) * 6));
-      __sm_chunk_init(&chunk, buf + SM_SIZEOF_OVERHEAD);
+      __sm_chunk_init(&chunk, buf + (SM_SIZEOF_OVERHEAD * 2));
 
       /* Finally, let's separate the RLE chunk at index. */
       __sm_chunk_sep_t sep = { .target = { .p = buf + SM_SIZEOF_OVERHEAD,
-                                 .offset = 0,
+                                 .offset = SM_SIZEOF_OVERHEAD,
                                  .chunk = &chunk,
                                  .start = src_start,
                                  .length = __sm_chunk_rle_get_length(&s_chunk),
@@ -3204,7 +3212,7 @@ sparsemap_split(sparsemap_t *map, sparsemap_idx_t idx, sparsemap_t *other)
        * our index will fall inside a sparse chunk (that we just made).
        */
       SM_ENOUGH_SPACE(sep.expand_by);
-      __sm_insert_data(map, __sm_get_chunk_offset(map, idx) + SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t), sep.buf + SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t),
+      __sm_insert_data(map, (src - map->m_data) + SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t), sep.buf + SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t),
         sep.expand_by);
       memcpy(src, sep.buf, sep.expand_by + SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t));
       __sm_set_chunk_count(map, __sm_get_chunk_count(map) + (sep.count - 1));
