@@ -23,6 +23,7 @@
           packages = with pkgs; [
             act
             autoconf
+            automake
             clang
             cmake
             ed

@@ -11,9 +11,9 @@
 *.gcda
 
 # Test executables
-tests/test
-tests/test_rle_standalone
-tests/soak
+test/test
+test/test_rle_standalone
+test/soak
 examples/ex_?
 examples/ex_[0-9]
 
@@ -70,6 +70,7 @@ Testing/
 tmp/
 git.diff
 hints.txt
+.dirstamp
 
 # Tags files
 *.tags

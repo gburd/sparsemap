@@ -9,14 +9,8 @@ AM_SILENT_RULES([yes])
 
 # Checks for programs
 AC_PROG_CC
-AC_PROG_CC_C99
 AM_PROG_AR
 LT_INIT
-
-# Compiler flags
-AX_CHECK_COMPILE_FLAG([-std=gnu11], [CFLAGS="$CFLAGS -std=gnu11"], [
-  AC_MSG_ERROR([compiler does not support -std=gnu11])
-])
 
 # Enable all warnings
 AX_CHECK_COMPILE_FLAG([-Wall], [CFLAGS="$CFLAGS -Wall"])
@@ -65,7 +59,7 @@ AC_ARG_ENABLE([debug],
 
 AS_IF([test "x$enable_debug" = "xyes"], [
   AC_DEFINE([DEBUG], [1], [Define to 1 if debug mode is enabled])
-  CFLAGS="$CFLAGS -g -O0"
+  CFLAGS="$CFLAGS -g -O1"
 ], [
   CFLAGS="$CFLAGS -O3"
 ])
@@ -94,7 +88,7 @@ AM_CONDITIONAL([ENABLE_TESTING], [test "x$enable_testing" = "xyes"])
 AC_CONFIG_FILES([
   Makefile
   src/Makefile
-  tests/Makefile
+  test/Makefile
   examples/Makefile
   sparsemap.pc
 ])

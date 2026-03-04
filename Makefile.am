@@ -3,7 +3,7 @@ ACLOCAL_AMFLAGS = -I m4
 SUBDIRS = src
 
 if ENABLE_TESTING
-SUBDIRS += tests examples
+SUBDIRS += test examples
 endif
 
 EXTRA_DIST = \

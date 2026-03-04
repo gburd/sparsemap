@@ -108,7 +108,7 @@ $(LIB_SHARED): $(LIB_OBJECTS)
 	$(CC) -shared -o $@ $^ $(LDFLAGS) $(LIBS)
 
 src/sparsemap.o: src/sparsemap.c $(LIB_HEADERS)
-	$(CC) -std=gnu11 -Wall -Wextra $(if $(COVERAGE),,-Werror) -I./include $(if $(DEBUG),-g -O0 -DDEBUG,-O3) $(if $(DIAGNOSTIC),-DSPARSEMAP_DIAGNOSTIC) $(if $(COVERAGE),-fprofile-arcs -ftest-coverage -O0) -c -o $@ $<
+	$(CC) -std=gnu11 -Wall -Wextra $(if $(COVERAGE),,-Werror) -I./include $(if $(DEBUG),-g -O1 -DDEBUG,-O3) $(if $(DIAGNOSTIC),-DSPARSEMAP_DIAGNOSTIC) $(if $(COVERAGE),-fprofile-arcs -ftest-coverage -O0) -c -o $@ $<
 
 # Test targets
 tests: CFLAGS += -DSPARSEMAP_TESTING -I./tests
