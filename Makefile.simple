@@ -62,7 +62,7 @@ EXAMPLE_OBJECTS = $(EXAMPLE_SOURCES:.c=.o)
 EXAMPLE_BINARIES = $(EXAMPLE_SOURCES:.c=)
 EXAMPLE_COMMON = tests/common.o tests/munit.o tests/qc.o
 
-.PHONY: all clean install uninstall check examples help coverage coverage-report clean-coverage
+.PHONY: all clean install uninstall check examples help coverage coverage-report clean-coverage format format-check tidy shellcheck lint
 
 all: $(LIB_STATIC) $(LIB_SHARED)
 
@@ -77,6 +77,11 @@ help:
 	@echo "  coverage         Build with coverage and generate report"
 	@echo "  coverage-report  Open coverage HTML report"
 	@echo "  clean-coverage   Remove coverage data"
+	@echo "  format           Format code with clang-format"
+	@echo "  format-check     Check code formatting"
+	@echo "  tidy             Run clang-tidy static analysis"
+	@echo "  shellcheck       Lint shell scripts"
+	@echo "  lint             Run format-check and shellcheck"
 	@echo "  install          Install library and headers"
 	@echo "  uninstall        Remove installed files"
 	@echo "  clean            Remove built files"
@@ -211,3 +216,36 @@ clean-coverage:
 	rm -rf coverage *.gcov *.gcda *.gcno
 	rm -f src/*.gcda src/*.gcno tests/*.gcda tests/*.gcno
 	@echo "Cleaned coverage data"
+
+# Code quality targets
+format:
+	@echo "Formatting code with clang-format..."
+	@command -v clang-format >/dev/null 2>&1 || \
+		(echo "clang-format not found. Install with: brew install clang-format" && exit 1)
+	@clang-format -i src/*.c include/*.h tests/*.c tests/*.h 2>/dev/null || true
+	@echo "Code formatted"
+
+format-check:
+	@echo "Checking code formatting..."
+	@command -v clang-format >/dev/null 2>&1 || \
+		(echo "clang-format not found. Install with: brew install clang-format" && exit 1)
+	@clang-format --dry-run --Werror src/*.c include/*.h tests/*.c tests/*.h 2>/dev/null || \
+		(echo "Code formatting issues found. Run: make -f Makefile.simple format" && exit 1)
+	@echo "Code formatting OK"
+
+tidy:
+	@echo "Running clang-tidy on library source..."
+	@command -v clang-tidy >/dev/null 2>&1 || \
+		(echo "clang-tidy not found. Install with: brew install llvm" && exit 1)
+	@clang-tidy src/sparsemap.c -- -I./include -std=gnu11 || true
+	@echo "clang-tidy complete"
+
+shellcheck:
+	@echo "Linting shell scripts with shellcheck..."
+	@command -v shellcheck >/dev/null 2>&1 || \
+		(echo "shellcheck not found. Install with: brew install shellcheck" && exit 1)
+	@shellcheck autogen.sh || (echo "shellcheck found issues in autogen.sh" && exit 1)
+	@echo "Shell scripts OK"
+
+lint: format-check shellcheck
+	@echo "All lint checks passed"
