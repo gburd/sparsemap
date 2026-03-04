@@ -1705,9 +1705,9 @@ __sm_separate_rle_chunk(sparsemap_t *map, __sm_chunk_sep_t *sep, const sparsemap
 
   if (state == 0) {
     /* To unset, change the flag at the position of the idx to "mixed" ... */
-    SM_CHUNK_SET_FLAGS(pivot_chunk.m_data[0], (idx - aligned_idx) / SM_BITS_PER_VECTOR, SM_PAYLOAD_MIXED);
+    SM_CHUNK_SET_FLAGS(pivot_chunk.m_data[0], idx / SM_BITS_PER_VECTOR, SM_PAYLOAD_MIXED);
     /* and clear only the bit at that index in this chunk. */
-    pivot_chunk.m_data[1] = ~(__sm_bitvec_t)0 & ~((__sm_bitvec_t)1 << (idx - aligned_idx) % SM_BITS_PER_VECTOR);
+    pivot_chunk.m_data[1] = ~(__sm_bitvec_t)0 & ~((__sm_bitvec_t)1 << idx % SM_BITS_PER_VECTOR);
     sep->pivot.size = SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) * 2;
   } else if (state == 1) {
     if (idx >= sep->target.start && idx < sep->target.start + sep->target.length) {
@@ -1768,9 +1768,9 @@ __sm_separate_rle_chunk(sparsemap_t *map, __sm_chunk_sep_t *sep, const sparsemap
       /* Are we setting a bit beyond the length where we partially overlap? */
       if (state == 1 && idx > sep->target.start + sep->target.length) {
         /* Change only the flag at the position of the index to "mixed" ... */
-        SM_CHUNK_SET_FLAGS(pivot_chunk.m_data[0], (idx - aligned_idx) / SM_BITS_PER_VECTOR, SM_PAYLOAD_MIXED);
+        SM_CHUNK_SET_FLAGS(pivot_chunk.m_data[0], idx / SM_BITS_PER_VECTOR, SM_PAYLOAD_MIXED);
         /* and set the bit at that index in this chunk. */
-        pivot_chunk.m_data[1] |= (__sm_bitvec_t)1 << (idx - aligned_idx) % SM_BITS_PER_VECTOR;
+        pivot_chunk.m_data[1] |= (__sm_bitvec_t)1 << idx % SM_BITS_PER_VECTOR;
       }
       /* Record information necessary to construct the left chunk. */
       sep->ex[0].start = sep->target.start;
@@ -1797,9 +1797,9 @@ __sm_separate_rle_chunk(sparsemap_t *map, __sm_chunk_sep_t *sep, const sparsemap
 
         if (state == 1) {
           /* Change only the flag at the position of the index to "mixed" ... */
-          SM_CHUNK_SET_FLAGS(pivot_chunk.m_data[0], (idx - aligned_idx) / SM_BITS_PER_VECTOR, SM_PAYLOAD_MIXED);
+          SM_CHUNK_SET_FLAGS(pivot_chunk.m_data[0], idx / SM_BITS_PER_VECTOR, SM_PAYLOAD_MIXED);
           /* and set the bit at that index in this chunk. */
-          pivot_chunk.m_data[1] |= (__sm_bitvec_t)1 << (idx - aligned_idx) % SM_BITS_PER_VECTOR;
+          pivot_chunk.m_data[1] |= (__sm_bitvec_t)1 << idx % SM_BITS_PER_VECTOR;
         }
         /* Record information necessary to construct the left chunk. */
         sep->ex[0].start = sep->target.start;
@@ -1897,11 +1897,9 @@ __sm_separate_rle_chunk(sparsemap_t *map, __sm_chunk_sep_t *sep, const sparsemap
   }
 
   /* Let's knit this into place within the map. */
-  if (state != -1) {
-    __sm_insert_data(map, sep->target.offset + SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t), sep->buf + SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t), sep->expand_by);
-    memcpy(sep->target.p, sep->buf, sep->expand_by + SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t));
-    __sm_set_chunk_count(map, __sm_get_chunk_count(map) + (sep->count - 1));
-  }
+  __sm_insert_data(map, sep->target.offset + SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t), sep->buf + SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t), sep->expand_by);
+  memcpy(sep->target.p, sep->buf, sep->expand_by + SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t));
+  __sm_set_chunk_count(map, __sm_get_chunk_count(map) + (sep->count - 1));
 
   return 0;
 }
