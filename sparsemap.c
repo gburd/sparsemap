@@ -639,7 +639,7 @@ static bool
 __sm_chunk_is_set(const __sm_chunk_t *chunk, const size_t idx)
 {
   if (__sm_chunk_is_rle(chunk)) {
-    if (idx <= __sm_chunk_rle_get_length(chunk)) {
+    if (idx < __sm_chunk_rle_get_length(chunk)) {
       return true;
     }
     return false;
@@ -814,6 +814,41 @@ __sm_chunk_set_bit(const __sm_chunk_t *chunk, const sparsemap_idx_t idx, size_t 
 static size_t
 __sm_chunk_select(const __sm_chunk_t *chunk, ssize_t n, ssize_t *offset, const bool value)
 {
+  /* RLE fast path */
+  if (__sm_chunk_is_rle(chunk)) {
+    const size_t length = __sm_chunk_rle_get_length(chunk);
+    const size_t capacity = __sm_chunk_rle_get_capacity(chunk);
+
+    if (value) {
+      /* Selecting nth set bit (1) */
+      /* RLE has run of 1s from index 0 to length-1 */
+      if (n < (ssize_t)length) {
+        *offset = -1;
+        return n;  /* nth set bit is at index n */
+      } else {
+        *offset = n - length;  /* propagate remainder to next chunk */
+        return capacity;
+      }
+    } else {
+      /* Selecting nth unset bit (0) */
+      /* Unset bits start at index length */
+      if (length >= capacity) {
+        /* No unset bits in this chunk */
+        *offset = n;
+        return capacity;
+      }
+      const size_t unset_count = capacity - length;
+      if (n < (ssize_t)unset_count) {
+        *offset = -1;
+        return length + n;  /* nth unset bit is at (length + n) */
+      } else {
+        *offset = n - unset_count;  /* propagate remainder */
+        return capacity;
+      }
+    }
+  }
+
+  /* Sparse encoding path */
   size_t ret = 0;
   register uint8_t *p = (uint8_t *)chunk->m_data;
   for (size_t i = 0; i < sizeof(__sm_bitvec_t); i++, p++) {
@@ -1065,6 +1100,40 @@ done:;
 static size_t
 __sm_chunk_scan(const __sm_chunk_t *chunk, const __sm_idx_t start, void (*scanner)(uint32_t[], size_t, void *aux), size_t skip, void *aux)
 {
+  /* RLE fast path */
+  if (__sm_chunk_is_rle(chunk)) {
+    const size_t length = __sm_chunk_rle_get_length(chunk);
+
+    /* RLE chunks only contain set bits from 0 to length-1 */
+    if (skip >= length) {
+      return length;  /* Skipped all bits in this chunk */
+    }
+
+    /* Skip first `skip` bits, then scan the rest */
+    const size_t scan_start = skip;
+
+    /* Process in batches using same buffer size as sparse code */
+    uint32_t buffer[SM_BITS_PER_VECTOR];
+
+    for (size_t i = scan_start; i < length; ) {
+      size_t batch_size = SM_BITS_PER_VECTOR;
+      if (i + batch_size > length) {
+        batch_size = length - i;
+      }
+
+      /* Fill buffer with consecutive indices */
+      for (size_t j = 0; j < batch_size; j++) {
+        buffer[j] = start + i + j;
+      }
+
+      scanner(&buffer[0], batch_size, aux);
+      i += batch_size;
+    }
+
+    return skip;  /* Return number of bits skipped in this chunk */
+  }
+
+  /* Sparse encoding path */
   size_t ret = 0;
   register uint8_t *p = (uint8_t *)chunk->m_data;
   uint32_t buffer[SM_BITS_PER_VECTOR];

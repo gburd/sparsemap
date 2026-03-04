@@ -1135,6 +1135,206 @@ test_api_select_neg(const MunitParameter params[], void *data)
 }
 #endif
 
+/* -------------------------- RLE Tests */
+
+static void *
+test_api_select_rle_true_setup(const MunitParameter params[], void *user_data)
+{
+  uint8_t *buf = munit_calloc(8192, sizeof(uint8_t));
+  assert_ptr_not_null(buf);
+  sparsemap_t *map = (sparsemap_t *)test_api_setup(params, user_data);
+
+  sparsemap_init(map, buf, 8192);
+  /* Create RLE run of 1000 consecutive set bits (0-999) */
+  populate_map_rle(map, 0, 1, 1000);
+
+  return (void *)map;
+}
+static void
+test_api_select_rle_true_tear_down(void *fixture)
+{
+  sparsemap_t *map = (sparsemap_t *)fixture;
+  assert_ptr_not_null(map->m_data);
+  munit_free(map->m_data);
+  test_api_tear_down(fixture);
+}
+static MunitResult
+test_api_select_rle_true(const MunitParameter params[], void *data)
+{
+  sparsemap_t *map = (sparsemap_t *)data;
+  (void)params;
+
+  assert_ptr_not_null(map);
+
+  /* Test selecting set bits in RLE run */
+  /* First bit: select(0, true) == 0 */
+  assert_true(sparsemap_select(map, 0, true) == 0);
+  /* Middle bit: select(500, true) == 500 */
+  assert_true(sparsemap_select(map, 500, true) == 500);
+  /* Last bit: select(999, true) == 999 */
+  assert_true(sparsemap_select(map, 999, true) == 999);
+  /* Beyond run: select(1000, true) == SPARSEMAP_IDX_MAX */
+  assert_true(sparsemap_select(map, 1000, true) == SPARSEMAP_IDX_MAX);
+
+  return MUNIT_OK;
+}
+
+static MunitResult
+test_api_select_rle_false(const MunitParameter params[], void *data)
+{
+  sparsemap_t *map = (sparsemap_t *)data;
+  (void)params;
+
+  assert_ptr_not_null(map);
+
+  /* Test selecting unset bits in RLE run */
+  /* First unset: select(0, false) == 1000 */
+  assert_true(sparsemap_select(map, 0, false) == 1000);
+  /* Subsequent: select(1, false) == 1001 */
+  assert_true(sparsemap_select(map, 1, false) == 1001);
+  /* select(100, false) == 1100 */
+  assert_true(sparsemap_select(map, 100, false) == 1100);
+
+  return MUNIT_OK;
+}
+
+static void *
+test_api_scan_rle_setup(const MunitParameter params[], void *user_data)
+{
+  uint8_t *buf = munit_calloc(8192, sizeof(uint8_t));
+  assert_ptr_not_null(buf);
+  sparsemap_t *map = (sparsemap_t *)test_api_setup(params, user_data);
+
+  sparsemap_init(map, buf, 8192);
+  /* Create RLE run of 1000 consecutive set bits */
+  populate_map_rle(map, 0, 1, 1000);
+
+  return (void *)map;
+}
+static void
+test_api_scan_rle_tear_down(void *fixture)
+{
+  sparsemap_t *map = (sparsemap_t *)fixture;
+  assert_ptr_not_null(map->m_data);
+  munit_free(map->m_data);
+  test_api_tear_down(fixture);
+}
+
+/* Scanner callback that counts bits and tracks last index */
+static size_t scan_rle_count = 0;
+static uint32_t scan_rle_last_idx = 0;
+void
+scan_rle_counter(uint32_t v[], size_t n, void *aux)
+{
+  (void)aux;
+  for (size_t i = 0; i < n; i++) {
+    scan_rle_count++;
+    scan_rle_last_idx = v[i];
+    /* Verify indices are in expected range */
+    assert(v[i] < 1000);
+  }
+}
+
+static MunitResult
+test_api_scan_rle(const MunitParameter params[], void *data)
+{
+  sparsemap_t *map = (sparsemap_t *)data;
+  (void)params;
+
+  assert_ptr_not_null(map);
+
+  /* Reset counters */
+  scan_rle_count = 0;
+  scan_rle_last_idx = 0;
+
+  /* Scan all bits */
+  sparsemap_scan(map, scan_rle_counter, 0, NULL);
+
+  /* Verify total count = 1000 */
+  assert_true(scan_rle_count == 1000);
+  /* Verify last index = 999 */
+  assert_true(scan_rle_last_idx == 999);
+
+  return MUNIT_OK;
+}
+
+static MunitResult
+test_api_scan_rle_skip(const MunitParameter params[], void *data)
+{
+  sparsemap_t *map = (sparsemap_t *)data;
+  (void)params;
+
+  assert_ptr_not_null(map);
+
+  /* Reset counters */
+  scan_rle_count = 0;
+  scan_rle_last_idx = 0;
+
+  /* Scan with skip=500, should scan only 500 bits (500-999) */
+  sparsemap_scan(map, scan_rle_counter, 500, NULL);
+
+  /* Verify total count = 500 */
+  assert_true(scan_rle_count == 500);
+  /* Verify last index = 999 */
+  assert_true(scan_rle_last_idx == 999);
+
+  return MUNIT_OK;
+}
+
+static void *
+test_api_rle_edge_cases_setup(const MunitParameter params[], void *user_data)
+{
+  uint8_t *buf = munit_calloc(32768, sizeof(uint8_t));
+  assert_ptr_not_null(buf);
+  sparsemap_t *map = (sparsemap_t *)test_api_setup(params, user_data);
+
+  sparsemap_init(map, buf, 32768);
+
+  return (void *)map;
+}
+static void
+test_api_rle_edge_cases_tear_down(void *fixture)
+{
+  sparsemap_t *map = (sparsemap_t *)fixture;
+  assert_ptr_not_null(map->m_data);
+  munit_free(map->m_data);
+  test_api_tear_down(fixture);
+}
+static MunitResult
+test_api_rle_edge_cases(const MunitParameter params[], void *data)
+{
+  sparsemap_t *map = (sparsemap_t *)data;
+  (void)params;
+
+  assert_ptr_not_null(map);
+
+  /* Test 1: Single bit RLE */
+  sparsemap_clear(map);
+  sparsemap_set(map, 0);
+  assert_true(sparsemap_is_set(map, 0) == true);
+  assert_true(sparsemap_select(map, 0, true) == 0);
+  assert_true(sparsemap_count(map) == 1);
+
+  /* Test 2: Large RLE run (10,000 bits) to stress-test batching in scan */
+  sparsemap_clear(map);
+  scan_rle_count = 0;
+  scan_rle_last_idx = 0;
+  populate_map_rle(map, 0, 1, 10000);
+  assert_true(sparsemap_count(map) == 10000);
+  sparsemap_scan(map, scan_rle_counter, 0, NULL);
+  assert_true(scan_rle_count == 10000);
+  assert_true(scan_rle_last_idx == 9999);
+
+  /* Test 3: is_set boundary check (the bug we fixed) */
+  sparsemap_clear(map);
+  populate_map_rle(map, 0, 1, 1000);
+  assert_true(sparsemap_is_set(map, 0) == true);
+  assert_true(sparsemap_is_set(map, 999) == true);
+  assert_true(sparsemap_is_set(map, 1000) == false); /* Beyond run */
+
+  return MUNIT_OK;
+}
+
 static void *
 test_api_rank_true_setup(const MunitParameter params[], void *user_data)
 {
@@ -1355,6 +1555,11 @@ static MunitTest api_test_suite[] = {
 #ifdef SELECT_NEG
   { (char *)"/select/neg", test_api_select_neg, test_api_select_neg_setup, test_api_select_neg_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
 #endif
+  { (char *)"/select/rle/true", test_api_select_rle_true, test_api_select_rle_true_setup, test_api_select_rle_true_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
+  { (char *)"/select/rle/false", test_api_select_rle_false, test_api_select_rle_true_setup, test_api_select_rle_true_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
+  { (char *)"/scan/rle", test_api_scan_rle, test_api_scan_rle_setup, test_api_scan_rle_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
+  { (char *)"/scan/rle/skip", test_api_scan_rle_skip, test_api_scan_rle_setup, test_api_scan_rle_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
+  { (char *)"/rle/edge_cases", test_api_rle_edge_cases, test_api_rle_edge_cases_setup, test_api_rle_edge_cases_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
   { (char *)"/rank/true", test_api_rank_true, test_api_rank_true_setup, test_api_rank_true_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
   { (char *)"/rank/false", test_api_rank_false, test_api_rank_false_setup, test_api_rank_false_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
   { (char *)"/span", test_api_span, test_api_span_setup, test_api_span_tear_down, MUNIT_TEST_OPTION_NONE, NULL },
