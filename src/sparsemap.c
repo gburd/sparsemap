@@ -3252,7 +3252,7 @@ sparsemap_split(sparsemap_t *map, sparsemap_idx_t idx, sparsemap_t *other)
     }
 
     /* Copy the bits in the sparse chunk, at most SM_CHUNK_MAX_CAPACITY. */
-    *(__sm_idx_t *)dst = idx;
+    *(__sm_idx_t *)dst = src_start;
     for (size_t j = idx; j < src_start + SM_CHUNK_MAX_CAPACITY; j++) {
       if (sparsemap_is_set(map, j)) {
         __sm_map_set(other, j, false);
