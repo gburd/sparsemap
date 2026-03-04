@@ -3288,6 +3288,7 @@ sparsemap_select(sparsemap_t *map, sparsemap_idx_t n, bool value)
 static size_t
 __sm_rank_vec(sparsemap_t *map, size_t begin, size_t end, bool value, __sm_bitvec_t *vec)
 {
+  (void)vec; /* unused parameter */
   __sm_assert(sparsemap_get_size(map) >= SM_SIZEOF_OVERHEAD);
   size_t gap, pos = 0, result = 0, prev = 0, len = end - begin + 1;
 

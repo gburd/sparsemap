@@ -1,0 +1,161 @@
+# Simple Makefile for sparsemap (no autotools required)
+# Usage: make -f Makefile.simple
+
+PREFIX ?= /usr/local
+DESTDIR ?=
+
+CC = cc
+AR = ar
+CFLAGS = -std=gnu11 -Wall -Wextra -Werror -I./include
+LDFLAGS =
+LIBS = -lpthread
+
+# Debug flags
+ifdef DEBUG
+    CFLAGS += -g -O0 -DDEBUG
+else
+    CFLAGS += -O3
+endif
+
+# Diagnostic flags
+ifdef DIAGNOSTIC
+    CFLAGS += -DSPARSEMAP_DIAGNOSTIC
+endif
+
+# Testing flags
+ifdef TESTING
+    CFLAGS += -DSPARSEMAP_TESTING
+endif
+
+# Library
+LIB_STATIC = libsparsemap.a
+LIB_SHARED = libsparsemap.dylib
+LIB_SOURCES = src/sparsemap.c
+LIB_OBJECTS = src/sparsemap.o
+LIB_HEADERS = include/sparsemap.h include/popcount.h
+
+# Tests
+TEST_SOURCES = tests/test.c tests/common.c tests/munit.c tests/qc.c \
+               tests/roaring.c tests/tdigest.c tests/midl.c
+TEST_OBJECTS = $(TEST_SOURCES:.c=.o)
+TEST_BINARY = tests/test
+
+RLE_TEST_SOURCES = tests/test_rle_standalone.c
+RLE_TEST_OBJECTS = $(RLE_TEST_SOURCES:.c=.o)
+RLE_TEST_BINARY = tests/test_rle_standalone
+
+SOAK_SOURCES = tests/soak.c tests/common.c tests/roaring.c tests/tdigest.c
+SOAK_OBJECTS = $(SOAK_SOURCES:.c=.o)
+SOAK_BINARY = tests/soak
+
+# Examples
+EXAMPLE_SOURCES = $(wildcard examples/ex_*.c)
+EXAMPLE_OBJECTS = $(EXAMPLE_SOURCES:.c=.o)
+EXAMPLE_BINARIES = $(EXAMPLE_SOURCES:.c=)
+EXAMPLE_COMMON = tests/common.o tests/munit.o tests/qc.o
+
+.PHONY: all clean install uninstall check examples help
+
+all: $(LIB_STATIC) $(LIB_SHARED)
+
+help:
+	@echo "Sparsemap Simple Makefile"
+	@echo ""
+	@echo "Targets:"
+	@echo "  all           Build static and shared libraries (default)"
+	@echo "  tests         Build test suite"
+	@echo "  examples      Build example programs"
+	@echo "  check         Run tests"
+	@echo "  install       Install library and headers"
+	@echo "  uninstall     Remove installed files"
+	@echo "  clean         Remove built files"
+	@echo ""
+	@echo "Options:"
+	@echo "  PREFIX=/path  Installation prefix (default: /usr/local)"
+	@echo "  DEBUG=1       Enable debug build"
+	@echo "  DIAGNOSTIC=1  Enable diagnostic output"
+	@echo "  TESTING=1     Enable testing support"
+	@echo ""
+	@echo "Examples:"
+	@echo "  make -f Makefile.simple"
+	@echo "  make -f Makefile.simple DEBUG=1"
+	@echo "  make -f Makefile.simple tests check"
+	@echo "  make -f Makefile.simple PREFIX=/tmp/sparsemap install"
+
+# Library targets
+$(LIB_STATIC): $(LIB_OBJECTS)
+	$(AR) rcs $@ $^
+
+$(LIB_SHARED): $(LIB_OBJECTS)
+	$(CC) -shared -o $@ $^ $(LDFLAGS) $(LIBS)
+
+src/sparsemap.o: src/sparsemap.c $(LIB_HEADERS)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+# Test targets
+tests: CFLAGS += -DSPARSEMAP_TESTING -I./tests
+tests: CFLAGS := $(filter-out -Werror,$(CFLAGS))
+tests: $(TEST_BINARY) $(RLE_TEST_BINARY) $(SOAK_BINARY)
+
+$(TEST_BINARY): $(TEST_OBJECTS) $(LIB_STATIC)
+	$(CC) $(CFLAGS) -o $@ $(TEST_OBJECTS) $(LIB_STATIC) $(LDFLAGS) $(LIBS)
+
+$(RLE_TEST_BINARY): $(RLE_TEST_OBJECTS) $(LIB_STATIC)
+	$(CC) $(CFLAGS) -o $@ $(RLE_TEST_OBJECTS) $(LIB_STATIC) $(LDFLAGS) $(LIBS)
+
+$(SOAK_BINARY): $(SOAK_OBJECTS) $(LIB_STATIC)
+	$(CC) $(CFLAGS) -o $@ $(SOAK_OBJECTS) $(LIB_STATIC) $(LDFLAGS) $(LIBS)
+
+tests/%.o: tests/%.c
+	$(CC) $(CFLAGS) -DSPARSEMAP_TESTING -I./tests -c -o $@ $<
+
+# Example targets
+examples: CFLAGS += -I./tests
+examples: $(LIB_STATIC) $(EXAMPLE_COMMON) $(EXAMPLE_BINARIES)
+
+examples/ex_%: examples/ex_%.o $(EXAMPLE_COMMON) $(LIB_STATIC)
+	$(CC) $(CFLAGS) -o $@ $< $(EXAMPLE_COMMON) $(LIB_STATIC) $(LDFLAGS) $(LIBS)
+
+examples/%.o: examples/%.c
+	$(CC) $(CFLAGS) -I./tests -c -o $@ $<
+
+# Check target
+check: tests
+	@echo "Running test suite..."
+	@./$(TEST_BINARY) || (echo "Test suite failed"; exit 1)
+	@echo "Running RLE standalone test..."
+	@./$(RLE_TEST_BINARY) || (echo "RLE test failed"; exit 1)
+	@echo ""
+	@echo "✓ All tests passed!"
+
+# Install target
+install: $(LIB_STATIC) $(LIB_SHARED)
+	install -d $(DESTDIR)$(PREFIX)/lib
+	install -d $(DESTDIR)$(PREFIX)/include
+	install -m 644 $(LIB_STATIC) $(DESTDIR)$(PREFIX)/lib/
+	install -m 755 $(LIB_SHARED) $(DESTDIR)$(PREFIX)/lib/
+	install -m 644 $(LIB_HEADERS) $(DESTDIR)$(PREFIX)/include/
+	@echo ""
+	@echo "Installed to $(PREFIX)"
+	@echo "  Library: $(PREFIX)/lib/$(LIB_STATIC)"
+	@echo "  Library: $(PREFIX)/lib/$(LIB_SHARED)"
+	@echo "  Headers: $(PREFIX)/include/{sparsemap.h,popcount.h}"
+
+# Uninstall target
+uninstall:
+	rm -f $(DESTDIR)$(PREFIX)/lib/$(LIB_STATIC)
+	rm -f $(DESTDIR)$(PREFIX)/lib/$(LIB_SHARED)
+	rm -f $(DESTDIR)$(PREFIX)/include/sparsemap.h
+	rm -f $(DESTDIR)$(PREFIX)/include/popcount.h
+	@echo "Uninstalled from $(PREFIX)"
+
+# Clean target
+clean:
+	rm -f $(LIB_STATIC) $(LIB_SHARED)
+	rm -f $(LIB_OBJECTS)
+	rm -f $(TEST_OBJECTS) $(TEST_BINARY)
+	rm -f $(RLE_TEST_OBJECTS) $(RLE_TEST_BINARY)
+	rm -f $(SOAK_OBJECTS) $(SOAK_BINARY)
+	rm -f $(EXAMPLE_OBJECTS) $(EXAMPLE_BINARIES)
+	rm -f tests/*.o examples/*.o src/*.o
+	@echo "Cleaned build artifacts"
