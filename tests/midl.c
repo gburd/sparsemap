@@ -1,6 +1,16 @@
 /** @defgroup idls	ID List Management
  *	@{
  */
+
+/* Required standard library headers */
+#include <assert.h>
+#include <errno.h>
+#include <limits.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+
 /** A generic unsigned ID number. These were entryIDs in back-bdb.
  *	Preferably it should have the same size as a pointer.
  */

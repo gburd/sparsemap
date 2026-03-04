@@ -115,7 +115,7 @@ tests/test_rle_standalone.o: tests/test_rle_standalone.c
 	$(CC) -std=gnu11 -Wall -Wextra -I./include -O3 -c -o $@ $<
 
 tests/%.o: tests/%.c
-	$(CC) $(CFLAGS) -DSPARSEMAP_TESTING -I./tests -c -o $@ $<
+	$(CC) -std=gnu11 -Wall -Wextra -I./include -I./tests $(if $(DEBUG),-g -O0 -DDEBUG,-O3) $(if $(DIAGNOSTIC),-DSPARSEMAP_DIAGNOSTIC) -DSPARSEMAP_TESTING -c -o $@ $<
 
 # Example targets
 examples: CFLAGS += -I./tests
