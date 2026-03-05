@@ -75,13 +75,15 @@ Copy `src/sparsemap.c` and `include/sparsemap.h` into your project and compile d
 
 ### API Example
 
+There are two ways to create a sparsemap: heap-managed or caller-managed.
+
+**Heap-managed** (single allocation, resizable):
+
 ```c
 #include <sparsemap.h>
 
-// Create a sparsemap
-uint8_t buffer[1024];
-sparsemap_t *map = sparsemap(0);
-sparsemap_init(map, buffer, 1024);
+// Create a heap-managed sparsemap (struct + buffer in one allocation)
+sparsemap_t *map = sparsemap(4096);
 
 // Set bits
 sparsemap_set(map, 100);
@@ -93,18 +95,72 @@ bool is_set = sparsemap_is_set(map, 100);  // true
 // Count set bits
 size_t count = sparsemap_count(map);  // 2
 
-// Select nth set bit
-size_t pos = sparsemap_select(map, 0, true);  // 100
+// Select nth set bit (0-based)
+sparsemap_idx_t pos = sparsemap_select(map, 0, true);  // 100
+
+// Count set bits in a range [100, 200]
+size_t rank = sparsemap_rank(map, 100, 200, true);  // 2
 
 // Scan all set bits
-void callback(uint32_t indices[], size_t n, void *aux) {
-    for (size_t i = 0; i < n; i++) {
+void print_bits(uint32_t indices[], size_t n, void *aux) {
+    for (size_t i = 0; i < n; i++)
         printf("Bit %u is set\n", indices[i]);
-    }
 }
-sparsemap_scan(map, callback, 0, NULL);
+sparsemap_scan(map, print_bits, 0, NULL);
 
-// Clean up
+// Clean up (single free for struct + buffer)
+free(map);
+```
+
+**Caller-managed** (stack or custom allocation):
+
+```c
+#include <sparsemap.h>
+
+// Both struct and buffer on the stack
+sparsemap_t map;
+uint8_t buffer[1024];
+sparsemap_init(&map, buffer, sizeof(buffer));
+
+sparsemap_set(&map, 42);
+assert(sparsemap_is_set(&map, 42));
+// No free needed -- everything is on the stack
+```
+
+### Split and Merge
+
+```c
+sparsemap_t *left = sparsemap(4096);
+sparsemap_t *right = sparsemap(4096);
+
+// Populate left with bits 0-9999
+for (size_t i = 0; i < 10000; i++)
+    sparsemap_set(left, i);
+
+// Split evenly by cardinality
+sparsemap_split(left, SPARSEMAP_IDX_MAX, right);
+// left  ~ bits [0, 5000)
+// right ~ bits [5000, 10000)
+
+// Merge right back into left
+sparsemap_merge(left, right);
+
+free(right);
+free(left);
+```
+
+### Handling ENOSPC
+
+```c
+sparsemap_t *map = sparsemap(128);  // small buffer
+
+sparsemap_idx_t r = sparsemap_set(map, 42);
+if (SPARSEMAP_NOT_FOUND(r)) {
+    // Buffer full -- grow and retry
+    map = sparsemap_set_data_size(map, NULL, 4096);
+    sparsemap_set(map, 42);
+}
+
 free(map);
 ```
 
@@ -114,32 +170,76 @@ Sparsemap uses a 3-tier hierarchical architecture with two encoding schemes:
 
 ### 1. Sparse Encoding (2-bit flags)
 
-Each chunk has a descriptor with 2-bit flags indicating the state of each 64-bit vector:
-- `00` = all zeros (not stored)
-- `11` = all ones (not stored)
-- `10` = mixed bits (vector stored)
-- `01` = unused/reduced capacity
+Each chunk has a 64-bit descriptor with 2-bit flags for up to 32 bit-vectors (2048 bits total):
 
-Example: Instead of storing 16 bytes, only 2 bytes needed:
-```
-Descriptor: 00 00 00 00 11 00 11 10
-Memory:     0000000011001110 0110010101111001
-```
+| Flag | Meaning | Storage |
+|------|---------|---------|
+| `00` | all zeros | vector not stored |
+| `11` | all ones | vector not stored |
+| `10` | mixed bits | 64-bit vector stored after descriptor |
+| `01` | unused | reduces chunk capacity |
+
+A sparse chunk takes a minimum of 8 bytes (descriptor only, all vectors uniform) and a maximum of 264 bytes (descriptor + 32 mixed vectors).
 
 ### 2. RLE Encoding (Run-Length)
 
-For long runs of consecutive set bits (>2048), a single 64-bit descriptor stores:
-- Bits 63:62 = `01` (RLE flag)
-- Bits 61:31 = capacity (31 bits)
-- Bits 30:0 = length (31 bits)
+When more than 2048 consecutive bits are set, adjacent chunks coalesce into a
+single RLE chunk.  The entire run is represented by one 64-bit descriptor:
 
-This can compress up to 2^31 consecutive set bits into 8 bytes!
+```
+Bits 63:62 = 01  (RLE marker -- same bit pattern as "unused" flag)
+Bits 61:31 = capacity in bits  (31 bits, max ~2 billion)
+Bits 30:0  = length in bits    (31 bits, max ~2 billion)
+```
+
+Bits `[0, length)` within the chunk are set; bits `[length, capacity)` are unset.
+This compresses up to 2^31 consecutive set bits into 12 bytes (4-byte offset + 8-byte descriptor).
+
+#### When does RLE activate?
+
+RLE is **not** triggered simply by setting consecutive bits.  The sequence is:
+
+1. A sparse chunk fills all 32 vectors with ones (2048 bits).
+2. Setting the next adjacent bit (bit 2049) causes the two chunks to coalesce.
+3. The coalesced result exceeds sparse capacity, so it becomes an RLE chunk.
+
+Setting 1000 consecutive bits uses sparse encoding (with `11` flags).  Setting
+3000+ consecutive bits triggers the transition to RLE.
+
+#### What happens when an RLE chunk is modified?
+
+- **Clearing the last bit** in the run shortens the length by one.
+- **Clearing a bit in the middle** separates the RLE chunk into up to three
+  pieces: an RLE chunk for the left run, a sparse chunk containing the gap,
+  and an RLE chunk for the right run.
+- **Setting a bit beyond the run** (within capacity) extends the length.
+
+These transitions are automatic and transparent to the caller.
 
 ### Chunk Organization
 
-- Chunks are aligned to their capacity boundaries
-- Multiple chunks are stored consecutively in the buffer
-- Each chunk has a 4-byte starting offset followed by descriptor(s)
+- Each chunk is prefixed with a 4-byte starting offset (`uint32_t`).
+- Chunks are stored consecutively in the buffer in ascending offset order.
+- The first 4 bytes of the buffer hold the chunk count.
+- Adjacent chunks that form contiguous runs are coalesced automatically.
+
+### Serialization
+
+The raw buffer (from `sparsemap_get_data()`, first `sparsemap_get_size()` bytes)
+is the serialized format.  To restore:
+
+```c
+// Save
+size_t sz = sparsemap_get_size(map);
+void *blob = sparsemap_get_data(map);
+write(fd, blob, sz);
+
+// Restore
+sparsemap_t restored;
+uint8_t buf[capacity];
+read(fd, buf, sz);
+sparsemap_open(&restored, buf, capacity);
+```
 
 ## Performance
 
@@ -152,6 +252,12 @@ This can compress up to 2^31 consecutive set bits into 8 bytes!
 ### Worst Case
 - **Random scattered bits**: Same as uncompressed bitmap + 8 bytes overhead
 - For such patterns, consider [Roaring Bitmaps](https://github.com/RoaringBitmap/CRoaring)
+
+## Thread Safety
+
+Sparsemap is **not** thread-safe.  Concurrent reads are safe only when no
+writer is active.  All mutating operations (`set`, `unset`, `assign`, `merge`,
+`split`, `clear`) must be externally synchronized.
 
 ## Directory Structure
 

@@ -246,7 +246,9 @@ static void
 __sm_chunk_set_rle(const __sm_chunk_t *chunk)
 {
   __sm_bitvec_t w = chunk->m_data[0];
-  w &= ~SM_RLE_FLAGS_MASK;
+  /* Clear flag bits, capacity bits, and length bits */
+  w &= ~(SM_RLE_FLAGS_MASK | SM_RLE_CAPACITY_MASK | SM_RLE_LENGTH_MASK);
+  /* Set the RLE flag (01 in bits 63:62) */
   w |= ((((__sm_bitvec_t)1) << (SM_BITS_PER_VECTOR - 2)) & SM_RLE_FLAGS_MASK);
   chunk->m_data[0] = w;
 }
@@ -287,7 +289,7 @@ __sm_chunk_rle_set_capacity(const __sm_chunk_t *chunk, const size_t capacity)
   __sm_assert(capacity <= SM_CHUNK_RLE_MAX_CAPACITY);
   __sm_bitvec_t w = chunk->m_data[0];
   w &= ~SM_RLE_CAPACITY_MASK;
-  w |= capacity << 31 & SM_RLE_CAPACITY_MASK;
+  w |= (capacity << 31) & SM_RLE_CAPACITY_MASK;
   chunk->m_data[0] = w;
 }
 
@@ -326,6 +328,7 @@ static void
 __sm_chunk_rle_set_length(const __sm_chunk_t *chunk, const size_t length)
 {
   __sm_assert(length <= SM_CHUNK_RLE_MAX_LENGTH);
+  __sm_assert(length <= __sm_chunk_rle_get_capacity(chunk));
   __sm_bitvec_t w = chunk->m_data[0];
   w &= ~SM_RLE_LENGTH_MASK;
   w |= length & SM_RLE_LENGTH_MASK;
@@ -359,6 +362,9 @@ __sm_chunk_get_run_length(const __sm_chunk_t *chunk)
     case 0:
       return 0;
     case ~(__sm_bitvec_t)0:
+      /* CRITICAL: This returns max capacity but actual run might be shorter.
+       * This is used during coalescing to determine if chunks can be merged.
+       * The caller must account for the actual chunk capacity. */
       return SM_CHUNK_MAX_CAPACITY;
     default:
       while (j && (w & SM_PAYLOAD_ONES) == SM_PAYLOAD_ONES) {
@@ -979,7 +985,8 @@ __sm_chunk_rank(__sm_chunk_rank_t *rank, const bool value, const __sm_chunk_t *c
 
   if (SM_IS_CHUNK_RLE(chunk)) {
     /* This is a run-length (RLE) encoded chunk. */
-    const size_t end = __sm_chunk_rle_get_length(chunk) - 1;
+    const size_t length = __sm_chunk_rle_get_length(chunk);
+    const size_t end = length - 1;
     rank->rem = 0;
     if (value) {
       if (from <= end) {
@@ -1278,15 +1285,38 @@ __sm_get_chunk_data(const sparsemap_t *map, const size_t offset)
  * @return The capacity limit of the RLE chunk.
  */
 static size_t
-__sm_chunk_rle_capacity_limit(const sparsemap_t *map, const __sm_idx_t start, const size_t offset)
+__sm_chunk_rle_capacity_limit(const sparsemap_t *map, const __sm_idx_t start, const size_t length, const size_t offset)
 {
+  /* Calculate where the data extends to */
+  const size_t data_end = start + length;
+
+  /* Round up to next VEC boundary (2048-aligned) */
+  size_t capacity = ((data_end + SM_CHUNK_MAX_CAPACITY - 1) / SM_CHUNK_MAX_CAPACITY) * SM_CHUNK_MAX_CAPACITY - start;
+
+  /* Check if there's a next chunk that limits available space */
   const size_t next_offset = offset + SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t);
   if (next_offset < map->m_data_used - (SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t))) {
     uint8_t *p = __sm_get_chunk_data(map, next_offset);
     const __sm_idx_t next_start = *(__sm_idx_t *)p;
-    return next_start - start;
+    const size_t available = next_start - start;
+
+    /* Use whichever is smaller: VEC-aligned or available space */
+    if (available < capacity) {
+      capacity = available;
+    }
   }
-  return SM_CHUNK_RLE_MAX_CAPACITY;
+
+  /* Capacity must be large enough for the actual data */
+  if (capacity < length) {
+    capacity = length;
+  }
+
+  /* Clamp to RLE max */
+  if (capacity > SM_CHUNK_RLE_MAX_CAPACITY) {
+    capacity = SM_CHUNK_RLE_MAX_CAPACITY;
+  }
+
+  return capacity;
 }
 
 /**
@@ -1485,7 +1515,7 @@ __sm_remove_data(sparsemap_t *map, const size_t offset, const size_t gap_size)
  * @return The number of chunks that were removed during the coalescing process.
  */
 static int
-__sm_coalesce_chunk(sparsemap_t *map, __sm_chunk_t *chunk, size_t offset, __sm_idx_t start, uint8_t *p)
+__sm_coalesce_chunk(sparsemap_t *map, __sm_chunk_t *chunk, size_t offset, __sm_idx_t start, uint8_t *p, sparsemap_idx_t idx, bool is_set_op)
 {
   /*
   * This is called from __sm_chunk_set/unset/merge/split functions when a
@@ -1513,6 +1543,13 @@ __sm_coalesce_chunk(sparsemap_t *map, __sm_chunk_t *chunk, size_t offset, __sm_i
   */
   int num_removed = 0;
   const size_t run_length = __sm_chunk_get_run_length(chunk);
+  const size_t capacity = __sm_chunk_get_capacity(chunk);
+  const bool is_rle = __sm_chunk_is_rle(chunk);
+
+  /* Guard: do not coalesce an invalid RLE chunk */
+  if (is_rle && run_length > capacity) {
+    return num_removed;
+  }
   /* Did this chunk become all ones, can we compact it with adjacent chunks? */
   if (run_length > 0) {
     __sm_chunk_t adj;
@@ -1525,27 +1562,63 @@ __sm_coalesce_chunk(sparsemap_t *map, __sm_chunk_t *chunk, size_t offset, __sm_i
         const __sm_idx_t adj_start = *(__sm_idx_t *)adj_p;
         __sm_chunk_init(&adj, adj_p + SM_SIZEOF_OVERHEAD);
         /* Is the adjacent chunk on the left RLE or a sparse chunk of all ones? */
-        if (__sm_chunk_is_rle(&adj) || adj.m_data[0] == ~(__sm_bitvec_t)0) {
-          /* Does it align with this full sparse chunk? */
-          const size_t adj_length = __sm_chunk_get_run_length(&adj);
+        const size_t adj_length = __sm_chunk_get_run_length(&adj);
+        if (adj_length > 0) {
+          /* Does it align with this chunk? */
           if (adj_start + adj_length == start) {
             if (SM_CHUNK_MAX_CAPACITY + run_length < SM_CHUNK_RLE_MAX_LENGTH) {
-              /* The stars have aligned, transform to RLE and combine them! */
-              // __sm_when_diag({ fprintf(stdout, "\n%s\n", QCC_showChunk(adj_p, 0)); });
-              // __sm_when_diag({ fprintf(stdout, "\n%s\n", QCC_showChunk(p, 0)); });
-              __sm_chunk_set_rle(&adj);
-              __sm_chunk_rle_set_length(&adj, adj_length + run_length);
-              __sm_remove_data(map, offset, SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(chunk));
-              __sm_chunk_rle_set_capacity(&adj, __sm_chunk_rle_capacity_limit(map, adj_start, adj_offset));
-              __sm_set_chunk_count(map, __sm_get_chunk_count(map) - 1);
-              // __sm_when_diag({ fprintf(stdout, "\n%s\n", QCC_showChunk(adj_p, 0)); });
+              /* CRITICAL: Validate before coalescing */
+              const size_t adj_capacity = __sm_chunk_get_capacity(&adj);
+              const bool adj_is_rle = __sm_chunk_is_rle(&adj);
+              bool can_coalesce = true;
 
-              /* Now chunk is shifted to the left, it becomes the adjacent chunk. */
-              p = adj_p;
-              offset = adj_offset;
-              start = adj_start;
-              __sm_chunk_init(chunk, p + SM_SIZEOF_OVERHEAD);
-              num_removed += 1;
+              if (adj_is_rle && adj_length > adj_capacity) {
+                can_coalesce = false;
+              }
+
+              /* Calculate new length as span from adjacent start to end of current run */
+              size_t new_length = (start + run_length) - adj_start;
+
+              /*
+               * Derive capacity from VEC-aligned boundaries, looking past the
+               * current chunk (being absorbed) to find the real next neighbor.
+               */
+              const size_t merge_data_end = adj_start + new_length;
+              size_t new_capacity = ((merge_data_end + SM_CHUNK_MAX_CAPACITY - 1) / SM_CHUNK_MAX_CAPACITY) * SM_CHUNK_MAX_CAPACITY - adj_start;
+              const size_t post_offset = offset + SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(chunk);
+              if (post_offset < map->m_data_used - (SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t))) {
+                const __sm_idx_t next_start = *(__sm_idx_t *)__sm_get_chunk_data(map, post_offset);
+                const size_t avail = next_start - adj_start;
+                if (avail < new_capacity) {
+                  new_capacity = avail;
+                }
+              }
+              if (new_capacity < new_length) {
+                new_capacity = new_length;
+              }
+              if (new_capacity > SM_CHUNK_RLE_MAX_CAPACITY) {
+                new_capacity = SM_CHUNK_RLE_MAX_CAPACITY;
+              }
+
+              /* Validate that new length fits in available capacity */
+              if (can_coalesce && new_length > new_capacity) {
+                can_coalesce = false;
+              }
+
+              if (can_coalesce) {
+                __sm_chunk_set_rle(&adj);
+                __sm_chunk_rle_set_capacity(&adj, new_capacity);
+                __sm_chunk_rle_set_length(&adj, new_length);
+                __sm_remove_data(map, offset, SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(chunk));
+                __sm_set_chunk_count(map, __sm_get_chunk_count(map) - 1);
+
+                /* Now chunk is shifted to the left, it becomes the adjacent chunk. */
+                p = adj_p;
+                offset = adj_offset;
+                start = adj_start;
+                __sm_chunk_init(chunk, p + SM_SIZEOF_OVERHEAD);
+                num_removed += 1;
+              }
             }
           }
         }
@@ -1560,22 +1633,67 @@ __sm_coalesce_chunk(sparsemap_t *map, __sm_chunk_t *chunk, size_t offset, __sm_i
         const __sm_idx_t adj_start = *(__sm_idx_t *)adj_p;
         __sm_chunk_init(&adj, adj_p + SM_SIZEOF_OVERHEAD);
         /* Is the adjacent right chunk RLE or a sparse with a run of ones? */
-        const size_t adj_length = __sm_chunk_get_run_length(&adj);
+        size_t adj_length = __sm_chunk_get_run_length(&adj);
+        /* If this is a SET operation and idx is valid and within the adjacent chunk,
+         * use it to calculate accurate run length (prevents overestimation) */
+        if (is_set_op && idx != SPARSEMAP_IDX_MAX && idx >= adj_start) {
+          const size_t idx_based_length = idx - adj_start + 1;
+          if (idx_based_length < adj_length) {
+            adj_length = idx_based_length;
+          }
+        }
         if (adj_length) {
           /* Does it align with this full sparse chunk? */
           const size_t length = __sm_chunk_get_run_length(chunk);
           if (start + length == adj_start) {
             if (adj_length + length < SM_CHUNK_RLE_MAX_LENGTH) {
-              /* The stars have aligned, transform to RLE and combine them! */
-              // __sm_when_diag({ fprintf(stdout, "\n%s\n", QCC_showChunk(p, 0)); });
-              // __sm_when_diag({ fprintf(stdout, "\n%s\n", QCC_showChunk(adj_p, 0)); });
-              __sm_chunk_rle_set_length(chunk, length + adj_length);
-              __sm_remove_data(map, adj_offset, SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&adj));
-              __sm_chunk_set_rle(chunk);
-              __sm_chunk_rle_set_capacity(chunk, __sm_chunk_rle_capacity_limit(map, start, offset));
-              __sm_set_chunk_count(map, __sm_get_chunk_count(map) - 1);
-              // __sm_when_diag({ fprintf(stdout, "\n%s\n", QCC_showChunk(p, 0)); });
-              num_removed += 1;
+              /* Validate adjacent chunk before coalescing */
+              const size_t adj_capacity = __sm_chunk_get_capacity(&adj);
+              const bool adj_is_rle = __sm_chunk_is_rle(&adj);
+              bool can_coalesce = true;
+
+              if (adj_is_rle && adj_length > adj_capacity) {
+                can_coalesce = false;
+              }
+
+              /* Calculate new length as span from this start to end of adjacent run */
+              size_t new_length = (adj_start + adj_length) - start;
+
+              /*
+               * Derive capacity from VEC-aligned boundaries, looking past the
+               * adjacent chunk (being absorbed) to find the real next neighbor.
+               */
+              const size_t r_data_end = start + new_length;
+              size_t new_capacity = ((r_data_end + SM_CHUNK_MAX_CAPACITY - 1) / SM_CHUNK_MAX_CAPACITY) * SM_CHUNK_MAX_CAPACITY - start;
+              const size_t r_adj_size = __sm_chunk_get_size(&adj);
+              const size_t r_post = adj_offset + SM_SIZEOF_OVERHEAD + r_adj_size;
+              if (r_post < map->m_data_used - (SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t))) {
+                const __sm_idx_t nxt = *(__sm_idx_t *)__sm_get_chunk_data(map, r_post);
+                const size_t avail = nxt - start;
+                if (avail < new_capacity) {
+                  new_capacity = avail;
+                }
+              }
+              if (new_capacity < new_length) {
+                new_capacity = new_length;
+              }
+              if (new_capacity > SM_CHUNK_RLE_MAX_CAPACITY) {
+                new_capacity = SM_CHUNK_RLE_MAX_CAPACITY;
+              }
+
+              /* Validate that new length fits in available capacity */
+              if (can_coalesce && new_length > new_capacity) {
+                can_coalesce = false;
+              }
+
+              if (can_coalesce) {
+                __sm_chunk_set_rle(chunk);
+                __sm_chunk_rle_set_capacity(chunk, new_capacity);
+                __sm_chunk_rle_set_length(chunk, new_length);
+                __sm_remove_data(map, adj_offset, SM_SIZEOF_OVERHEAD + r_adj_size);
+                __sm_set_chunk_count(map, __sm_get_chunk_count(map) - 1);
+                num_removed += 1;
+              }
             }
           }
         }
@@ -1607,7 +1725,7 @@ __sm_coalesce_map(sparsemap_t *map)
   while (count > 1) {
     const __sm_idx_t start = *(__sm_idx_t *)p;
     __sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
-    const size_t amt = __sm_coalesce_chunk(map, &chunk, offset, start, p);
+    const size_t amt = __sm_coalesce_chunk(map, &chunk, offset, start, p, SPARSEMAP_IDX_MAX, false);
     if (amt > 0) {
       n += amt;
       count = __sm_get_chunk_count(map);
@@ -1678,6 +1796,7 @@ __sm_separate_rle_chunk(sparsemap_t *map, __sm_chunk_sep_t *sep, const sparsemap
 
   __sm_assert(state == 0 || state == 1 || state == -1);
   __sm_assert(SM_IS_CHUNK_RLE(sep->target.chunk));
+
   if (state == 1) {
     /* setting a bit */
     __sm_assert(idx < sep->target.capacity);
@@ -1705,9 +1824,11 @@ __sm_separate_rle_chunk(sparsemap_t *map, __sm_chunk_sep_t *sep, const sparsemap
 
   if (state == 0) {
     /* To unset, change the flag at the position of the idx to "mixed" ... */
-    SM_CHUNK_SET_FLAGS(pivot_chunk.m_data[0], idx / SM_BITS_PER_VECTOR, SM_PAYLOAD_MIXED);
+    const size_t vec_idx = (idx - aligned_idx) / SM_BITS_PER_VECTOR;
+    const size_t bit_pos = (idx - aligned_idx) % SM_BITS_PER_VECTOR;
+    SM_CHUNK_SET_FLAGS(pivot_chunk.m_data[0], vec_idx, SM_PAYLOAD_MIXED);
     /* and clear only the bit at that index in this chunk. */
-    pivot_chunk.m_data[1] = ~(__sm_bitvec_t)0 & ~((__sm_bitvec_t)1 << idx % SM_BITS_PER_VECTOR);
+    pivot_chunk.m_data[1] = ~(__sm_bitvec_t)0 & ~((__sm_bitvec_t)1 << bit_pos);
     sep->pivot.size = SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) * 2;
   } else if (state == 1) {
     if (idx >= sep->target.start && idx < sep->target.start + sep->target.length) {
@@ -1768,9 +1889,11 @@ __sm_separate_rle_chunk(sparsemap_t *map, __sm_chunk_sep_t *sep, const sparsemap
       /* Are we setting a bit beyond the length where we partially overlap? */
       if (state == 1 && idx > sep->target.start + sep->target.length) {
         /* Change only the flag at the position of the index to "mixed" ... */
-        SM_CHUNK_SET_FLAGS(pivot_chunk.m_data[0], idx / SM_BITS_PER_VECTOR, SM_PAYLOAD_MIXED);
+        const size_t vec_idx = (idx - aligned_idx) / SM_BITS_PER_VECTOR;
+        const size_t bit_pos = (idx - aligned_idx) % SM_BITS_PER_VECTOR;
+        SM_CHUNK_SET_FLAGS(pivot_chunk.m_data[0], vec_idx, SM_PAYLOAD_MIXED);
         /* and set the bit at that index in this chunk. */
-        pivot_chunk.m_data[1] |= (__sm_bitvec_t)1 << idx % SM_BITS_PER_VECTOR;
+        pivot_chunk.m_data[1] |= (__sm_bitvec_t)1 << bit_pos;
       }
       /* Record information necessary to construct the left chunk. */
       sep->ex[0].start = sep->target.start;
@@ -1797,9 +1920,11 @@ __sm_separate_rle_chunk(sparsemap_t *map, __sm_chunk_sep_t *sep, const sparsemap
 
         if (state == 1) {
           /* Change only the flag at the position of the index to "mixed" ... */
-          SM_CHUNK_SET_FLAGS(pivot_chunk.m_data[0], idx / SM_BITS_PER_VECTOR, SM_PAYLOAD_MIXED);
+          const size_t vec_idx = (idx - aligned_idx) / SM_BITS_PER_VECTOR;
+          const size_t bit_pos = (idx - aligned_idx) % SM_BITS_PER_VECTOR;
+          SM_CHUNK_SET_FLAGS(pivot_chunk.m_data[0], vec_idx, SM_PAYLOAD_MIXED);
           /* and set the bit at that index in this chunk. */
-          pivot_chunk.m_data[1] |= (__sm_bitvec_t)1 << idx % SM_BITS_PER_VECTOR;
+          pivot_chunk.m_data[1] |= (__sm_bitvec_t)1 << bit_pos;
         }
         /* Record information necessary to construct the left chunk. */
         sep->ex[0].start = sep->target.start;
@@ -1823,7 +1948,7 @@ __sm_separate_rle_chunk(sparsemap_t *map, __sm_chunk_sep_t *sep, const sparsemap
     sep->ex[0].end = aligned_idx - 1;
     sep->ex[0].p = sep->buf;
     sep->ex[1].start = aligned_idx + SM_CHUNK_MAX_CAPACITY;
-    sep->ex[1].end = sep->target.length - 1;
+    sep->ex[1].end = sep->target.start + sep->target.length - 1;
     sep->ex[1].p = (uint8_t *)((uintptr_t)sep->buf + (SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) * 2) + sep->pivot.size);
     __sm_assert(sep->ex[0].start < sep->ex[0].end);
     __sm_assert(sep->ex[1].start < sep->ex[1].end);
@@ -1839,8 +1964,6 @@ __sm_separate_rle_chunk(sparsemap_t *map, __sm_chunk_sep_t *sep, const sparsemap
       if (sep->ex[i].end - sep->ex[i].start + 1 > SM_CHUNK_MAX_CAPACITY) {
         /* ... we need a run-length encoding (RLE), chunk ... */
         __sm_chunk_set_rle(&lrc);
-        /* ... now assign the length ... */
-        __sm_chunk_rle_set_length(&lrc, sep->ex[i].end - sep->ex[i].start + 1);
         /* ... a few things differ left to right ... */
         if (i == 0) {
           /* ... left: extend capacity to the start of the pivot chunk ... */
@@ -1852,10 +1975,16 @@ __sm_separate_rle_chunk(sparsemap_t *map, __sm_chunk_sep_t *sep, const sparsemap
             sep->ex[1].p = (uint8_t *)((uintptr_t)sep->ex[1].p - sizeof(__sm_bitvec_t));
           }
         } else {
-          /* ... right: extend capacity to max or the start of next chunk */
-          const size_t right_offset = sep->target.offset + SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t);
-          __sm_chunk_rle_set_capacity(&lrc, __sm_chunk_rle_capacity_limit(map, aligned_idx, right_offset));
+          /* ... right: calculate capacity from original target chunk, not stunt map */
+          size_t right_cap = (sep->target.start + sep->target.capacity) - aligned_idx;
+          if (right_cap > SM_CHUNK_RLE_MAX_CAPACITY) {
+            right_cap = SM_CHUNK_RLE_MAX_CAPACITY;
+          }
+          __sm_chunk_rle_set_capacity(&lrc, right_cap);
         }
+        /* Capacity is set before length to satisfy the invariant */
+        const size_t rle_length = sep->ex[i].end - sep->ex[i].start + 1;
+        __sm_chunk_rle_set_length(&lrc, rle_length);
         /* ... and record our chunk size. */
         sep->ex[i].size = SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t);
       } else {
@@ -2317,6 +2446,8 @@ __sm_map_unset(sparsemap_t *map, sparsemap_idx_t idx, const bool coalesce)
      */
     __sm_chunk_sep_t sep = { .target = { .p = p, .offset = offset, .chunk = &chunk, .start = start, .length = length, .capacity = capacity } };
     SM_ENOUGH_SPACE(__sm_separate_rle_chunk(map, &sep, idx, 0));
+    /* Skip coalescing after RLE separation - the pointers are now invalid */
+    offset = SPARSEMAP_IDX_MAX;
     goto done;
   }
 
@@ -2350,15 +2481,8 @@ __sm_map_unset(sparsemap_t *map, sparsemap_idx_t idx, const bool coalesce)
 
 done:;
   if (coalesce && offset != SPARSEMAP_IDX_MAX) {
-    __sm_coalesce_chunk(map, &chunk, offset, start, p);
+    __sm_coalesce_chunk(map, &chunk, offset, start, p, idx, false);
   }
-#if 0
-  __sm_when_diag({
-    char *s = QCC_showSparsemap(map, 0);
-    fprintf(stdout, "\n++++++++++++++++++++++++++++++ unset: %lu\n%s\n", idx, s);
-    free(s);
-  });
-#endif
   return ret_idx;
 }
 
@@ -2554,8 +2678,9 @@ __sm_map_set(sparsemap_t *map, sparsemap_idx_t idx, const bool coalesce)
      */
 
     __sm_chunk_set_rle(&chunk);
-    __sm_chunk_rle_set_length(&chunk, SM_CHUNK_MAX_CAPACITY + 1);
-    __sm_chunk_rle_set_capacity(&chunk, __sm_chunk_rle_capacity_limit(map, start, offset));
+    const size_t rle_length = SM_CHUNK_MAX_CAPACITY + 1;
+    __sm_chunk_rle_set_capacity(&chunk, __sm_chunk_rle_capacity_limit(map, start, rle_length, offset));
+    __sm_chunk_rle_set_length(&chunk, rle_length);
     goto done;
   }
 
@@ -2619,15 +2744,8 @@ __sm_map_set(sparsemap_t *map, sparsemap_idx_t idx, const bool coalesce)
 
 done:;
   if (coalesce) {
-    __sm_coalesce_chunk(map, &chunk, offset, start, p);
+    __sm_coalesce_chunk(map, &chunk, offset, start, p, idx, true);
   }
-#if 0
-  __sm_when_diag({
-    char *s = QCC_showSparsemap(map, 0);
-    fprintf(stdout, "\n++++++++++++++++++++++++++++++ set: %lu\n%s\n", idx, s);
-    free(s);
-  });
-#endif
   return ret_idx;
 }
 
@@ -2984,6 +3102,17 @@ sparsemap_merge(sparsemap_t *destination, sparsemap_t *source)
 
       /* Source chunk (sparse/RLE) precedes next destination chunk. */
       if (src_start + src_capacity <= dst_start) {
+        /* CRITICAL: Validate RLE chunks before inserting */
+        if (src_is_rle) {
+          const size_t src_length = __sm_chunk_rle_get_length(&src_chunk);
+          if (src_length > src_capacity) {
+            fprintf(stderr, "ERROR merge insert: source RLE chunk has length=%zu > capacity=%zu at start=%u\n",
+                    src_length, src_capacity, src_start);
+            fprintf(stderr, "Cannot insert invalid RLE chunk. Aborting merge.\n");
+            return -1;
+          }
+        }
+
         const size_t src_size = __sm_chunk_get_size(&src_chunk);
         const ssize_t offset = __sm_get_chunk_offset(destination, dst_start);
         /* Insert a copy of the src chunk in dst at the proper offset. */
@@ -2999,6 +3128,17 @@ sparsemap_merge(sparsemap_t *destination, sparsemap_t *source)
 
       /* Source chunk (sparse/RLE) follows next destination chunk. */
       if (src_start >= (dst_start + dst_capacity)) {
+        /* CRITICAL: Validate RLE chunks before inserting/appending */
+        if (src_is_rle) {
+          const size_t src_length = __sm_chunk_rle_get_length(&src_chunk);
+          if (src_length > src_capacity) {
+            fprintf(stderr, "ERROR merge append: source RLE chunk has length=%zu > capacity=%zu at start=%u\n",
+                    src_length, src_capacity, src_start);
+            fprintf(stderr, "Cannot insert invalid RLE chunk. Aborting merge.\n");
+            return -1;
+          }
+        }
+
         const size_t src_size = __sm_chunk_get_size(&src_chunk);
         /* Insert or append a copy of the src chunk in dst. */
         if (dst_offset == __sm_get_chunk_offset(destination, SPARSEMAP_IDX_MAX)) {
@@ -3022,10 +3162,35 @@ sparsemap_merge(sparsemap_t *destination, sparsemap_t *source)
 
       if (src_is_rle && dst_is_rle) {
         /* Both src and dst are RLE ... */
-        __sm_chunk_rle_set_capacity(&dst_chunk, __sm_chunk_rle_capacity_limit(destination, src_start, dst_offset));
+        /* CRITICAL: Validate source chunk before merging */
+        if (src_length > src_capacity) {
+          fprintf(stderr, "ERROR merge RLE overlap: source chunk is invalid (length=%zu > capacity=%zu), skipping\n",
+                  src_length, src_capacity);
+          /* Move to next src chunk */
+          src_count--;
+          src += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&src_chunk);
+          continue;
+        }
+
+        /* RLE capacity is IMMUTABLE - do not recalculate */
+        const size_t dst_capacity = __sm_chunk_rle_get_capacity(&dst_chunk);
+        fprintf(stderr, "DEBUG merge RLE: dst_start=%u, dst_capacity=%zu, dst_length=%zu, src_length=%zu\n",
+                dst_start, dst_capacity, dst_length, src_length);
+
         if (src_length >= dst_length) {
-          /* ... and src is larger than dst. */
-          __sm_chunk_rle_set_length(&dst_chunk, __sm_chunk_rle_get_length(&src_chunk));
+          /* Source is larger than dst. Check if it fits in dst's existing capacity */
+          size_t new_length = __sm_chunk_rle_get_length(&src_chunk);
+
+          /* Validate new length fits in dst's immutable capacity */
+          if (new_length > dst_capacity) {
+            fprintf(stderr, "ERROR merge RLE overlap: new_length=%zu exceeds dst_capacity=%zu, cannot merge\n",
+                    new_length, dst_capacity);
+            fprintf(stderr, "  RLE capacity is immutable. Skipping this merge.\n");
+            src_count--;
+            src += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&src_chunk);
+            continue;
+          }
+          __sm_chunk_rle_set_length(&dst_chunk, new_length);
         }
         if (src_start <= dst_start) {
           /* ... and src starts before dst. */
@@ -3105,7 +3270,14 @@ sparsemap_merge(sparsemap_t *destination, sparsemap_t *source)
     }
   }
 
+  fprintf(stderr, "DEBUG merge: About to coalesce destination map with %zu chunks\n", __sm_get_chunk_count(destination));
+  size_t before_count = __sm_get_chunk_count(destination);
   __sm_coalesce_map(destination);
+  size_t after_count = __sm_get_chunk_count(destination);
+  fprintf(stderr, "DEBUG merge: After coalesce, destination has %zu chunks\n", after_count);
+  if (before_count > 1 && after_count > 1) {
+    fprintf(stderr, "WARNING: Coalesce failed to merge %zu chunks!\n", after_count);
+  }
   return 0;
 }
 
@@ -3231,7 +3403,6 @@ sparsemap_split(sparsemap_t *map, sparsemap_idx_t idx, sparsemap_t *other)
       memcpy(src, sep.buf, sep.expand_by + SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t));
       __sm_set_chunk_count(map, __sm_get_chunk_count(map) + (sep.count - 1));
 
-      //GSB __sm_when_diag({ __sm_diag_map(map, "========== PREPARED:"); });
       return sparsemap_split(map, idx, other);
     }
 
@@ -3796,11 +3967,24 @@ _tst_get_chunk_offset(QCC_GenValue **vals, int len, QCC_Stamp **stamp)
   const unsigned int rnd_offset = (idx % max_offset) - (idx % max_offset % sizeof(__sm_bitvec_t));
   const unsigned int rnd_nvec = rnd_offset / sizeof(__sm_bitvec_t);
   const __sm_idx_t offset = __sm_get_chunk_aligned_offset(idx);
+  ssize_t result;
+  size_t expected;
+
+  (void)len;
+  (void)stamp;
+
+#define FAIL_AT(line, ...) do { \
+  fprintf(stderr, "FAIL at line %d (test input idx=%u): ", line, idx); \
+  fprintf(stderr, __VA_ARGS__); \
+  fprintf(stderr, "\n"); \
+  return QCC_FAIL; \
+} while(0)
 
   // An empty map should return -1 (no chunks present, so offset of -1).
   for (unsigned int i = offset; i < SM_CHUNK_MAX_CAPACITY + offset; i++) {
-    if (__sm_get_chunk_offset(map, idx) != -1) {
-      return QCC_FAIL;
+    ssize_t result = __sm_get_chunk_offset(map, i);
+    if (result != -1) {
+      FAIL_AT(__LINE__, "empty map check failed: __sm_get_chunk_offset(map, %u) = %zd, expected -1", i, result);
     }
   }
 
@@ -3814,7 +3998,7 @@ _tst_get_chunk_offset(QCC_GenValue **vals, int len, QCC_Stamp **stamp)
     size_t expected_offset = __sm_get_chunk_offset(map, offset + (i * SM_CHUNK_MAX_CAPACITY));
     size_t calculated_offset = i * (SM_SIZEOF_OVERHEAD + (sizeof(__sm_bitvec_t) * 2));
     if (calculated_offset != expected_offset) {
-      return QCC_FAIL;
+      FAIL_AT(__LINE__, "%d-chunk offset mismatch: expected=%zu, got=%zu", i, calculated_offset, expected_offset);
     }
   }
 
@@ -3824,74 +4008,279 @@ _tst_get_chunk_offset(QCC_GenValue **vals, int len, QCC_Stamp **stamp)
     sparsemap_set(map, i);
   }
   for (int i = 0; i < SM_CHUNK_MAX_CAPACITY; i++) {
-    if (__sm_get_chunk_offset(map, i) != 0) {
-      return QCC_FAIL;
+    ssize_t result = __sm_get_chunk_offset(map, i);
+    if (result != 0) {
+      FAIL_AT(__LINE__, "RLE full chunk check failed: __sm_get_chunk_offset(map, %d) = %zd, expected 0", i, result);
     }
   }
-  if (__sm_get_chunk_offset(map, SM_CHUNK_MAX_CAPACITY) != 0) {
-    return QCC_FAIL;
+  result = __sm_get_chunk_offset(map, SM_CHUNK_MAX_CAPACITY);
+  if (result != 0) {
+    FAIL_AT(__LINE__, "chunk offset at boundary (before RLE transform) failed: __sm_get_chunk_offset(map, %d) = %zd, expected 0", SM_CHUNK_MAX_CAPACITY, result);
   }
 
   // This should trigger the transformation of the 0th chunk into RLE.
   sparsemap_set(map, SM_CHUNK_MAX_CAPACITY);
-  if (__sm_get_chunk_offset(map, SM_CHUNK_MAX_CAPACITY) != 0) {
-    return QCC_FAIL;
+  result = __sm_get_chunk_offset(map, SM_CHUNK_MAX_CAPACITY);
+  if (result != 0) {
+    FAIL_AT(__LINE__, "chunk offset after RLE transform failed: __sm_get_chunk_offset(map, %d) = %zd, expected 0", SM_CHUNK_MAX_CAPACITY, result);
   }
   // This should trigger the transformation of the 0th chunk back to sparse.
   sparsemap_unset(map, SM_CHUNK_MAX_CAPACITY);
-  if (__sm_get_chunk_offset(map, SM_CHUNK_MAX_CAPACITY) != 0) {
-    return QCC_FAIL;
+  result = __sm_get_chunk_offset(map, SM_CHUNK_MAX_CAPACITY);
+  if (result != 0) {
+    FAIL_AT(__LINE__, "chunk offset after sparse transform failed: __sm_get_chunk_offset(map, %d) = %zd, expected 0", SM_CHUNK_MAX_CAPACITY, result);
   }
 
   // This should trigger the transformation of the 0th chunk into RLE again.
   for (int i = 0; i < 3000; i++) {
     sparsemap_set(map, SM_CHUNK_MAX_CAPACITY + i);
   }
+
+  // Debug: check state after setting 3000 bits
+  {
+    size_t chunk_count = __sm_get_chunk_count(map);
+    fprintf(stderr, "After set 3000 bits (2048-5047): chunk_count=%zu\n", chunk_count);
+    uint8_t *p = __sm_get_chunk_data(map, 0);
+    for (size_t i = 0; i < chunk_count; i++) {
+      __sm_idx_t start = *(__sm_idx_t *)p;
+      __sm_chunk_t chunk;
+      __sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
+      size_t cap = __sm_chunk_get_capacity(&chunk);
+      bool is_rle = __sm_chunk_is_rle(&chunk);
+      size_t len = is_rle ? __sm_chunk_rle_get_length(&chunk) : 0;
+      fprintf(stderr, "  Chunk %zu: start=%zu, capacity=%zu, length=%zu, RLE=%d\n",
+              i, start, cap, len, is_rle);
+      p += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&chunk);
+    }
+  }
+
   // This should trigger the transformation of the 0th chunk back to sparse,
   // but also create a second and third sparse chunks.
   sparsemap_unset(map, 0);
-  if (__sm_get_chunk_offset(map, 0) != 0) {
-    return QCC_FAIL;
+  fprintf(stderr, "After unset(0): chunk_count=%zu\n", __sm_get_chunk_count(map));
+  result = __sm_get_chunk_offset(map, 0);
+  if (result != 0) {
+    FAIL_AT(__LINE__, "chunk offset after unset at 0 failed: __sm_get_chunk_offset(map, 0) = %zd, expected 0", result);
   }
   sparsemap_set(map, 0);
+  {
+    size_t chunk_count = __sm_get_chunk_count(map);
+    fprintf(stderr, "After set(0): chunk_count=%zu\n", chunk_count);
+    uint8_t *p = __sm_get_chunk_data(map, 0);
+    __sm_idx_t start = *(__sm_idx_t *)p;
+    __sm_chunk_t chunk;
+    __sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
+    bool is_rle = __sm_chunk_is_rle(&chunk);
+    size_t cap = __sm_chunk_get_capacity(&chunk);
+    size_t len = is_rle ? __sm_chunk_rle_get_length(&chunk) : 0;
+    fprintf(stderr, "  Chunk 0: start=%u, capacity=%zu, length=%zu, RLE=%d, m_data[0]=0x%llx\n",
+            start, cap, len, is_rle, (unsigned long long)chunk.m_data[0]);
+    // Verify some bits
+    fprintf(stderr, "  Bit checks: is_set(0)=%d, is_set(100)=%d, is_set(2050)=%d, is_set(5000)=%d\n",
+            sparsemap_is_set(map, 0), sparsemap_is_set(map, 100),
+            sparsemap_is_set(map, 2050), sparsemap_is_set(map, 5000));
+  }
 
   // This will split the chunk into two chunks; sparse, RLE.
+  fprintf(stderr, "Before unset(129): chunk_count=%zu\n", __sm_get_chunk_count(map));
   sparsemap_unset(map, 129);
-  if (__sm_get_chunk_offset(map, 129) != 0) {
-    return QCC_FAIL;
+  {
+    size_t chunk_count = __sm_get_chunk_count(map);
+    fprintf(stderr, "After unset(129): chunk_count=%zu\n", chunk_count);
+    for (size_t i = 0; i < chunk_count && i < 3; i++) {
+      size_t chunk_offset = i == 0 ? 0 : __sm_get_chunk_offset(map, i * SM_CHUNK_MAX_CAPACITY);
+      if ((ssize_t)chunk_offset == -1) break;
+      uint8_t *p = __sm_get_chunk_data(map, chunk_offset);
+      __sm_idx_t start = *(__sm_idx_t *)p;
+      __sm_chunk_t chunk;
+      __sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
+      bool is_rle = __sm_chunk_is_rle(&chunk);
+      size_t cap = __sm_chunk_get_capacity(&chunk);
+      size_t len = is_rle ? __sm_chunk_rle_get_length(&chunk) : 0;
+      fprintf(stderr, "  Chunk %zu: start=%u, capacity=%zu, length=%zu, RLE=%d\n",
+              i, start, cap, len, is_rle);
+    }
+  }
+  result = __sm_get_chunk_offset(map, 129);
+  if (result != 0) {
+    FAIL_AT(__LINE__, "chunk offset after split at 129 failed: __sm_get_chunk_offset(map, 129) = %zd, expected 0", result);
   }
   sparsemap_set(map, 129);
+  {
+    size_t chunk_count = __sm_get_chunk_count(map);
+    fprintf(stderr, "After set(129): chunk_count=%zu\n", chunk_count);
+    if (chunk_count > 0) {
+      uint8_t *p = __sm_get_chunk_data(map, 0);
+      __sm_idx_t start = *(__sm_idx_t *)p;
+      __sm_chunk_t chunk;
+      __sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
+      bool is_rle = __sm_chunk_is_rle(&chunk);
+      size_t cap = __sm_chunk_get_capacity(&chunk);
+      size_t len = is_rle ? __sm_chunk_rle_get_length(&chunk) : 0;
+      fprintf(stderr, "  Chunk 0: start=%u, capacity=%zu, length=%zu, RLE=%d\n",
+              start, cap, len, is_rle);
+    }
+  }
 
   // This will split the chunk into three chunks; sparse, sparse, RLE.
+  fprintf(stderr, "Before unset(2050): chunk_count=%zu\n", __sm_get_chunk_count(map));
+  {
+    uint8_t *p = __sm_get_chunk_data(map, 0);
+    __sm_idx_t start = *(__sm_idx_t *)p;
+    __sm_chunk_t chunk;
+    __sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
+    bool is_rle = __sm_chunk_is_rle(&chunk);
+    size_t cap = __sm_chunk_get_capacity(&chunk);
+    size_t len = is_rle ? __sm_chunk_rle_get_length(&chunk) : 0;
+    fprintf(stderr, "  Chunk 0: start=%u, capacity=%zu, length=%zu, RLE=%d\n",
+            start, cap, len, is_rle);
+    fprintf(stderr, "  Bit 2050 is_set=%d, idx 2050 in range [start=%u, start+length=%zu)? %d\n",
+            sparsemap_is_set(map, 2050), start, start + len, (2050 >= start && 2050 < start + len));
+  }
   sparsemap_unset(map, 2050);
-  if (__sm_get_chunk_offset(map, 0) != 0) {
-    return QCC_FAIL;
+
+  // Debug: check chunk count and structure
+  {
+    size_t chunk_count = __sm_get_chunk_count(map);
+    fprintf(stderr, "After unset(2050): chunk_count=%zu\n", chunk_count);
+    uint8_t *p = __sm_get_chunk_data(map, 0);
+    for (size_t i = 0; i < chunk_count; i++) {
+      __sm_idx_t start = *(__sm_idx_t *)p;
+      __sm_chunk_t chunk;
+      __sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
+      size_t capacity = __sm_chunk_get_capacity(&chunk);
+      size_t size = __sm_chunk_get_size(&chunk);
+      bool is_rle = __sm_chunk_is_rle(&chunk);
+      fprintf(stderr, "  Chunk %zu: start=%zu, capacity=%zu, size=%zu, RLE=%d\n",
+              i, start, capacity, size, is_rle);
+      p += SM_SIZEOF_OVERHEAD + size;
+    }
   }
-  if (__sm_get_chunk_offset(map, 2050) != SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t)) {
-    return QCC_FAIL;
+
+  result = __sm_get_chunk_offset(map, 0);
+  if (result != 0) {
+    FAIL_AT(__LINE__, "chunk offset after 3-way split, chunk 0 failed: __sm_get_chunk_offset(map, 0) = %zd, expected 0", result);
   }
-  if (__sm_get_chunk_offset(map, 2050 + SM_CHUNK_MAX_CAPACITY) != 2 * SM_SIZEOF_OVERHEAD + 3 * sizeof(__sm_bitvec_t)) {
-    return QCC_FAIL;
+  result = __sm_get_chunk_offset(map, 2050);
+  expected = SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t);
+  if ((size_t)result != expected) {
+    FAIL_AT(__LINE__, "chunk offset after 3-way split, chunk 1 failed: __sm_get_chunk_offset(map, 2050) = %zd, expected %zu", result, expected);
+  }
+  result = __sm_get_chunk_offset(map, 2050 + SM_CHUNK_MAX_CAPACITY);
+  expected = 2 * SM_SIZEOF_OVERHEAD + 3 * sizeof(__sm_bitvec_t);
+  if ((size_t)result != expected) {
+    FAIL_AT(__LINE__, "chunk offset after 3-way split, chunk 2 failed: __sm_get_chunk_offset(map, %d) = %zd, expected %zu", 2050 + SM_CHUNK_MAX_CAPACITY, result, expected);
   }
   sparsemap_set(map, 2050);
 
   // This won't split the chunk, it just shrinks the RLE by one.
   sparsemap_unset(map, 5047);
-  if (__sm_get_chunk_offset(map, 5046) != 0) {
-    return QCC_FAIL;
+  result = __sm_get_chunk_offset(map, 5046);
+  if (result != 0) {
+    FAIL_AT(__LINE__, "chunk offset after RLE shrink failed: __sm_get_chunk_offset(map, 5046) = %zd, expected 0", result);
   }
 
   // This will split the chunk, the index is outside the range but inside the capacity.
   sparsemap_set(map, 5048);
-  if (__sm_get_chunk_offset(map, 4090) != 0) {
-    return QCC_FAIL;
+  result = __sm_get_chunk_offset(map, 4090);
+  if (result != 0) {
+    FAIL_AT(__LINE__, "chunk offset after split, first chunk failed: __sm_get_chunk_offset(map, 4090) = %zd, expected 0", result);
   }
-  if (__sm_get_chunk_offset(map, 5046) != 12) {
-    return QCC_FAIL;
+  result = __sm_get_chunk_offset(map, 5046);
+  if (result != 12) {
+    FAIL_AT(__LINE__, "chunk offset after split, second chunk failed: __sm_get_chunk_offset(map, 5046) = %zd, expected 12", result);
   }
 
   sparsemap_unset(map, 5048);
-  if (__sm_get_chunk_offset(map, 5046) != 0) {
+  result = __sm_get_chunk_offset(map, 5046);
+  if (result != 0) {
+    FAIL_AT(__LINE__, "chunk offset after unset 5048 failed: __sm_get_chunk_offset(map, 5046) = %zd, expected 0", result);
+  }
+
+#undef FAIL_AT
+  return QCC_OK;
+}
+
+QCC_TestStatus
+_tst_rle_select_rank_consistency(QCC_GenValue **vals, int len, QCC_Stamp **stamp)
+{
+  (void)len;
+  (void)stamp;
+
+  sparsemap_t *map = QCC_getValue(vals, 0, sparsemap_t *);
+  if (!map || !map->m_data) {
+    return QCC_OK;
+  }
+
+  /* Test property: for any set bit at index i, select(rank(0, i, true) - 1, true) should equal i
+   * This verifies that rank and select are inverse operations. */
+
+  size_t count = sparsemap_count(map);
+  if (count == 0) {
+    return QCC_OK;
+  }
+
+  /* Sample up to 100 set bits to test */
+  size_t test_limit = count < 100 ? count : 100;
+
+  for (size_t n = 0; n < test_limit; n++) {
+    /* Get the nth set bit */
+    __sm_idx_t idx = sparsemap_select(map, n, true);
+    if (idx == SPARSEMAP_IDX_MAX) {
+      break; /* No more set bits */
+    }
+
+    /* Verify the bit is actually set */
+    if (!sparsemap_is_set(map, idx)) {
+      return QCC_FAIL;
+    }
+
+    /* Get rank up to this index */
+    int r = sparsemap_rank(map, 0, idx, true);
+    if (r <= 0) {
+      return QCC_FAIL;
+    }
+
+    /* Select should give us back the same index */
+    __sm_idx_t idx2 = sparsemap_select(map, r - 1, true);
+    if (idx2 != idx) {
+      return QCC_FAIL;
+    }
+  }
+
+  return QCC_OK;
+}
+
+/* Helper for scan completeness test */
+static size_t scan_completeness_count = 0;
+static void
+_scan_completeness_counter(uint32_t v[], size_t n, void *aux)
+{
+  (void)v;
+  (void)aux;
+  scan_completeness_count += n;
+}
+
+QCC_TestStatus
+_tst_rle_scan_completeness(QCC_GenValue **vals, int len, QCC_Stamp **stamp)
+{
+  (void)len;
+  (void)stamp;
+
+  sparsemap_t *map = QCC_getValue(vals, 0, sparsemap_t *);
+  if (!map || !map->m_data) {
+    return QCC_OK;
+  }
+
+  /* Test property: scan must visit exactly count() set bits, no more, no less */
+
+  size_t expected_count = sparsemap_count(map);
+
+  /* Reset counter and scan */
+  scan_completeness_count = 0;
+  sparsemap_scan(map, _scan_completeness_counter, 0, NULL);
+
+  if (scan_completeness_count != expected_count) {
     return QCC_FAIL;
   }
 
