@@ -1,0 +1,28 @@
+--- a/src/sparsemap.c
++++ b/src/sparsemap.c
+@@ -3112,6 +3112,24 @@ sparsemap_split(sparsemap_t *map, sparsemap_idx_t idx, sparsemap_t *other)
+
+   __sm_assert(sparsemap_count(other) == 0);
+
++  /* Debug: Log map state at split entry for idx=2048 crash investigation */
++  fprintf(stderr, "\n=== SPLIT ENTRY: idx=%u, chunk_count=%zu ===\n", idx, count);
++  fprintf(stderr, "Map: capacity=%zu, data_used=%zu\n", map->m_capacity, map->m_data_used);
++  fprintf(stderr, "Range: start=%lu, end=%lu, total_count=%zu\n",
++          sparsemap_get_starting_offset(map), sparsemap_get_ending_offset(map), sparsemap_count(map));
++
++  /* Log each chunk's details */
++  uint8_t *scan_p = __sm_get_chunk_data(map, 0);
++  for (size_t j = 0; j < count; j++) {
++    __sm_idx_t chunk_start = *(__sm_idx_t *)scan_p;
++    __sm_chunk_t scan_chunk;
++    __sm_chunk_init(&scan_chunk, scan_p + SM_SIZEOF_OVERHEAD);
++    bool is_rle = SM_IS_CHUNK_RLE(&scan_chunk);
++    size_t capacity = __sm_chunk_get_capacity(&scan_chunk);
++    fprintf(stderr, "  Chunk[%zu]: start=%u, capacity=%zu, is_rle=%d, range=[%u-%u]\n",
++            j, chunk_start, capacity, is_rle, chunk_start, chunk_start + capacity - 1);
++    scan_p += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&scan_chunk);
++  }
++  fprintf(stderr, "=== END CHUNK SCAN ===\n\n");
++  fflush(stderr);
++
+   //GSB __sm_when_diag({ __sm_diag_map(map, "========== START: %lu", idx); });
