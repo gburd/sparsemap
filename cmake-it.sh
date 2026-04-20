@@ -8,7 +8,7 @@ case "$target" in
 esac
 name=${target,,}
 echo $name
-rm -rf "./cmake-build-${name}-system" && \
-    cmake -DCMAKE_BUILD_TYPE=${target} -DCMAKE_MAKE_PROGRAM=ninja -DCMAKE_C_COMPILER=clang -G Ninja -S "${PWD}" -B "${PWD}/cmake-build-${name}-system" && \
-    (cd "${PWD}/cmake-build-${name}-system" && ninja)
+rm -rf "./build" && \
+    cmake -DCMAKE_BUILD_TYPE=${target} -DCMAKE_MAKE_PROGRAM=ninja -DCMAKE_C_COMPILER=clang -G Ninja -S "${PWD}" -B "${PWD}/build" && \
+    (cd "${PWD}/build" && ninja)
 

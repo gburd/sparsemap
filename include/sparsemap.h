@@ -379,6 +379,8 @@ size_t sparsemap_rank(sparsemap_t *map, size_t x, size_t y, bool value);
  */
 size_t sparsemap_span(sparsemap_t *map, sparsemap_idx_t start, size_t len, bool value);
 
+#include "bitmapset.h"
+
 #if defined(__cplusplus)
 }
 #endif
