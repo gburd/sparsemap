@@ -60,9 +60,9 @@ int main() {
     printf("=================================================================\n");
     fflush(stdout);
 
-    sparsemap_idx_t split_result = sparsemap_split(map, 2051, other);
+    uint64_t split_result = sparsemap_split(map, 2051, other);
 
-    printf(">>> Split returned: %lu\n", split_result);
+    printf(">>> Split returned: %" PRIu64 "\n", split_result);
     fflush(stdout);
 
     print_detailed_state("MAP AFTER SPLIT", map);

@@ -372,12 +372,12 @@ record_checkpoint(FILE *out, void *handle)
 
 /* sparsemap ------------------------------------------------------------- */
 
-static sparsemap_idx_t
-_sparsemap_set(sparsemap_t **_map, sparsemap_idx_t idx, bool value)
+static uint64_t
+_sparsemap_set(sparsemap_t **_map, uint64_t idx, bool value)
 {
   sparsemap_t *map = *_map, *new_map = NULL;
   do {
-    sparsemap_idx_t l = sparsemap_assign(map, idx, value);
+    uint64_t l = sparsemap_assign(map, idx, value);
     if (l != idx) {
       if (errno == ENOSPC) {
         size_t capacity = sparsemap_get_capacity(map) + 64;
@@ -486,8 +486,8 @@ static bool
 __sm_is_first(void *handle, pgno_t pg, unsigned len)
 {
   sparsemap_t *map = (sparsemap_t *)handle;
-  for (sparsemap_idx_t i = 0; i < pg + len; i++) {
-    sparsemap_idx_t j = 0;
+  for (uint64_t i = 0; i < pg + len; i++) {
+    uint64_t j = 0;
     while (sparsemap_contains(map, i + j) == true && j < len) {
       j++;
     }

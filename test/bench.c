@@ -287,7 +287,7 @@ static void op_populate_sm(void *ctx_) {
     populate_ctx_t *ctx = ctx_;
     sparsemap_t *map = sparsemap(1024 * 1024);
     for (size_t i = 0; i < ctx->count; i++) {
-        sparsemap_idx_t r;
+        uint64_t r;
         do {
             r = sparsemap_add(map, ctx->bits[i]);
             if (SPARSEMAP_NOT_FOUND(r) && errno == ENOSPC) {
@@ -400,7 +400,7 @@ typedef struct {
 
 static void op_select_sm(void *ctx_) {
     select_ctx_t *ctx = ctx_;
-    sparsemap_idx_t r = sparsemap_select(ctx->handle, ctx->n, true);
+    uint64_t r = sparsemap_select(ctx->handle, ctx->n, true);
     ctx->sink = (uint32_t)r;
 }
 
@@ -444,6 +444,54 @@ static void op_union_rb(void *ctx_) {
 static void op_union_bms(void *ctx_) {
     union_ctx_t *ctx = ctx_;
     Bitmapset *r = bms_union(ctx->a, ctx->b);
+    bms_free(r);
+}
+
+/* --- Intersection --- */
+typedef struct {
+    void *a;
+    void *b;
+} intersect_ctx_t;
+
+static void op_intersect_sm(void *ctx_) {
+    intersect_ctx_t *ctx = ctx_;
+    sparsemap_t *r = sparsemap_intersection(ctx->a, ctx->b);
+    if (r) free(r);
+}
+
+static void op_intersect_rb(void *ctx_) {
+    intersect_ctx_t *ctx = ctx_;
+    roaring_bitmap_t *r = roaring_bitmap_and(ctx->a, ctx->b);
+    roaring_bitmap_free(r);
+}
+
+static void op_intersect_bms(void *ctx_) {
+    intersect_ctx_t *ctx = ctx_;
+    Bitmapset *r = bms_intersect(ctx->a, ctx->b);
+    bms_free(r);
+}
+
+/* --- Difference --- */
+typedef struct {
+    void *a;
+    void *b;
+} difference_ctx_t;
+
+static void op_difference_sm(void *ctx_) {
+    difference_ctx_t *ctx = ctx_;
+    sparsemap_t *r = sparsemap_difference(ctx->a, ctx->b);
+    if (r) free(r);
+}
+
+static void op_difference_rb(void *ctx_) {
+    difference_ctx_t *ctx = ctx_;
+    roaring_bitmap_t *r = roaring_bitmap_andnot(ctx->a, ctx->b);
+    roaring_bitmap_free(r);
+}
+
+static void op_difference_bms(void *ctx_) {
+    difference_ctx_t *ctx = ctx_;
+    Bitmapset *r = bms_difference(ctx->a, ctx->b);
     bms_free(r);
 }
 
@@ -563,7 +611,7 @@ static void bench_one_pattern(pattern_t *pat, bool skip_bms, bool verify_only) {
     /* --- Build pre-populated handles for query benchmarks --- */
     sparsemap_t *sm_handle = sparsemap(1024 * 1024);
     for (size_t i = 0; i < count; i++) {
-        sparsemap_idx_t r;
+        uint64_t r;
         do {
             r = sparsemap_add(sm_handle, bits[i]);
             if (SPARSEMAP_NOT_FOUND(r) && errno == ENOSPC) {
@@ -642,7 +690,7 @@ static void bench_one_pattern(pattern_t *pat, bool skip_bms, bool verify_only) {
         size_t sm_mem_val;
         size_t rb_mem_val;
         size_t bms_mem_val;
-    } benchmarks[11];
+    } benchmarks[13];
     int num_benchmarks = 0;
 
     /* Populate */
@@ -709,6 +757,28 @@ static void bench_one_pattern(pattern_t *pat, bool skip_bms, bool verify_only) {
         sm_mem, rb_mem, bms_mem
     };
 
+    /* Intersection */
+    intersect_ctx_t isect_sm_c = { .a = sm_handle, .b = sm_handle };
+    intersect_ctx_t isect_rb_c = { .a = rb_handle, .b = rb_handle };
+    intersect_ctx_t isect_bms_c = { .a = bms_handle, .b = bms_handle };
+    benchmarks[num_benchmarks++] = (typeof(benchmarks[0])){
+        "intersection",
+        op_intersect_sm, op_intersect_rb, op_intersect_bms,
+        &isect_sm_c, &isect_rb_c, &isect_bms_c,
+        sm_mem, rb_mem, bms_mem
+    };
+
+    /* Difference */
+    difference_ctx_t diff_sm_c = { .a = sm_handle, .b = sm_handle };
+    difference_ctx_t diff_rb_c = { .a = rb_handle, .b = rb_handle };
+    difference_ctx_t diff_bms_c = { .a = bms_handle, .b = bms_handle };
+    benchmarks[num_benchmarks++] = (typeof(benchmarks[0])){
+        "difference",
+        op_difference_sm, op_difference_rb, op_difference_bms,
+        &diff_sm_c, &diff_rb_c, &diff_bms_c,
+        sm_mem, rb_mem, bms_mem
+    };
+
     /* Iterate */
     iter_ctx_t iter_sm_c = { .handle = sm_handle };
     iter_ctx_t iter_rb_c = { .handle = rb_handle };
@@ -762,10 +832,14 @@ static void bench_one_pattern(pattern_t *pat, bool skip_bms, bool verify_only) {
              strcmp(benchmarks[b].op_name, "iterate") == 0 ||
              strcmp(benchmarks[b].op_name, "offset") == 0 ||
              strcmp(benchmarks[b].op_name, "union") == 0 ||
+             strcmp(benchmarks[b].op_name, "intersection") == 0 ||
+             strcmp(benchmarks[b].op_name, "difference") == 0 ||
              strcmp(benchmarks[b].op_name, "contains") == 0)) {
             iters = 100;
         } else if (count > 10000 &&
                    (strcmp(benchmarks[b].op_name, "populate") == 0 ||
+                    strcmp(benchmarks[b].op_name, "intersection") == 0 ||
+                    strcmp(benchmarks[b].op_name, "difference") == 0 ||
                     strcmp(benchmarks[b].op_name, "offset") == 0)) {
             iters = 1000;
         }

@@ -24,8 +24,8 @@ int main() {
 
     printf("About to split at 2051...\n");
     fflush(stdout);
-    sparsemap_idx_t result = sparsemap_split(map, 2051, other);
-    printf("Split returned: %u\n", result);
+    uint64_t result = sparsemap_split(map, 2051, other);
+    printf("Split returned: %" PRIu64 "\n", result);
 
     printf("Verifying split...\n");
     for (int i = 2049; i < 4096; i++) {

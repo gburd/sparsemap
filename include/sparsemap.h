@@ -89,6 +89,7 @@
 #ifndef SPARSEMAP_H
 #define SPARSEMAP_H
 
+#include <inttypes.h>
 #include <limits.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -102,11 +103,8 @@ extern "C" {
 /** Opaque handle to a sparsemap instance. */
 typedef struct sparsemap sparsemap_t;
 
-/** Index type used for bit positions in the bitmap. */
-typedef size_t sparsemap_idx_t;
-
 /** Sentinel value returned when a lookup finds no matching bit. */
-#define SPARSEMAP_IDX_MAX SIZE_MAX
+#define SPARSEMAP_IDX_MAX UINT64_MAX
 
 /** Evaluates to true when \a x represents a valid (found) index. */
 #define SPARSEMAP_FOUND(x) ((x) != SPARSEMAP_IDX_MAX)
@@ -269,7 +267,7 @@ void *sparsemap_get_data(const sparsemap_t *map);
  * @param[in] idx  0-based bit position.
  * @returns true if bit \a idx is 1, false if 0 or out of range.
  */
-bool sparsemap_contains(sparsemap_t *map, sparsemap_idx_t idx);
+bool sparsemap_contains(sparsemap_t *map, uint64_t idx);
 
 /** @brief Set or clear the bit at \a idx.
  *
@@ -286,7 +284,7 @@ bool sparsemap_contains(sparsemap_t *map, sparsemap_idx_t idx);
  *   sparsemap_assign(map, 100, false);  // clear bit 100
  * @endcode
  */
-sparsemap_idx_t sparsemap_assign(sparsemap_t *map, sparsemap_idx_t idx, bool value);
+uint64_t sparsemap_assign(sparsemap_t *map, uint64_t idx, bool value);
 
 /** @brief Set the bit at \a idx to 1.
  *
@@ -303,14 +301,14 @@ sparsemap_idx_t sparsemap_assign(sparsemap_t *map, sparsemap_idx_t idx, bool val
  *
  * Example:
  * @code
- *   sparsemap_idx_t r = sparsemap_add(map, 42);
+ *   uint64_t r = sparsemap_add(map, 42);
  *   if (SPARSEMAP_NOT_FOUND(r)) {
  *       map = sparsemap_set_data_size(map, NULL, new_size);
  *       sparsemap_add(map, 42);
  *   }
  * @endcode
  */
-sparsemap_idx_t sparsemap_add(sparsemap_t *map, sparsemap_idx_t idx);
+uint64_t sparsemap_add(sparsemap_t *map, uint64_t idx);
 
 /** @brief Clear the bit at \a idx (set to 0).
  *
@@ -325,7 +323,7 @@ sparsemap_idx_t sparsemap_add(sparsemap_t *map, sparsemap_idx_t idx);
  * @param[in]     idx  0-based bit position to clear.
  * @returns \a idx on success, or SPARSEMAP_IDX_MAX with errno=ENOSPC.
  */
-sparsemap_idx_t sparsemap_remove(sparsemap_t *map, sparsemap_idx_t idx);
+uint64_t sparsemap_remove(sparsemap_t *map, uint64_t idx);
 
 /* -------------------------------------------------------------------
  * Aggregate queries
@@ -345,14 +343,14 @@ size_t sparsemap_cardinality(sparsemap_t *map);
  * @param[in] map  The sparsemap to query.
  * @returns 0-based index of the lowest set bit, or 0 if the map is empty.
  */
-sparsemap_idx_t sparsemap_minimum(const sparsemap_t *map);
+uint64_t sparsemap_minimum(const sparsemap_t *map);
 
 /** @brief Return the position of the last set bit (maximum).
  *
  * @param[in] map  The sparsemap to query.
  * @returns 0-based index of the highest set bit, or 0 if the map is empty.
  */
-sparsemap_idx_t sparsemap_maximum(const sparsemap_t *map);
+uint64_t sparsemap_maximum(const sparsemap_t *map);
 
 /** @brief Return the fraction of bits that are set.
  *
@@ -381,7 +379,7 @@ double sparsemap_fill_factor(sparsemap_t *map);
  *   size_t n = sparsemap_rank(map, 100, 199, true);
  * @endcode
  */
-size_t sparsemap_rank(sparsemap_t *map, size_t x, size_t y, bool value);
+size_t sparsemap_rank(sparsemap_t *map, uint64_t x, uint64_t y, bool value);
 
 /** @brief Find the position of the \a n'th matching bit (0-based).
  *
@@ -398,11 +396,11 @@ size_t sparsemap_rank(sparsemap_t *map, size_t x, size_t y, bool value);
  *
  * Example:
  * @code
- *   sparsemap_idx_t first_set  = sparsemap_select(map, 0, true);
- *   sparsemap_idx_t third_zero = sparsemap_select(map, 2, false);
+ *   uint64_t first_set  = sparsemap_select(map, 0, true);
+ *   uint64_t third_zero = sparsemap_select(map, 2, false);
  * @endcode
  */
-sparsemap_idx_t sparsemap_select(sparsemap_t *map, sparsemap_idx_t n, bool value);
+uint64_t sparsemap_select(sparsemap_t *map, uint64_t n, bool value);
 
 /** @brief Find the first contiguous run of \a len bits matching \a value.
  *
@@ -416,7 +414,7 @@ sparsemap_idx_t sparsemap_select(sparsemap_t *map, sparsemap_idx_t n, bool value
  * @returns 0-based index of the first bit in the run, or SPARSEMAP_IDX_MAX
  *          if no such run exists.
  */
-size_t sparsemap_span(sparsemap_t *map, sparsemap_idx_t start, size_t len, bool value);
+uint64_t sparsemap_span(sparsemap_t *map, uint64_t start, size_t len, bool value);
 
 /* -------------------------------------------------------------------
  * Iteration
@@ -463,6 +461,31 @@ void sparsemap_scan(const sparsemap_t *map, void (*scanner)(uint32_t vec[], size
  */
 size_t sparsemap_union(sparsemap_t *destination, sparsemap_t *source);
 
+/** @brief Create a new sparsemap containing bits set in both \a a and \a b.
+ *
+ * The result is a newly allocated sparsemap whose set bits are exactly those
+ * that appear in both input maps (logical AND).  Neither input is modified.
+ *
+ * @param[in] a  First input sparsemap.
+ * @param[in] b  Second input sparsemap.
+ * @returns A newly allocated sparsemap (caller must free()), or NULL on
+ *          allocation failure or if the result would be empty.
+ */
+sparsemap_t *sparsemap_intersection(const sparsemap_t *a, const sparsemap_t *b);
+
+/** @brief Create a new sparsemap containing bits set in \a a but not in \a b.
+ *
+ * The result is a newly allocated sparsemap whose set bits are exactly those
+ * that appear in \a a but not in \a b (logical AND NOT).  Neither input is
+ * modified.
+ *
+ * @param[in] a  First input sparsemap (minuend).
+ * @param[in] b  Second input sparsemap (subtrahend).
+ * @returns A newly allocated sparsemap (caller must free()), or NULL on
+ *          allocation failure or if the result would be empty.
+ */
+sparsemap_t *sparsemap_difference(const sparsemap_t *a, const sparsemap_t *b);
+
 /** @brief Split the map at \a idx, moving higher bits to \a other.
  *
  * After the split, \a map contains bits in [start, idx) and \a other
@@ -490,7 +513,7 @@ size_t sparsemap_union(sparsemap_t *destination, sparsemap_t *source);
  *   // left has the lower half, right has the upper half
  * @endcode
  */
-sparsemap_idx_t sparsemap_split(sparsemap_t *map, sparsemap_idx_t idx, sparsemap_t *other);
+uint64_t sparsemap_split(sparsemap_t *map, uint64_t idx, sparsemap_t *other);
 
 /** @brief Create a new sparsemap with all bits shifted by \a offset.
  *

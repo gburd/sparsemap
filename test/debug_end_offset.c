@@ -31,23 +31,23 @@ int main() {
     printf("Populated %zu bits starting at %zu\n", n, start);
     printf("Count: %zu\n", sparsemap_cardinality(map));
 
-    sparsemap_idx_t end1 = sparsemap_maximum(map);
-    printf("Ending offset after populate: %zu (expected %zu)\n", end1, start + n - 1);
+    uint64_t end1 = sparsemap_maximum(map);
+    printf("Ending offset after populate: %" PRIu64 " (expected %zu)\n", end1, start + n - 1);
 
     if (end1 != start + n - 1) {
         printf("ERROR: First assertion would fail!\n");
     }
 
     // Now set bit 100 positions after the run
-    sparsemap_idx_t new_bit = start + n + 100;
-    printf("\nSetting bit at %zu\n", new_bit);
-    sparsemap_idx_t result = sparsemap_add(map, new_bit);
-    printf("sparsemap_set returned: %zu (SPARSEMAP_IDX_MAX=%zu)\n", result, SPARSEMAP_IDX_MAX);
+    uint64_t new_bit = start + n + 100;
+    printf("\nSetting bit at %" PRIu64 "\n", new_bit);
+    uint64_t result = sparsemap_add(map, new_bit);
+    printf("sparsemap_set returned: %" PRIu64 " (SPARSEMAP_IDX_MAX=%" PRIu64 ")\n", result, (uint64_t)SPARSEMAP_IDX_MAX);
 
     printf("Count after set: %zu\n", sparsemap_cardinality(map));
 
-    sparsemap_idx_t end2 = sparsemap_maximum(map);
-    printf("Ending offset after set: %zu (expected %zu)\n", end2, new_bit);
+    uint64_t end2 = sparsemap_maximum(map);
+    printf("Ending offset after set: %" PRIu64 " (expected %" PRIu64 ")\n", end2, new_bit);
 
     if (end2 != new_bit) {
         printf("ERROR: Second assertion fails! Off by %ld\n", (long)(new_bit - end2));

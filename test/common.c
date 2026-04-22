@@ -409,11 +409,11 @@ sm_bitmap_from_uint64(sparsemap_t *map, int offset, uint64_t number)
   }
 }
 
-sparsemap_idx_t
+uint64_t
 sm_add_span(sparsemap_t *map, int map_size, int span_length)
 {
   int attempts = map_size / span_length;
-  sparsemap_idx_t placed_at;
+  uint64_t placed_at;
   do {
     placed_at = random_uint32() % (map_size - span_length - 1);
     if (sm_occupied(map, placed_at, span_length, true)) {
@@ -422,7 +422,7 @@ sm_add_span(sparsemap_t *map, int map_size, int span_length)
       break;
     }
   } while (attempts);
-  for (sparsemap_idx_t i = placed_at; i < placed_at + span_length; i++) {
+  for (uint64_t i = placed_at; i < placed_at + span_length; i++) {
     if (sparsemap_add(map, i) != i) {
       return placed_at; // TODO error?
     }
@@ -443,9 +443,9 @@ sm_whats_set(sparsemap_t *map, int off, int len)
 }
 
 bool
-sm_is_span(sparsemap_t *map, sparsemap_idx_t m, int len, bool value)
+sm_is_span(sparsemap_t *map, uint64_t m, int len, bool value)
 {
-  for (sparsemap_idx_t i = m; i < m + len; i++) {
+  for (uint64_t i = m; i < m + len; i++) {
     if (sparsemap_contains(map, i) != value) {
       return false;
     }
@@ -454,9 +454,9 @@ sm_is_span(sparsemap_t *map, sparsemap_idx_t m, int len, bool value)
 }
 
 bool
-sm_occupied(sparsemap_t *map, sparsemap_idx_t m, int len, bool value)
+sm_occupied(sparsemap_t *map, uint64_t m, int len, bool value)
 {
-  for (sparsemap_idx_t i = m; i < (sparsemap_idx_t)len; i++) {
+  for (uint64_t i = m; i < (uint64_t)len; i++) {
     if (sparsemap_contains(map, i) == value) {
       return true;
     }

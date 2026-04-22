@@ -59,8 +59,8 @@ main(void)
       assert(sparsemap_contains(map, array[i]) == true);
     }
     has_span(map, array, TEST_ARRAY_SIZE, (int)len);
-    size_t l = sparsemap_span(map, 0, len, true);
-    if (l != (size_t)-1) {
+    uint64_t l = sparsemap_span(map, 0, len, true);
+    if (SPARSEMAP_FOUND(l)) {
       __diag("Found span in map starting at %lu of length %lu\n", l, len);
       __diag("is_span(%lu, %lu) == %s\n", l, len, is_span(array, TEST_ARRAY_SIZE, l, len) ? "yes" : "no");
       i = (int)l;

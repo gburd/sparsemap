@@ -43,7 +43,7 @@ int is_unique(int a[], int l, int value);
 void setup_test_array(int a[], int l, int max_value);
 void shuffle(int *array, size_t n);
 int ensure_sequential_set(int a[], int l, int r);
-sparsemap_idx_t sm_add_span(sparsemap_t *map, int map_size, int span_length);
+uint64_t sm_add_span(sparsemap_t *map, int map_size, int span_length);
 
 void print_bits(char *name, uint64_t value);
 
@@ -54,7 +54,7 @@ int whats_set_uint64(uint64_t number, int bitPositions[64]);
 
 void sm_whats_set(sparsemap_t *map, int off, int len);
 
-bool sm_is_span(sparsemap_t *map, sparsemap_idx_t m, int len, bool value);
-bool sm_occupied(sparsemap_t *map, sparsemap_idx_t m, int len, bool value);
+bool sm_is_span(sparsemap_t *map, uint64_t m, int len, bool value);
+bool sm_occupied(sparsemap_t *map, uint64_t m, int len, bool value);
 
 char *bytes_as(double bytes, char *s, size_t size);

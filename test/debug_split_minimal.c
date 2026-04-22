@@ -19,9 +19,9 @@ int main() {
     printf("Attempting split at index 50...\n");
     fflush(stdout);
 
-    sparsemap_idx_t result = sparsemap_split(map, 50, portion);
+    uint64_t result = sparsemap_split(map, 50, portion);
 
-    printf("Split completed. Result: %lu\n", result);
+    printf("Split completed. Result: %" PRIu64 "\n", result);
     printf("Map count: %zu, Portion count: %zu\n",
            sparsemap_cardinality(map), sparsemap_cardinality(portion));
 

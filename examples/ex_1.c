@@ -160,7 +160,7 @@ main()
     sparsemap_add(map, i * 10);
   }
   for (size_t i = 0; i < 8; i++) {
-    assert(sparsemap_select(map, i, true) == (sparsemap_idx_t)i * 10);
+    assert(sparsemap_select(map, i, true) == (uint64_t)i * 10);
   }
 
   // split and move, aligned to MiniMap capacity

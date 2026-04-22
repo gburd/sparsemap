@@ -42,8 +42,8 @@ int main() {
     print_map_state("other BEFORE split", other);
 
     printf("\n========== SPLIT at 2051 ==========\n");
-    sparsemap_idx_t split_result = sparsemap_split(map, 2051, other);
-    printf("Split returned: %lu\n", split_result);
+    uint64_t split_result = sparsemap_split(map, 2051, other);
+    printf("Split returned: %" PRIu64 "\n", split_result);
 
     print_map_state("map AFTER split", map);
     print_map_state("other AFTER split", other);
