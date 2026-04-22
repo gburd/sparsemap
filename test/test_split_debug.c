@@ -19,7 +19,7 @@ int main() {
 
     printf("Setting bits 2049-4095...\n");
     for (int i = 2049; i < 4096; i++) {
-        sparsemap_set(map, i);
+        sparsemap_add(map, i);
     }
 
     printf("About to split at 2051...\n");
@@ -29,8 +29,8 @@ int main() {
 
     printf("Verifying split...\n");
     for (int i = 2049; i < 4096; i++) {
-        bool in_map = sparsemap_is_set(map, i);
-        bool in_other = sparsemap_is_set(other, i);
+        bool in_map = sparsemap_contains(map, i);
+        bool in_other = sparsemap_contains(other, i);
         if (i < 2051) {
             if (!in_map || in_other) {
                 printf("ERROR at i=%d: map=%d other=%d (expected map=1 other=0)\n", i, in_map, in_other);
@@ -48,12 +48,12 @@ int main() {
 
     printf("\nTest 2: Merge after split\n");
     fflush(stdout);
-    sparsemap_merge(map, other);
+    sparsemap_union(map, other);
     printf("Merge completed\n");
     fflush(stdout);
 
     for (int i = 2049; i < 4096; i++) {
-        if (!sparsemap_is_set(map, i)) {
+        if (!sparsemap_contains(map, i)) {
             printf("ERROR: bit %d not set after merge\n", i);
             return 1;
         }

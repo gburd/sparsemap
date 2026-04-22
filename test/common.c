@@ -224,7 +224,7 @@ has_span(sparsemap_t *map, int *array, int l, int n)
     if (sorted[i] + n - 1 == sorted[i + n - 1]) {
       for (int j = 0; j < n; j++) {
         size_t pos = sorted[j + i];
-        bool set = sparsemap_is_set(map, pos);
+        bool set = sparsemap_contains(map, pos);
         assert(set);
       }
       __diag("Found span: [%d, %d], length: %d\n", sorted[i], sorted[i + n - 1], n);
@@ -423,7 +423,7 @@ sm_add_span(sparsemap_t *map, int map_size, int span_length)
     }
   } while (attempts);
   for (sparsemap_idx_t i = placed_at; i < placed_at + span_length; i++) {
-    if (sparsemap_set(map, i) != i) {
+    if (sparsemap_add(map, i) != i) {
       return placed_at; // TODO error?
     }
   }
@@ -435,7 +435,7 @@ sm_whats_set(sparsemap_t *map, int off, int len)
 {
   printf("what's set in the range [%d, %d): ", off, off + len);
   for (int i = off; i < off + len; i++) {
-    if (sparsemap_is_set(map, i)) {
+    if (sparsemap_contains(map, i)) {
       printf("%d ", i);
     }
   }
@@ -446,7 +446,7 @@ bool
 sm_is_span(sparsemap_t *map, sparsemap_idx_t m, int len, bool value)
 {
   for (sparsemap_idx_t i = m; i < m + len; i++) {
-    if (sparsemap_is_set(map, i) != value) {
+    if (sparsemap_contains(map, i) != value) {
       return false;
     }
   }
@@ -457,7 +457,7 @@ bool
 sm_occupied(sparsemap_t *map, sparsemap_idx_t m, int len, bool value)
 {
   for (sparsemap_idx_t i = m; i < (sparsemap_idx_t)len; i++) {
-    if (sparsemap_is_set(map, i) == value) {
+    if (sparsemap_contains(map, i) == value) {
       return true;
     }
   }

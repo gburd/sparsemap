@@ -12,10 +12,10 @@ int main() {
 
     // Populate with RLE data similar to the test
     for (size_t i = 0; i < 100; i++) {
-        sparsemap_set(map, i);
+        sparsemap_add(map, i);
     }
 
-    printf("Map populated with %zu bits set\n", sparsemap_count(map));
+    printf("Map populated with %zu bits set\n", sparsemap_cardinality(map));
     printf("Attempting split at index 50...\n");
     fflush(stdout);
 
@@ -23,7 +23,7 @@ int main() {
 
     printf("Split completed. Result: %lu\n", result);
     printf("Map count: %zu, Portion count: %zu\n",
-           sparsemap_count(map), sparsemap_count(portion));
+           sparsemap_cardinality(map), sparsemap_cardinality(portion));
 
     sparsemap_free(&map);
     sparsemap_free(&portion);

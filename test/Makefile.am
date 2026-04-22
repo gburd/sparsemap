@@ -42,4 +42,18 @@ soak_SOURCES = \
 
 soak_CFLAGS = $(AM_CFLAGS)
 
+# Benchmark (not in TESTS - it's a performance tool, not a pass/fail test)
+check_PROGRAMS += bench
+
+bench_SOURCES = \
+	bench.c \
+	roaring.c \
+	roaring.h \
+	tdigest.c \
+	tdigest.h \
+	bitmapset_standalone.c \
+	bitmapset_standalone.h
+
+bench_CFLAGS = $(AM_CFLAGS)
+
 CLEANFILES = *.log *.trs

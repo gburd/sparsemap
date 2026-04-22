@@ -35,8 +35,8 @@ main(void)
 
   // set all the bits on in a random order
   for (i = 0; i < TEST_ARRAY_SIZE; i++) {
-    sparsemap_set(map, array[i]);
-    assert(sparsemap_is_set(map, array[i]) == true);
+    sparsemap_add(map, array[i]);
+    assert(sparsemap_contains(map, array[i]) == true);
   }
 
   // for (size_t len = 1; len < 20; len++) {
@@ -55,8 +55,8 @@ main(void)
     shuffle(array, TEST_ARRAY_SIZE);
     print_spans(array, TEST_ARRAY_SIZE);
     for (i = 0; i < TEST_ARRAY_SIZE; i++) {
-      sparsemap_set(map, array[i]);
-      assert(sparsemap_is_set(map, array[i]) == true);
+      sparsemap_add(map, array[i]);
+      assert(sparsemap_contains(map, array[i]) == true);
     }
     has_span(map, array, TEST_ARRAY_SIZE, (int)len);
     size_t l = sparsemap_span(map, 0, len, true);
@@ -65,7 +65,7 @@ main(void)
       __diag("is_span(%lu, %lu) == %s\n", l, len, is_span(array, TEST_ARRAY_SIZE, l, len) ? "yes" : "no");
       i = (int)l;
       do {
-        bool set = sparsemap_is_set(map, i);
+        bool set = sparsemap_contains(map, i);
         if (set) {
           __diag("verified %d was set\n", i);
         } else {

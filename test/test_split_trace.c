@@ -21,10 +21,10 @@ int main(void) {
     /* Populate with exactly 24534 bits starting at 0 */
     size_t amt = 24534;
     for (size_t i = 0; i < amt; i++) {
-        sparsemap_set(map, i);
+        sparsemap_add(map, i);
     }
 
-    fprintf(stderr, "Total bits set: %zu\n", sparsemap_count(map));
+    fprintf(stderr, "Total bits set: %zu\n", sparsemap_cardinality(map));
 
     /* Replicate the test loop */
     for (size_t i = 0; i < amt + 2049; i++) {
@@ -32,8 +32,8 @@ int main(void) {
         size_t rank = sparsemap_rank(map, 0, i, 1);
         sparsemap_split(map, i + 1, &portion);
 
-        size_t count_map = sparsemap_count(map);
-        size_t count_portion = sparsemap_count(&portion);
+        size_t count_map = sparsemap_cardinality(map);
+        size_t count_portion = sparsemap_cardinality(&portion);
 
         if (count_map != rank) {
             fprintf(stderr, "FAIL at i=%zu: map count %zu != rank %zu\n",
@@ -50,9 +50,9 @@ int main(void) {
             return 1;
         }
 
-        sparsemap_merge(map, &portion);
+        sparsemap_union(map, &portion);
 
-        size_t count_after = sparsemap_count(map);
+        size_t count_after = sparsemap_cardinality(map);
         if (count_after != amt) {
             fprintf(stderr, "FAIL merge at i=%zu: count %zu != %zu\n",
                     i, count_after, amt);

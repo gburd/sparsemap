@@ -8,7 +8,7 @@ CC = cc
 AR = ar
 CFLAGS = -std=gnu11 -Wall -Wextra -Werror -I./include
 LDFLAGS =
-LIBS = -lpthread
+LIBS = -lpthread -lm
 
 # Debug flags
 ifdef DEBUG
@@ -42,27 +42,31 @@ LIB_OBJECTS = src/sparsemap.o
 LIB_HEADERS = include/sparsemap.h include/popcount.h
 
 # Tests
-TEST_SOURCES = tests/test.c tests/common.c tests/munit.c tests/qc.c \
-               tests/roaring.c tests/tdigest.c tests/midl.c
+TEST_SOURCES = test/test.c test/common.c test/munit.c test/qc.c \
+               test/roaring.c test/tdigest.c test/midl.c
 TEST_OBJECTS = $(TEST_SOURCES:.c=.o)
-TEST_BINARY = tests/test
+TEST_BINARY = test/test
 TEST_LIB_OBJECT = src/sparsemap_testing.o
 
-RLE_TEST_SOURCES = tests/test_rle_standalone.c
+RLE_TEST_SOURCES = test/test_rle_standalone.c
 RLE_TEST_OBJECTS = $(RLE_TEST_SOURCES:.c=.o)
-RLE_TEST_BINARY = tests/test_rle_standalone
+RLE_TEST_BINARY = test/test_rle_standalone
 
-SOAK_SOURCES = tests/soak.c tests/common.c tests/roaring.c tests/tdigest.c
+SOAK_SOURCES = test/soak.c test/common.c test/roaring.c test/tdigest.c
 SOAK_OBJECTS = $(SOAK_SOURCES:.c=.o)
-SOAK_BINARY = tests/soak
+SOAK_BINARY = test/soak
+
+BENCH_SOURCES = test/bench.c test/roaring.c test/tdigest.c test/bitmapset_standalone.c
+BENCH_OBJECTS = $(BENCH_SOURCES:.c=.o)
+BENCH_BINARY = test/bench
 
 # Examples
 EXAMPLE_SOURCES = $(wildcard examples/ex_*.c)
 EXAMPLE_OBJECTS = $(EXAMPLE_SOURCES:.c=.o)
 EXAMPLE_BINARIES = $(EXAMPLE_SOURCES:.c=)
-EXAMPLE_COMMON = tests/common.o tests/munit.o tests/qc.o
+EXAMPLE_COMMON = test/common.o test/munit.o test/qc.o
 
-.PHONY: all clean install uninstall check examples help coverage coverage-report clean-coverage format format-check tidy shellcheck lint
+.PHONY: all clean install uninstall check examples bench help coverage coverage-report clean-coverage format format-check tidy shellcheck lint
 
 all: $(LIB_STATIC) $(LIB_SHARED)
 
@@ -111,7 +115,7 @@ src/sparsemap.o: src/sparsemap.c $(LIB_HEADERS)
 	$(CC) -std=gnu11 -Wall -Wextra $(if $(COVERAGE),,-Werror) -I./include $(if $(DEBUG),-g -O1 -DDEBUG,-O3) $(if $(DIAGNOSTIC),-DSPARSEMAP_DIAGNOSTIC) $(if $(COVERAGE),-fprofile-arcs -ftest-coverage -O0) -c -o $@ $<
 
 # Test targets
-tests: CFLAGS += -DSPARSEMAP_TESTING -I./tests
+tests: CFLAGS += -DSPARSEMAP_TESTING -I./test
 tests: CFLAGS := $(filter-out -Werror,$(CFLAGS))
 tests: $(TEST_BINARY) $(RLE_TEST_BINARY) $(SOAK_BINARY)
 
@@ -120,7 +124,7 @@ $(TEST_BINARY): $(TEST_OBJECTS) $(TEST_LIB_OBJECT) $(LIB_STATIC)
 
 # Build testing-enabled version of library for QuickCheck functions
 src/sparsemap_testing.o: src/sparsemap.c $(LIB_HEADERS)
-	$(CC) -std=gnu11 -Wall -Wextra -I./include -I./tests $(if $(DEBUG),-g -O0 -DDEBUG,-O3) $(if $(DIAGNOSTIC),-DSPARSEMAP_DIAGNOSTIC) $(if $(COVERAGE),-fprofile-arcs -ftest-coverage -O0) -DSPARSEMAP_TESTING -c -o $@ $<
+	$(CC) -std=gnu11 -Wall -Wextra -I./include -I./test $(if $(DEBUG),-g -O0 -DDEBUG,-O3) $(if $(DIAGNOSTIC),-DSPARSEMAP_DIAGNOSTIC) $(if $(COVERAGE),-fprofile-arcs -ftest-coverage -O0) -DSPARSEMAP_TESTING -c -o $@ $<
 
 $(RLE_TEST_BINARY): $(RLE_TEST_OBJECTS) $(LIB_STATIC)
 	$(CC) -o $@ $(RLE_TEST_OBJECTS) $(LIB_STATIC) $(LDFLAGS) $(LIBS)
@@ -128,21 +132,26 @@ $(RLE_TEST_BINARY): $(RLE_TEST_OBJECTS) $(LIB_STATIC)
 $(SOAK_BINARY): $(SOAK_OBJECTS) $(LIB_STATIC)
 	$(CC) $(CFLAGS) -o $@ $(SOAK_OBJECTS) $(LIB_STATIC) $(LDFLAGS) $(LIBS)
 
-tests/test_rle_standalone.o: tests/test_rle_standalone.c
+bench: $(BENCH_BINARY)
+
+$(BENCH_BINARY): $(BENCH_OBJECTS) $(LIB_STATIC)
+	$(CC) -std=gnu11 -Wall -Wextra -I./include -I./test -O2 -o $@ $(BENCH_OBJECTS) $(LIB_STATIC) $(LDFLAGS) $(LIBS)
+
+test/test_rle_standalone.o: test/test_rle_standalone.c
 	$(CC) -std=gnu11 -Wall -Wextra -I./include -O3 -c -o $@ $<
 
-tests/%.o: tests/%.c
-	$(CC) -std=gnu11 -Wall -Wextra -I./include -I./tests $(if $(DEBUG),-g -O0 -DDEBUG,-O3) $(if $(DIAGNOSTIC),-DSPARSEMAP_DIAGNOSTIC) $(if $(COVERAGE),-fprofile-arcs -ftest-coverage -O0) -DSPARSEMAP_TESTING -c -o $@ $<
+test/%.o: test/%.c
+	$(CC) -std=gnu11 -Wall -Wextra -I./include -I./test $(if $(DEBUG),-g -O0 -DDEBUG,-O3) $(if $(DIAGNOSTIC),-DSPARSEMAP_DIAGNOSTIC) $(if $(COVERAGE),-fprofile-arcs -ftest-coverage -O0) -DSPARSEMAP_TESTING -c -o $@ $<
 
 # Example targets
-examples: CFLAGS += -I./tests
+examples: CFLAGS += -I./test
 examples: $(LIB_STATIC) $(EXAMPLE_COMMON) $(EXAMPLE_BINARIES)
 
 examples/ex_%: examples/ex_%.o $(EXAMPLE_COMMON) $(LIB_STATIC)
 	$(CC) $(CFLAGS) -o $@ $< $(EXAMPLE_COMMON) $(LIB_STATIC) $(LDFLAGS) $(LIBS)
 
 examples/%.o: examples/%.c
-	$(CC) $(CFLAGS) -I./tests -c -o $@ $<
+	$(CC) $(CFLAGS) -I./test -c -o $@ $<
 
 # Check target
 check: tests
@@ -181,8 +190,9 @@ clean:
 	rm -f $(TEST_OBJECTS) $(TEST_BINARY)
 	rm -f $(RLE_TEST_OBJECTS) $(RLE_TEST_BINARY)
 	rm -f $(SOAK_OBJECTS) $(SOAK_BINARY)
+	rm -f $(BENCH_OBJECTS) $(BENCH_BINARY)
 	rm -f $(EXAMPLE_OBJECTS) $(EXAMPLE_BINARIES)
-	rm -f tests/*.o examples/*.o src/*.o
+	rm -f test/*.o examples/*.o src/*.o
 	@echo "Cleaned build artifacts"
 
 # Coverage targets
@@ -214,7 +224,7 @@ coverage-report:
 
 clean-coverage:
 	rm -rf coverage *.gcov *.gcda *.gcno
-	rm -f src/*.gcda src/*.gcno tests/*.gcda tests/*.gcno
+	rm -f src/*.gcda src/*.gcno test/*.gcda test/*.gcno
 	@echo "Cleaned coverage data"
 
 # Code quality targets
@@ -222,14 +232,14 @@ format:
 	@echo "Formatting code with clang-format..."
 	@command -v clang-format >/dev/null 2>&1 || \
 		(echo "clang-format not found. Install with: brew install clang-format" && exit 1)
-	@clang-format -i src/*.c include/*.h tests/*.c tests/*.h 2>/dev/null || true
+	@clang-format -i src/*.c include/*.h test/*.c test/*.h 2>/dev/null || true
 	@echo "Code formatted"
 
 format-check:
 	@echo "Checking code formatting..."
 	@command -v clang-format >/dev/null 2>&1 || \
 		(echo "clang-format not found. Install with: brew install clang-format" && exit 1)
-	@clang-format --dry-run --Werror src/*.c include/*.h tests/*.c tests/*.h 2>/dev/null || \
+	@clang-format --dry-run --Werror src/*.c include/*.h test/*.c test/*.h 2>/dev/null || \
 		(echo "Code formatting issues found. Run: make -f Makefile.simple format" && exit 1)
 	@echo "Code formatting OK"
 

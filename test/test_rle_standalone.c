@@ -39,17 +39,17 @@ main(void)
   /* Test 1: Create RLE run of 3000 consecutive set bits (exceeds 2048 chunk capacity) */
   printf("Test 1: Creating RLE run of 3000 bits...\n");
   for (size_t i = 0; i < 3000; i++) {
-    sparsemap_set(map, i);
+    sparsemap_add(map, i);
   }
-  printf("  Count: %zu (expected 3000)\n", sparsemap_count(map));
-  assert(sparsemap_count(map) == 3000);
+  printf("  Count: %zu (expected 3000)\n", sparsemap_cardinality(map));
+  assert(sparsemap_cardinality(map) == 3000);
 
   /* Test 2: is_set boundary check (the bug we fixed) */
   printf("Test 2: is_set boundary check...\n");
-  assert(sparsemap_is_set(map, 0) == true);
-  assert(sparsemap_is_set(map, 1500) == true);
-  assert(sparsemap_is_set(map, 2999) == true);
-  assert(sparsemap_is_set(map, 3000) == false); /* Should be false, was incorrectly true before fix */
+  assert(sparsemap_contains(map, 0) == true);
+  assert(sparsemap_contains(map, 1500) == true);
+  assert(sparsemap_contains(map, 2999) == true);
+  assert(sparsemap_contains(map, 3000) == false); /* Should be false, was incorrectly true before fix */
   printf("  PASS: is_set boundary check\n");
 
   /* Test 3: select operations */
@@ -67,7 +67,7 @@ main(void)
 
   /* Test 4: scan operations */
   printf("Test 4: scan operations...\n");
-  printf("  Map count before scan: %zu\n", sparsemap_count(map));
+  printf("  Map count before scan: %zu\n", sparsemap_cardinality(map));
   scan_count = 0;
   scan_last_idx = 0;
   sparsemap_scan(map, scan_counter, 0, NULL);
@@ -79,7 +79,7 @@ main(void)
   printf("Test 5: scan with skip=2500...\n");
   sparsemap_clear(map);
   for (size_t i = 0; i < 3000; i++) {
-    sparsemap_set(map, i);
+    sparsemap_add(map, i);
   }
   scan_count = 0;
   scan_last_idx = 0;

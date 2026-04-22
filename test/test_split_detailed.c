@@ -26,9 +26,9 @@ void print_detailed_state(const char *name, sparsemap_t *map) {
     printf("  m_data pointer: %p\n", (void *)m->m_data);
 
     printf("Public API:\n");
-    printf("  sparsemap_count(): %zu\n", sparsemap_count(map));
-    printf("  sparsemap_get_starting_offset(): %lu\n", sparsemap_get_starting_offset(map));
-    printf("  sparsemap_get_ending_offset(): %lu\n", sparsemap_get_ending_offset(map));
+    printf("  sparsemap_cardinality(): %zu\n", sparsemap_cardinality(map));
+    printf("  sparsemap_minimum(): %lu\n", sparsemap_minimum(map));
+    printf("  sparsemap_maximum(): %lu\n", sparsemap_maximum(map));
     printf("  sparsemap_get_capacity(): %zu\n", sparsemap_get_capacity(map));
 
     printf("Raw data bytes [0-31]:\n  ");
@@ -49,7 +49,7 @@ int main() {
 
     printf("\n>>> Setting bits 2049-4095 in map...\n");
     for (int i = 2049; i < 4096; i++) {
-        sparsemap_set(map, i);
+        sparsemap_add(map, i);
     }
 
     print_detailed_state("MAP BEFORE SPLIT", map);
@@ -69,11 +69,11 @@ int main() {
     print_detailed_state("OTHER AFTER SPLIT", other);
 
     printf("\n=================================================================\n");
-    printf(">>> CALLING sparsemap_merge(map, other)\n");
+    printf(">>> CALLING sparsemap_union(map, other)\n");
     printf("=================================================================\n");
     fflush(stdout);
 
-    size_t result = sparsemap_merge(map, other);
+    size_t result = sparsemap_union(map, other);
 
     printf(">>> Merge returned: %zu (0 = success)\n", result);
 

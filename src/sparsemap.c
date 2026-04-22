@@ -2328,7 +2328,7 @@ sparsemap_get_capacity(const sparsemap_t *map)
  * @return True if the bit is set, false otherwise.
  */
 bool
-sparsemap_is_set(sparsemap_t *map, sparsemap_idx_t idx)
+sparsemap_contains(sparsemap_t *map, sparsemap_idx_t idx)
 {
   __sm_assert(sparsemap_get_size(map) >= SM_SIZEOF_OVERHEAD);
 
@@ -2509,7 +2509,7 @@ done:;
  * @return The index that was unset.
  */
 sparsemap_idx_t
-sparsemap_unset(sparsemap_t *map, const sparsemap_idx_t idx)
+sparsemap_remove(sparsemap_t *map, const sparsemap_idx_t idx)
 {
   return __sm_map_unset(map, idx, true);
 }
@@ -2531,7 +2531,7 @@ sparsemap_unset(sparsemap_t *map, const sparsemap_idx_t idx)
  * @return The index at which the bit was set.
  */
 static sparsemap_idx_t
-__sparsemap_set(sparsemap_t *map, const sparsemap_idx_t idx, uint8_t *p, size_t offset, const __sm_bitvec_t *v)
+__sparsemap_add(sparsemap_t *map, const sparsemap_idx_t idx, uint8_t *p, size_t offset, const __sm_bitvec_t *v)
 {
   /*
    * When v is non-NULL we've just added a new chunk, and we knew in advance that a
@@ -2621,7 +2621,7 @@ __sm_map_set(sparsemap_t *map, sparsemap_idx_t idx, const bool coalesce)
     __sm_set_chunk_count(map, 1);
 
     const __sm_bitvec_t *v = (__sm_bitvec_t *)((uintptr_t)p + SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t));
-    ret_idx = __sparsemap_set(map, idx, p, 0, v);
+    ret_idx = __sparsemap_add(map, idx, p, 0, v);
 
     __sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
     start = *(__sm_idx_t *)p;
@@ -2655,7 +2655,7 @@ __sm_map_set(sparsemap_t *map, sparsemap_idx_t idx, const bool coalesce)
     __sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
 
     const __sm_bitvec_t *v = (__sm_bitvec_t *)((uintptr_t)p + SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t));
-    ret_idx = __sparsemap_set(map, idx, p, offset, v);
+    ret_idx = __sparsemap_add(map, idx, p, offset, v);
     goto done;
   }
 
@@ -2754,12 +2754,12 @@ __sm_map_set(sparsemap_t *map, sparsemap_idx_t idx, const bool coalesce)
     __sm_set_chunk_count(map, __sm_get_chunk_count(map) + 1);
 
     const __sm_bitvec_t *v = (__sm_bitvec_t *)((uintptr_t)p + SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t));
-    ret_idx = __sparsemap_set(map, idx, p, offset, v);
+    ret_idx = __sparsemap_add(map, idx, p, offset, v);
     __sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
     goto done;
   }
 
-  ret_idx = __sparsemap_set(map, idx, p, offset, NULL);
+  ret_idx = __sparsemap_add(map, idx, p, offset, NULL);
   if (ret_idx != idx) {
     goto done;
   }
@@ -2782,7 +2782,7 @@ done:;
  * @return The index that was set in the sparsemap.
  */
 sparsemap_idx_t
-sparsemap_set(sparsemap_t *map, const sparsemap_idx_t idx)
+sparsemap_add(sparsemap_t *map, const sparsemap_idx_t idx)
 {
   return __sm_map_set(map, idx, true);
 }
@@ -2802,7 +2802,7 @@ sparsemap_set(sparsemap_t *map, const sparsemap_idx_t idx)
 sparsemap_idx_t
 sparsemap_assign(sparsemap_t *map, const sparsemap_idx_t idx, const bool value)
 {
-  return value ? sparsemap_set(map, idx) : sparsemap_unset(map, idx);
+  return value ? sparsemap_add(map, idx) : sparsemap_remove(map, idx);
 }
 
 /**
@@ -2817,7 +2817,7 @@ sparsemap_assign(sparsemap_t *map, const sparsemap_idx_t idx, const bool value)
  * @return The starting offset within the sparse map.
  */
 sparsemap_idx_t
-sparsemap_get_starting_offset(const sparsemap_t *map)
+sparsemap_minimum(const sparsemap_t *map)
 {
   sparsemap_idx_t offset = 0;
   const size_t count = __sm_get_chunk_count(map);
@@ -2871,7 +2871,7 @@ done:;
  * @return The calculated ending offset of the map.
  */
 sparsemap_idx_t
-sparsemap_get_ending_offset(const sparsemap_t *map)
+sparsemap_maximum(const sparsemap_t *map)
 {
   const size_t count = __sm_get_chunk_count(map);
 
@@ -2949,7 +2949,7 @@ double
 sparsemap_fill_factor(sparsemap_t *map)
 {
   const size_t rank = sparsemap_rank(map, 0, SPARSEMAP_IDX_MAX, true);
-  const sparsemap_idx_t end = sparsemap_get_ending_offset(map);
+  const sparsemap_idx_t end = sparsemap_maximum(map);
   return (double)rank / (double)end * 100.0;
 }
 
@@ -3001,7 +3001,7 @@ sparsemap_get_size(sparsemap_t *map)
  * @return The total number of elements in the sparse map.
  */
 size_t
-sparsemap_count(sparsemap_t *map)
+sparsemap_cardinality(sparsemap_t *map)
 {
   return sparsemap_rank(map, 0, SPARSEMAP_IDX_MAX, true);
 }
@@ -3039,6 +3039,111 @@ sparsemap_scan(const sparsemap_t *map, void (*scanner)(__sm_idx_t[], size_t, voi
 }
 
 /**
+ * @brief Creates a new sparsemap with all bits shifted by a given offset.
+ *
+ * Every set bit at position i in the source map appears at position i + offset
+ * in the result. Bits shifted below 0 are silently dropped.
+ *
+ * @param[in] map    The source sparsemap.
+ * @param[in] offset Signed shift amount (positive = right, negative = left).
+ * @return A newly allocated sparsemap (caller must free()), or NULL if all
+ *         bits are shifted away or on allocation failure.
+ */
+
+/* Callback context for sparsemap_offset. */
+typedef struct {
+  sparsemap_t *result;
+  ssize_t offset;
+} __sm_offset_ctx_t;
+
+static void
+__sm_offset_scanner(__sm_idx_t vec[], size_t n, void *aux)
+{
+  __sm_offset_ctx_t *ctx = (__sm_offset_ctx_t *)aux;
+  for (size_t i = 0; i < n; i++) {
+    ssize_t new_pos = (ssize_t)vec[i] + ctx->offset;
+    if (new_pos < 0) {
+      continue;
+    }
+    sparsemap_idx_t idx = (sparsemap_idx_t)new_pos;
+    sparsemap_idx_t r;
+    do {
+      r = sparsemap_add(ctx->result, idx);
+      if (SPARSEMAP_NOT_FOUND(r)) {
+        if (errno == ENOSPC) {
+          size_t cap = sparsemap_get_capacity(ctx->result);
+          size_t new_cap = cap + (cap / 2 > 64 ? cap / 2 : 64);
+          ctx->result = sparsemap_set_data_size(ctx->result, NULL, new_cap);
+          if (ctx->result == NULL) {
+            return;
+          }
+          errno = 0;
+        } else {
+          return;
+        }
+      }
+    } while (SPARSEMAP_NOT_FOUND(r));
+  }
+}
+
+sparsemap_t *
+sparsemap_offset(const sparsemap_t *map, ssize_t offset)
+{
+  if (map == NULL) {
+    return NULL;
+  }
+
+  /* offset == 0: just copy */
+  if (offset == 0) {
+    return sparsemap_copy(map);
+  }
+
+  size_t card = sparsemap_cardinality((sparsemap_t *)map);
+  if (card == 0) {
+    return NULL;
+  }
+
+  /* Check for overflow: if shifting right and max bit would overflow */
+  if (offset > 0) {
+    sparsemap_idx_t max = sparsemap_maximum(map);
+    if (max > SPARSEMAP_IDX_MAX - (sparsemap_idx_t)offset) {
+      errno = ERANGE;
+      return NULL;
+    }
+  }
+
+  /* Check if all bits would be shifted below 0 */
+  if (offset < 0) {
+    sparsemap_idx_t max = sparsemap_maximum(map);
+    if ((ssize_t)max + offset < 0) {
+      return NULL; /* all bits shifted away */
+    }
+  }
+
+  /* Allocate result with same capacity as source */
+  size_t cap = sparsemap_get_capacity(map);
+  sparsemap_t *result = sparsemap(cap > 0 ? cap : 1024);
+  if (result == NULL) {
+    return NULL;
+  }
+
+  __sm_offset_ctx_t ctx = { .result = result, .offset = offset };
+  sparsemap_scan(map, __sm_offset_scanner, 0, &ctx);
+
+  if (ctx.result == NULL) {
+    return NULL; /* allocation failure during scan */
+  }
+
+  /* If no bits were added, return NULL */
+  if (sparsemap_cardinality(ctx.result) == 0) {
+    free(ctx.result);
+    return NULL;
+  }
+
+  return ctx.result;
+}
+
+/**
  * @brief Merges two sparsemaps into the destination sparsemap.
  *
  * This function integrates chunks from the source sparsemap into the
@@ -3058,10 +3163,10 @@ sparsemap_scan(const sparsemap_t *map, void (*scanner)(__sm_idx_t[], size_t, voi
  * the amount of additional space required to successfully merge the maps.
  */
 size_t
-sparsemap_merge(sparsemap_t *destination, sparsemap_t *source)
+sparsemap_union(sparsemap_t *destination, sparsemap_t *source)
 {
   size_t src_count = __sm_get_chunk_count(source);
-  const sparsemap_idx_t dst_ending_offset = sparsemap_get_ending_offset(destination);
+  const sparsemap_idx_t dst_ending_offset = sparsemap_maximum(destination);
 
   if (src_count == 0) {
     return 0;
@@ -3225,8 +3330,8 @@ sparsemap_merge(sparsemap_t *destination, sparsemap_t *source)
         if (src_is_rle || dst_is_rle) {
           /* Mixed RLE/sparse overlap: merge bit-by-bit via the public API. */
           for (sparsemap_idx_t j = src_start; j < src_start + src_capacity; j++) {
-            if (sparsemap_is_set(source, j)) {
-              sparsemap_set(destination, j);
+            if (sparsemap_contains(source, j)) {
+              sparsemap_add(destination, j);
             }
           }
         } else {
@@ -3246,8 +3351,8 @@ sparsemap_merge(sparsemap_t *destination, sparsemap_t *source)
           /* Mixed RLE/sparse overlap: merge bit-by-bit via the public API. */
           size_t src_end = src_start + src_capacity;
           for (sparsemap_idx_t j = src_start; j < src_end; j++) {
-            if (sparsemap_is_set(source, j)) {
-              sparsemap_set(destination, j);
+            if (sparsemap_contains(source, j)) {
+              sparsemap_add(destination, j);
             }
           }
         } else {
@@ -3256,8 +3361,8 @@ sparsemap_merge(sparsemap_t *destination, sparsemap_t *source)
           size_t overlap = src_end > dst_end ? src_capacity - (src_end - dst_end) : src_capacity;
           __sm_merge_chunk(destination, src_start, dst_start, overlap, &dst_chunk, &src_chunk);
           for (size_t n = src_start + overlap; n <= src_end; n++) {
-            if (sparsemap_is_set(source, n)) {
-              sparsemap_set(destination, n);
+            if (sparsemap_contains(source, n)) {
+              sparsemap_add(destination, n);
             }
           }
         }
@@ -3273,8 +3378,8 @@ sparsemap_merge(sparsemap_t *destination, sparsemap_t *source)
       {
         size_t src_end = src_start + src_capacity;
         for (sparsemap_idx_t j = src_start; j < src_end; j++) {
-          if (sparsemap_is_set(source, j)) {
-            sparsemap_set(destination, j);
+          if (sparsemap_contains(source, j)) {
+            sparsemap_add(destination, j);
           }
         }
       }
@@ -3331,7 +3436,7 @@ sparsemap_split(sparsemap_t *map, sparsemap_idx_t idx, sparsemap_t *other)
   const size_t count = __sm_get_chunk_count(map);
   bool in_middle = false;
 
-  __sm_assert(sparsemap_count(other) == 0);
+  __sm_assert(sparsemap_cardinality(other) == 0);
 
   //GSB __sm_when_diag({ __sm_diag_map(map, "========== START: %lu", idx); });
 
@@ -3341,8 +3446,8 @@ sparsemap_split(sparsemap_t *map, sparsemap_idx_t idx, sparsemap_t *other)
    * calculate that index here.
    */
   if (idx == SPARSEMAP_IDX_MAX) {
-    const sparsemap_idx_t begin = sparsemap_get_starting_offset(map);
-    const sparsemap_idx_t end = sparsemap_get_ending_offset(map);
+    const sparsemap_idx_t begin = sparsemap_minimum(map);
+    const sparsemap_idx_t end = sparsemap_maximum(map);
     if (begin != end) {
       const size_t rank = sparsemap_rank(map, begin, end, true);
       idx = sparsemap_select(map, rank / 2, true);
@@ -3352,7 +3457,7 @@ sparsemap_split(sparsemap_t *map, sparsemap_idx_t idx, sparsemap_t *other)
   }
 
   /* Is the index beyond the last bit set in the source? */
-  if (idx > sparsemap_get_ending_offset(map)) {
+  if (idx > sparsemap_maximum(map)) {
     return idx;
   }
 
@@ -3466,7 +3571,7 @@ sparsemap_split(sparsemap_t *map, sparsemap_idx_t idx, sparsemap_t *other)
     /* Copy the bits in the sparse chunk, at most SM_CHUNK_MAX_CAPACITY. */
     *(__sm_idx_t *)dst = src_start;
     for (size_t j = idx; j < src_start + SM_CHUNK_MAX_CAPACITY; j++) {
-      if (sparsemap_is_set(map, j)) {
+      if (sparsemap_contains(map, j)) {
         __sm_map_set(other, j, false);
         __sm_map_unset(map, j, false);
       }
@@ -3558,7 +3663,7 @@ __sm_rank_vec(sparsemap_t *map, size_t begin, size_t end, bool value, __sm_bitve
   }
 
   if (begin == end) {
-    return sparsemap_is_set(map, begin) == value ? 1 : 0;
+    return sparsemap_contains(map, begin) == value ? 1 : 0;
   }
 
   const size_t count = __sm_get_chunk_count(map);
@@ -4020,7 +4125,7 @@ _tst_get_chunk_offset(QCC_GenValue **vals, int len, QCC_Stamp **stamp)
   // per and with exactly one additional bitvec per so we should observe...
   for (unsigned int i = 0; i < rnd_nvec; i++) {
     sparsemap_idx_t l = offset + (i * SM_CHUNK_MAX_CAPACITY);
-    sparsemap_set(map, l);
+    sparsemap_add(map, l);
   }
   for (unsigned int i = 0; i < rnd_nvec; i++) {
     size_t expected_offset = __sm_get_chunk_offset(map, offset + (i * SM_CHUNK_MAX_CAPACITY));
@@ -4033,7 +4138,7 @@ _tst_get_chunk_offset(QCC_GenValue **vals, int len, QCC_Stamp **stamp)
   // Now for RLE, first let's clear and check a full chunk.
   sparsemap_clear(map);
   for (int i = 0; i < SM_CHUNK_MAX_CAPACITY; i++) {
-    sparsemap_set(map, i);
+    sparsemap_add(map, i);
   }
   for (int i = 0; i < SM_CHUNK_MAX_CAPACITY; i++) {
     ssize_t result = __sm_get_chunk_offset(map, i);
@@ -4047,13 +4152,13 @@ _tst_get_chunk_offset(QCC_GenValue **vals, int len, QCC_Stamp **stamp)
   }
 
   // This should trigger the transformation of the 0th chunk into RLE.
-  sparsemap_set(map, SM_CHUNK_MAX_CAPACITY);
+  sparsemap_add(map, SM_CHUNK_MAX_CAPACITY);
   result = __sm_get_chunk_offset(map, SM_CHUNK_MAX_CAPACITY);
   if (result != 0) {
     FAIL_AT(__LINE__, "chunk offset after RLE transform failed: __sm_get_chunk_offset(map, %d) = %zd, expected 0", SM_CHUNK_MAX_CAPACITY, result);
   }
   // This should trigger the transformation of the 0th chunk back to sparse.
-  sparsemap_unset(map, SM_CHUNK_MAX_CAPACITY);
+  sparsemap_remove(map, SM_CHUNK_MAX_CAPACITY);
   result = __sm_get_chunk_offset(map, SM_CHUNK_MAX_CAPACITY);
   if (result != 0) {
     FAIL_AT(__LINE__, "chunk offset after sparse transform failed: __sm_get_chunk_offset(map, %d) = %zd, expected 0", SM_CHUNK_MAX_CAPACITY, result);
@@ -4061,7 +4166,7 @@ _tst_get_chunk_offset(QCC_GenValue **vals, int len, QCC_Stamp **stamp)
 
   // This should trigger the transformation of the 0th chunk into RLE again.
   for (int i = 0; i < 3000; i++) {
-    sparsemap_set(map, SM_CHUNK_MAX_CAPACITY + i);
+    sparsemap_add(map, SM_CHUNK_MAX_CAPACITY + i);
   }
 
 #ifdef SPARSEMAP_DIAGNOSTIC
@@ -4086,13 +4191,13 @@ _tst_get_chunk_offset(QCC_GenValue **vals, int len, QCC_Stamp **stamp)
 
   // This should trigger the transformation of the 0th chunk back to sparse,
   // but also create a second and third sparse chunks.
-  sparsemap_unset(map, 0);
+  sparsemap_remove(map, 0);
   __sm_diag("After unset(0): chunk_count=%zu\n", __sm_get_chunk_count(map));
   result = __sm_get_chunk_offset(map, 0);
   if (result != 0) {
     FAIL_AT(__LINE__, "chunk offset after unset at 0 failed: __sm_get_chunk_offset(map, 0) = %zd, expected 0", result);
   }
-  sparsemap_set(map, 0);
+  sparsemap_add(map, 0);
 #ifdef SPARSEMAP_DIAGNOSTIC
   {
     size_t chunk_count = __sm_get_chunk_count(map);
@@ -4108,14 +4213,14 @@ _tst_get_chunk_offset(QCC_GenValue **vals, int len, QCC_Stamp **stamp)
             start, cap, len, is_rle, (unsigned long long)chunk.m_data[0]);
     // Verify some bits
     __sm_diag("  Bit checks: is_set(0)=%d, is_set(100)=%d, is_set(2050)=%d, is_set(5000)=%d\n",
-            sparsemap_is_set(map, 0), sparsemap_is_set(map, 100),
-            sparsemap_is_set(map, 2050), sparsemap_is_set(map, 5000));
+            sparsemap_contains(map, 0), sparsemap_contains(map, 100),
+            sparsemap_contains(map, 2050), sparsemap_contains(map, 5000));
   }
 #endif
 
   // This will split the chunk into two chunks; sparse, RLE.
   __sm_diag("Before unset(129): chunk_count=%zu\n", __sm_get_chunk_count(map));
-  sparsemap_unset(map, 129);
+  sparsemap_remove(map, 129);
 #ifdef SPARSEMAP_DIAGNOSTIC
   {
     size_t chunk_count = __sm_get_chunk_count(map);
@@ -4139,7 +4244,7 @@ _tst_get_chunk_offset(QCC_GenValue **vals, int len, QCC_Stamp **stamp)
   if (result != 0) {
     FAIL_AT(__LINE__, "chunk offset after split at 129 failed: __sm_get_chunk_offset(map, 129) = %zd, expected 0", result);
   }
-  sparsemap_set(map, 129);
+  sparsemap_add(map, 129);
 #ifdef SPARSEMAP_DIAGNOSTIC
   {
     size_t chunk_count = __sm_get_chunk_count(map);
@@ -4172,10 +4277,10 @@ _tst_get_chunk_offset(QCC_GenValue **vals, int len, QCC_Stamp **stamp)
     __sm_diag("  Chunk 0: start=%u, capacity=%zu, length=%zu, RLE=%d\n",
             start, cap, len, is_rle);
     __sm_diag("  Bit 2050 is_set=%d, idx 2050 in range [start=%u, start+length=%zu)? %d\n",
-            sparsemap_is_set(map, 2050), start, start + len, (2050 >= start && 2050 < start + len));
+            sparsemap_contains(map, 2050), start, start + len, (2050 >= start && 2050 < start + len));
   }
 #endif
-  sparsemap_unset(map, 2050);
+  sparsemap_remove(map, 2050);
 
 #ifdef SPARSEMAP_DIAGNOSTIC
   // Debug: check chunk count and structure
@@ -4211,17 +4316,17 @@ _tst_get_chunk_offset(QCC_GenValue **vals, int len, QCC_Stamp **stamp)
   if ((size_t)result != expected) {
     FAIL_AT(__LINE__, "chunk offset after 3-way split, chunk 2 failed: __sm_get_chunk_offset(map, %d) = %zd, expected %zu", 2050 + SM_CHUNK_MAX_CAPACITY, result, expected);
   }
-  sparsemap_set(map, 2050);
+  sparsemap_add(map, 2050);
 
   // This won't split the chunk, it just shrinks the RLE by one.
-  sparsemap_unset(map, 5047);
+  sparsemap_remove(map, 5047);
   result = __sm_get_chunk_offset(map, 5046);
   if (result != 0) {
     FAIL_AT(__LINE__, "chunk offset after RLE shrink failed: __sm_get_chunk_offset(map, 5046) = %zd, expected 0", result);
   }
 
   // This will split the chunk, the index is outside the range but inside the capacity.
-  sparsemap_set(map, 5048);
+  sparsemap_add(map, 5048);
   result = __sm_get_chunk_offset(map, 4090);
   if (result != 0) {
     FAIL_AT(__LINE__, "chunk offset after split, first chunk failed: __sm_get_chunk_offset(map, 4090) = %zd, expected 0", result);
@@ -4231,7 +4336,7 @@ _tst_get_chunk_offset(QCC_GenValue **vals, int len, QCC_Stamp **stamp)
     FAIL_AT(__LINE__, "chunk offset after split, second chunk failed: __sm_get_chunk_offset(map, 5046) = %zd, expected 12", result);
   }
 
-  sparsemap_unset(map, 5048);
+  sparsemap_remove(map, 5048);
   result = __sm_get_chunk_offset(map, 5046);
   if (result != 0) {
     FAIL_AT(__LINE__, "chunk offset after unset 5048 failed: __sm_get_chunk_offset(map, 5046) = %zd, expected 0", result);
@@ -4255,7 +4360,7 @@ _tst_rle_select_rank_consistency(QCC_GenValue **vals, int len, QCC_Stamp **stamp
   /* Test property: for any set bit at index i, select(rank(0, i, true) - 1, true) should equal i
    * This verifies that rank and select are inverse operations. */
 
-  size_t count = sparsemap_count(map);
+  size_t count = sparsemap_cardinality(map);
   if (count == 0) {
     return QCC_OK;
   }
@@ -4271,7 +4376,7 @@ _tst_rle_select_rank_consistency(QCC_GenValue **vals, int len, QCC_Stamp **stamp
     }
 
     /* Verify the bit is actually set */
-    if (!sparsemap_is_set(map, idx)) {
+    if (!sparsemap_contains(map, idx)) {
       return QCC_FAIL;
     }
 
@@ -4314,7 +4419,7 @@ _tst_rle_scan_completeness(QCC_GenValue **vals, int len, QCC_Stamp **stamp)
 
   /* Test property: scan must visit exactly count() set bits, no more, no less */
 
-  size_t expected_count = sparsemap_count(map);
+  size_t expected_count = sparsemap_cardinality(map);
 
   /* Reset counter and scan */
   scan_completeness_count = 0;

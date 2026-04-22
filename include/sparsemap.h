@@ -93,6 +93,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <sys/types.h>
 
 #if defined(__cplusplus)
 extern "C" {
@@ -129,8 +130,8 @@ typedef size_t sparsemap_idx_t;
  * Example:
  * @code
  *   sparsemap_t *map = sparsemap(4096);
- *   sparsemap_set(map, 42);
- *   assert(sparsemap_is_set(map, 42));
+ *   sparsemap_add(map, 42);
+ *   assert(sparsemap_contains(map, 42));
  *   free(map);
  * @endcode
  */
@@ -171,7 +172,7 @@ sparsemap_t *sparsemap_wrap(uint8_t *data, size_t size);
  *   sparsemap_t map;
  *   uint8_t buf[1024];
  *   sparsemap_init(&map, buf, sizeof(buf));
- *   sparsemap_set(&map, 0);
+ *   sparsemap_add(&map, 0);
  * @endcode
  */
 void sparsemap_init(sparsemap_t *map, uint8_t *data, size_t size);
@@ -268,11 +269,11 @@ void *sparsemap_get_data(const sparsemap_t *map);
  * @param[in] idx  0-based bit position.
  * @returns true if bit \a idx is 1, false if 0 or out of range.
  */
-bool sparsemap_is_set(sparsemap_t *map, sparsemap_idx_t idx);
+bool sparsemap_contains(sparsemap_t *map, sparsemap_idx_t idx);
 
 /** @brief Set or clear the bit at \a idx.
  *
- * Equivalent to `value ? sparsemap_set(map, idx) : sparsemap_unset(map, idx)`.
+ * Equivalent to `value ? sparsemap_add(map, idx) : sparsemap_remove(map, idx)`.
  *
  * @param[in,out] map    The sparsemap to modify.
  * @param[in]     idx    0-based bit position.
@@ -302,14 +303,14 @@ sparsemap_idx_t sparsemap_assign(sparsemap_t *map, sparsemap_idx_t idx, bool val
  *
  * Example:
  * @code
- *   sparsemap_idx_t r = sparsemap_set(map, 42);
+ *   sparsemap_idx_t r = sparsemap_add(map, 42);
  *   if (SPARSEMAP_NOT_FOUND(r)) {
  *       map = sparsemap_set_data_size(map, NULL, new_size);
- *       sparsemap_set(map, 42);
+ *       sparsemap_add(map, 42);
  *   }
  * @endcode
  */
-sparsemap_idx_t sparsemap_set(sparsemap_t *map, sparsemap_idx_t idx);
+sparsemap_idx_t sparsemap_add(sparsemap_t *map, sparsemap_idx_t idx);
 
 /** @brief Clear the bit at \a idx (set to 0).
  *
@@ -324,38 +325,38 @@ sparsemap_idx_t sparsemap_set(sparsemap_t *map, sparsemap_idx_t idx);
  * @param[in]     idx  0-based bit position to clear.
  * @returns \a idx on success, or SPARSEMAP_IDX_MAX with errno=ENOSPC.
  */
-sparsemap_idx_t sparsemap_unset(sparsemap_t *map, sparsemap_idx_t idx);
+sparsemap_idx_t sparsemap_remove(sparsemap_t *map, sparsemap_idx_t idx);
 
 /* -------------------------------------------------------------------
  * Aggregate queries
  * ------------------------------------------------------------------- */
 
-/** @brief Count the total number of set bits.
+/** @brief Count the total number of set bits (cardinality).
  *
  * Equivalent to `sparsemap_rank(map, 0, SPARSEMAP_IDX_MAX, true)`.
  *
  * @param[in] map  The sparsemap to query.
  * @returns Number of bits that are set to 1.
  */
-size_t sparsemap_count(sparsemap_t *map);
+size_t sparsemap_cardinality(sparsemap_t *map);
 
-/** @brief Return the position of the first set bit.
+/** @brief Return the position of the first set bit (minimum).
  *
  * @param[in] map  The sparsemap to query.
  * @returns 0-based index of the lowest set bit, or 0 if the map is empty.
  */
-sparsemap_idx_t sparsemap_get_starting_offset(const sparsemap_t *map);
+sparsemap_idx_t sparsemap_minimum(const sparsemap_t *map);
 
-/** @brief Return the position of the last set bit.
+/** @brief Return the position of the last set bit (maximum).
  *
  * @param[in] map  The sparsemap to query.
  * @returns 0-based index of the highest set bit, or 0 if the map is empty.
  */
-sparsemap_idx_t sparsemap_get_ending_offset(const sparsemap_t *map);
+sparsemap_idx_t sparsemap_maximum(const sparsemap_t *map);
 
 /** @brief Return the fraction of bits that are set.
  *
- * Computed as count / (ending_offset - starting_offset + 1).
+ * Computed as cardinality / (maximum - minimum + 1).
  *
  * @param[in] map  The sparsemap to query.
  * @returns Fill factor in the range [0.0, 1.0].
@@ -446,21 +447,21 @@ void sparsemap_scan(const sparsemap_t *map, void (*scanner)(uint32_t vec[], size
  * Bulk operations
  * ------------------------------------------------------------------- */
 
-/** @brief Merge all set bits from \a source into \a destination.
+/** @brief Union all set bits from \a source into \a destination.
  *
  * The \a source map is not modified.  The operation is logically equivalent
- * to `for each set bit b in source: sparsemap_set(destination, b)`, but is
+ * to `for each set bit b in source: sparsemap_add(destination, b)`, but is
  * performed at the chunk level for efficiency.
  *
  * If \a destination lacks sufficient buffer space, errno is set to ENOSPC
  * and the return value indicates how many additional bytes are needed.
  *
- * @param[in,out] destination  Map that receives the merged bits.
+ * @param[in,out] destination  Map that receives the union of bits.
  * @param[in]     source       Map whose set bits are merged in.
  * @returns 0 on success, or the number of additional bytes needed (with
  *          errno=ENOSPC) on failure.
  */
-size_t sparsemap_merge(sparsemap_t *destination, sparsemap_t *source);
+size_t sparsemap_union(sparsemap_t *destination, sparsemap_t *source);
 
 /** @brief Split the map at \a idx, moving higher bits to \a other.
  *
@@ -490,6 +491,19 @@ size_t sparsemap_merge(sparsemap_t *destination, sparsemap_t *source);
  * @endcode
  */
 sparsemap_idx_t sparsemap_split(sparsemap_t *map, sparsemap_idx_t idx, sparsemap_t *other);
+
+/** @brief Create a new sparsemap with all bits shifted by \a offset.
+ *
+ * Every set bit at position i in \a map appears at position i + offset in
+ * the result.  Bits shifted below 0 are silently dropped (matching
+ * CRoaring and PostgreSQL semantics).
+ *
+ * @param[in] map     The source sparsemap.
+ * @param[in] offset  Signed shift amount (positive = right, negative = left).
+ * @returns A newly allocated sparsemap (caller must free()), or NULL if all
+ *          bits are shifted away or on allocation failure.
+ */
+sparsemap_t *sparsemap_offset(const sparsemap_t *map, ssize_t offset);
 
 #if defined(__cplusplus)
 }

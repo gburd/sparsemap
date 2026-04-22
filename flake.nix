@@ -36,7 +36,7 @@
             ninja
             perl
             pkg-config
-            python3
+            (python3.withPackages (ps: [ ps.matplotlib ps.numpy ]))
             ripgrep
             valgrind
           ];

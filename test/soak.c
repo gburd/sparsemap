@@ -349,7 +349,7 @@ record_merge_mutation(FILE *out, void *handle)
 {
   if (recording) {
     sparsemap_t *map = (sparsemap_t *)handle;
-    fprintf(out, "merge %zu ", sparsemap_get_ending_offset(map));
+    fprintf(out, "merge %zu ", sparsemap_maximum(map));
     sparsemap_scan(map, __scan_record_offsets, 0, (void *)out);
     fprintf(out, "\n");
   }
@@ -420,7 +420,7 @@ static bool
 __sm_is_set(void *handle, pgno_t pg)
 {
   sparsemap_t *map = (sparsemap_t *)handle;
-  return sparsemap_is_set(map, pg);
+  return sparsemap_contains(map, pg);
 }
 
 static pgno_t
@@ -463,7 +463,7 @@ __sm_is_span(void *handle, pgno_t pg, unsigned len)
 {
   sparsemap_t *map = (sparsemap_t *)handle;
   for (pgno_t i = pg; i < pg + len; i++) {
-    if (sparsemap_is_set(map, i) != true) {
+    if (sparsemap_contains(map, i) != true) {
       return false;
     }
   }
@@ -475,7 +475,7 @@ __sm_is_empty(void *handle, pgno_t pg, unsigned len)
 {
   sparsemap_t *map = (sparsemap_t *)handle;
   for (pgno_t i = 0; i < len; i++) {
-    if (sparsemap_is_set(map, pg + i) != false) {
+    if (sparsemap_contains(map, pg + i) != false) {
       return false;
     }
   }
@@ -488,7 +488,7 @@ __sm_is_first(void *handle, pgno_t pg, unsigned len)
   sparsemap_t *map = (sparsemap_t *)handle;
   for (sparsemap_idx_t i = 0; i < pg + len; i++) {
     sparsemap_idx_t j = 0;
-    while (sparsemap_is_set(map, i + j) == true && j < len) {
+    while (sparsemap_contains(map, i + j) == true && j < len) {
       j++;
     }
     if (j == len) {
@@ -504,7 +504,7 @@ __sm_merge(void **handle, void *other_handle)
   sparsemap_t **map = (sparsemap_t **)handle;
   sparsemap_t *other = (sparsemap_t *)other_handle;
   do {
-    int retval = sparsemap_merge(*map, other);
+    int retval = sparsemap_union(*map, other);
     if (retval != 0) {
       if (errno == ENOSPC) {
         size_t new_size = retval + (64 - (retval % 64)) + 64;
@@ -1122,13 +1122,13 @@ verify_sm_eq_rb(sparsemap_t *map, roaring_bitmap_t *rbm)
   roaring_iterator_init(rbm, &iter);
   for (uint64_t i = 0; i <= max; i++) {
     if (i == iter.current_value) {
-      if (sparsemap_is_set(map, i) == false) {
+      if (sparsemap_contains(map, i) == false) {
         fprintf(stdout, "- %zu ", i);
         ret = false;
       }
       roaring_uint32_iterator_advance(&iter);
     } else {
-      if (sparsemap_is_set(map, i) == true) {
+      if (sparsemap_contains(map, i) == true) {
         fprintf(stdout, "+ %zu ", i);
         ret = false;
       }
@@ -1146,13 +1146,13 @@ verify_sm_eq_ml(sparsemap_t *map, MDB_IDL list)
     unsigned skipped = i == 1 ? 0 : list[i - 1] - list[i] - 1;
     if (skipped) {
       for (MDB_ID j = list[i - 1]; j > list[i]; j--) {
-        if (sparsemap_is_set(map, pg - j) != false) {
+        if (sparsemap_contains(map, pg - j) != false) {
           fprintf(stdout, "+ %zu ", pg - j);
           ret = false;
         }
       }
     }
-    if (sparsemap_is_set(map, pg) != true) {
+    if (sparsemap_contains(map, pg) != true) {
       fprintf(stdout, "- %zu ", pg);
       ret = false;
     }
@@ -1416,7 +1416,7 @@ main(int argc, char *argv[])
       size_t new_offset, new_amt;
     larger_please:
       new_amt = 1024 + (xorshift32() % 2048) + toss(1024);
-      new_offset = sparsemap_get_ending_offset(handles[SM]) + 1;
+      new_offset = sparsemap_maximum(handles[SM]) + 1;
 
       // Build a new container to merge with the existing one.
       foreach(types)

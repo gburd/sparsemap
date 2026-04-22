@@ -16,7 +16,7 @@ size_t populate_map_rle(sparsemap_t *map, size_t loc, size_t num, size_t amount)
     size_t len = rand_int_range(1, num) * amount;
     printf("Random length: rand_int_range(1, %zu) * %zu = %zu\n", num, amount, len);
     for (size_t i = 0; i < len; i++) {
-        sparsemap_set(map, loc + i);
+        sparsemap_add(map, loc + i);
     }
     return len;
 }
@@ -29,9 +29,9 @@ int main() {
     size_t n = populate_map_rle(map, start, 10, 2718);  // Match test params
 
     printf("Populated %zu bits starting at %zu\n", n, start);
-    printf("Count: %zu\n", sparsemap_count(map));
+    printf("Count: %zu\n", sparsemap_cardinality(map));
 
-    sparsemap_idx_t end1 = sparsemap_get_ending_offset(map);
+    sparsemap_idx_t end1 = sparsemap_maximum(map);
     printf("Ending offset after populate: %zu (expected %zu)\n", end1, start + n - 1);
 
     if (end1 != start + n - 1) {
@@ -41,19 +41,19 @@ int main() {
     // Now set bit 100 positions after the run
     sparsemap_idx_t new_bit = start + n + 100;
     printf("\nSetting bit at %zu\n", new_bit);
-    sparsemap_idx_t result = sparsemap_set(map, new_bit);
+    sparsemap_idx_t result = sparsemap_add(map, new_bit);
     printf("sparsemap_set returned: %zu (SPARSEMAP_IDX_MAX=%zu)\n", result, SPARSEMAP_IDX_MAX);
 
-    printf("Count after set: %zu\n", sparsemap_count(map));
+    printf("Count after set: %zu\n", sparsemap_cardinality(map));
 
-    sparsemap_idx_t end2 = sparsemap_get_ending_offset(map);
+    sparsemap_idx_t end2 = sparsemap_maximum(map);
     printf("Ending offset after set: %zu (expected %zu)\n", end2, new_bit);
 
     if (end2 != new_bit) {
         printf("ERROR: Second assertion fails! Off by %ld\n", (long)(new_bit - end2));
 
         // Debug: check if the bit is actually set
-        if (sparsemap_is_set(map, new_bit)) {
+        if (sparsemap_contains(map, new_bit)) {
             printf("Bit IS set at %zu\n", new_bit);
         } else {
             printf("Bit is NOT set at %zu!\n", new_bit);
