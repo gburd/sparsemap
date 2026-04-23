@@ -112,7 +112,7 @@ $(LIB_SHARED): $(LIB_OBJECTS)
 	$(CC) -shared -o $@ $^ $(LDFLAGS) $(LIBS)
 
 src/sparsemap.o: src/sparsemap.c $(LIB_HEADERS)
-	$(CC) -std=gnu11 -Wall -Wextra $(if $(COVERAGE),,-Werror) -I./include $(if $(DEBUG),-g -O1 -DDEBUG,-O3) $(if $(DIAGNOSTIC),-DSPARSEMAP_DIAGNOSTIC) $(if $(COVERAGE),-fprofile-arcs -ftest-coverage -O0) -c -o $@ $<
+	$(CC) -std=gnu11 -Wall -Wextra $(if $(COVERAGE),,-Werror) -I./include $(if $(DEBUG),-g -O1 -DDEBUG,-O3 -g -march=native) $(if $(DIAGNOSTIC),-DSPARSEMAP_DIAGNOSTIC) $(if $(COVERAGE),-fprofile-arcs -ftest-coverage -O0) -c -o $@ $<
 
 # Test targets
 tests: CFLAGS += -DSPARSEMAP_TESTING -I./test
@@ -135,7 +135,7 @@ $(SOAK_BINARY): $(SOAK_OBJECTS) $(LIB_STATIC)
 bench: $(BENCH_BINARY)
 
 $(BENCH_BINARY): $(BENCH_OBJECTS) $(LIB_STATIC)
-	$(CC) -std=gnu11 -Wall -Wextra -I./include -I./test -O2 -o $@ $(BENCH_OBJECTS) $(LIB_STATIC) $(LDFLAGS) $(LIBS)
+	$(CC) -std=gnu11 -Wall -Wextra -I./include -I./test -O2 -g -fno-omit-frame-pointer -o $@ $(BENCH_OBJECTS) $(LIB_STATIC) $(LDFLAGS) $(LIBS)
 
 test/test_rle_standalone.o: test/test_rle_standalone.c
 	$(CC) -std=gnu11 -Wall -Wextra -I./include -O3 -c -o $@ $<
