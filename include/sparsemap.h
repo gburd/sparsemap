@@ -439,7 +439,7 @@ uint64_t sparsemap_span(sparsemap_t *map, uint64_t start, size_t len, bool value
  *   sparsemap_scan(map, print_bits, 0, NULL);
  * @endcode
  */
-void sparsemap_scan(const sparsemap_t *map, void (*scanner)(uint32_t vec[], size_t n, void *aux), size_t skip, void *aux);
+void sparsemap_scan(const sparsemap_t *map, void (*scanner)(uint64_t vec[], size_t n, void *aux), size_t skip, void *aux);
 
 /* -------------------------------------------------------------------
  * Bulk operations

@@ -56,7 +56,8 @@ SOAK_SOURCES = test/soak.c test/common.c test/roaring.c test/tdigest.c
 SOAK_OBJECTS = $(SOAK_SOURCES:.c=.o)
 SOAK_BINARY = test/soak
 
-BENCH_SOURCES = test/bench.c test/roaring.c test/tdigest.c test/bitmapset_standalone.c
+BENCH_SOURCES = test/bench.c test/roaring.c test/tdigest.c test/bitmapset_standalone.c \
+               test/bench_hybrid_wrapper.c
 BENCH_OBJECTS = $(BENCH_SOURCES:.c=.o)
 BENCH_BINARY = test/bench
 

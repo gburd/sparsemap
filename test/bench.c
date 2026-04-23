@@ -29,6 +29,7 @@
 #include <tdigest.h>
 
 #include "bitmapset_standalone.h"
+#include "bench_hybrid_wrapper.h"
 
 /* ===================================================================
  * Configuration
@@ -208,6 +209,24 @@ static uint32_t *gen_worst_sparse(size_t n, size_t *out_count, uint32_t *out_uni
     return bits;
 }
 
+/* 9. TID simulation: sparse bits in huge universe (simulates TID bitmap usage) */
+static uint32_t *gen_tid_sim(size_t n_pages, size_t tuples_per_page,
+                              size_t *out_count, uint32_t *out_universe) {
+    /* TID = (blk << 8) | offset  (simplified: 256 offsets per page) */
+    size_t total = n_pages * tuples_per_page;
+    uint32_t *bits = malloc(total * sizeof(uint32_t));
+    size_t idx = 0;
+    for (size_t page = 0; page < n_pages; page++) {
+        uint32_t base = (uint32_t)(page * 256); /* page offset */
+        for (size_t t = 0; t < tuples_per_page; t++) {
+            bits[idx++] = base + (uint32_t)t;
+        }
+    }
+    *out_count = total;
+    *out_universe = (uint32_t)(n_pages * 256);
+    return bits;
+}
+
 /* ===================================================================
  * Per-operation benchmark contexts and callbacks
  *
@@ -316,6 +335,14 @@ static void op_populate_bms(void *ctx_) {
     bms_free(b);
 }
 
+static void op_populate_hybrid(void *ctx_) {
+    populate_ctx_t *ctx = ctx_;
+    HybridBitmapset *b = NULL;
+    for (size_t i = 0; i < ctx->count; i++)
+        b = hybrid_bms_add_member(b, (int64_t)ctx->bits[i]);
+    hybrid_bms_free(b);
+}
+
 /* --- Contains (test all bits) --- */
 typedef struct {
     void *handle;
@@ -342,6 +369,12 @@ static void op_contains_bms(void *ctx_) {
         ctx->sink = bms_is_member((int)ctx->bits[i], ctx->handle);
 }
 
+static void op_contains_hybrid(void *ctx_) {
+    contains_ctx_t *ctx = ctx_;
+    for (size_t i = 0; i < ctx->count; i++)
+        ctx->sink = hybrid_bms_is_member((int64_t)ctx->bits[i], ctx->handle);
+}
+
 /* --- Cardinality --- */
 typedef struct {
     void *handle;
@@ -361,6 +394,11 @@ static void op_card_rb(void *ctx_) {
 static void op_card_bms(void *ctx_) {
     card_ctx_t *ctx = ctx_;
     ctx->sink = (size_t)bms_num_members(ctx->handle);
+}
+
+static void op_card_hybrid(void *ctx_) {
+    card_ctx_t *ctx = ctx_;
+    ctx->sink = (size_t)hybrid_bms_num_members(ctx->handle);
 }
 
 /* --- Rank at midpoint --- */
@@ -385,6 +423,17 @@ static void op_rank_bms(void *ctx_) {
     size_t c = 0;
     int x = -1;
     while ((x = bms_next_member(ctx->handle, x)) >= 0) {
+        if ((uint32_t)x <= ctx->mid) c++;
+        else break;
+    }
+    ctx->sink = c;
+}
+
+static void op_rank_hybrid(void *ctx_) {
+    rank_ctx_t *ctx = ctx_;
+    size_t c = 0;
+    int64_t x = -1;
+    while ((x = hybrid_bms_next_member(ctx->handle, x)) >= 0) {
         if ((uint32_t)x <= ctx->mid) c++;
         else break;
     }
@@ -421,6 +470,16 @@ static void op_select_bms(void *ctx_) {
     }
 }
 
+static void op_select_hybrid(void *ctx_) {
+    select_ctx_t *ctx = ctx_;
+    int64_t x = -1;
+    uint32_t count = 0;
+    while ((x = hybrid_bms_next_member(ctx->handle, x)) >= 0) {
+        if (count == ctx->n) { ctx->sink = (uint32_t)x; return; }
+        count++;
+    }
+}
+
 /* --- Union --- */
 typedef struct {
     void *a;
@@ -444,6 +503,12 @@ static void op_union_bms(void *ctx_) {
     union_ctx_t *ctx = ctx_;
     Bitmapset *r = bms_union(ctx->a, ctx->b);
     bms_free(r);
+}
+
+static void op_union_hybrid(void *ctx_) {
+    union_ctx_t *ctx = ctx_;
+    HybridBitmapset *r = hybrid_bms_union(ctx->a, ctx->b);
+    hybrid_bms_free(r);
 }
 
 /* --- Intersection --- */
@@ -470,6 +535,12 @@ static void op_intersect_bms(void *ctx_) {
     bms_free(r);
 }
 
+static void op_intersect_hybrid(void *ctx_) {
+    intersect_ctx_t *ctx = ctx_;
+    HybridBitmapset *r = hybrid_bms_intersect(ctx->a, ctx->b);
+    hybrid_bms_free(r);
+}
+
 /* --- Difference --- */
 typedef struct {
     void *a;
@@ -494,13 +565,19 @@ static void op_difference_bms(void *ctx_) {
     bms_free(r);
 }
 
+static void op_difference_hybrid(void *ctx_) {
+    difference_ctx_t *ctx = ctx_;
+    HybridBitmapset *r = hybrid_bms_difference(ctx->a, ctx->b);
+    hybrid_bms_free(r);
+}
+
 /* --- Iterate --- */
 typedef struct {
     void *handle;
     volatile uint64_t checksum;
 } iter_ctx_t;
 
-static void sm_bench_scan_cb(uint32_t vec[], size_t n, void *aux) {
+static void sm_bench_scan_cb(uint64_t vec[], size_t n, void *aux) {
     volatile uint64_t *cs = aux;
     for (size_t i = 0; i < n; i++)
         *cs += vec[i];
@@ -531,6 +608,14 @@ static void op_iter_bms(void *ctx_) {
         ctx->checksum += (uint32_t)x;
 }
 
+static void op_iter_hybrid(void *ctx_) {
+    iter_ctx_t *ctx = ctx_;
+    ctx->checksum = 0;
+    int64_t x = -1;
+    while ((x = hybrid_bms_next_member(ctx->handle, x)) >= 0)
+        ctx->checksum += (uint64_t)x;
+}
+
 /* --- Offset --- */
 typedef struct {
     void *handle;
@@ -555,6 +640,12 @@ static void op_offset_bms(void *ctx_) {
     if (r) bms_free(r);
 }
 
+static void op_offset_hybrid(void *ctx_) {
+    offset_ctx_t *ctx = ctx_;
+    HybridBitmapset *r = hybrid_bms_offset_members(ctx->handle, (int64_t)ctx->offset);
+    if (r) hybrid_bms_free(r);
+}
+
 /* --- Minimum --- */
 typedef struct {
     void *handle;
@@ -577,6 +668,12 @@ static void op_min_bms(void *ctx_) {
     ctx->sink = (r >= 0) ? (uint32_t)r : 0;
 }
 
+static void op_min_hybrid(void *ctx_) {
+    minmax_ctx_t *ctx = ctx_;
+    int64_t r = hybrid_bms_next_member(ctx->handle, -1);
+    ctx->sink = (r >= 0) ? (uint32_t)r : 0;
+}
+
 /* --- Maximum --- */
 static void op_max_sm(void *ctx_) {
     minmax_ctx_t *ctx = ctx_;
@@ -592,6 +689,14 @@ static void op_max_bms(void *ctx_) {
     minmax_ctx_t *ctx = ctx_;
     int last = -1, x = -1;
     while ((x = bms_next_member(ctx->handle, x)) >= 0)
+        last = x;
+    ctx->sink = (last >= 0) ? (uint32_t)last : 0;
+}
+
+static void op_max_hybrid(void *ctx_) {
+    minmax_ctx_t *ctx = ctx_;
+    int64_t last = -1, x = -1;
+    while ((x = hybrid_bms_next_member(ctx->handle, x)) >= 0)
         last = x;
     ctx->sink = (last >= 0) ? (uint32_t)last : 0;
 }
@@ -631,14 +736,20 @@ static void bench_one_pattern(pattern_t *pat, bool skip_bms, bool verify_only) {
             bms_handle = bms_add_member(bms_handle, (int)bits[i]);
     }
 
+    /* Hybrid bitmapset: never skipped -- it handles large universes */
+    HybridBitmapset *hybrid_handle = NULL;
+    for (size_t i = 0; i < count; i++)
+        hybrid_handle = hybrid_bms_add_member(hybrid_handle, (int64_t)bits[i]);
+
     /* --- Verify cross-library correctness --- */
     size_t sm_card = sparsemap_cardinality(sm_handle);
     size_t rb_card = (size_t)roaring_bitmap_get_cardinality(rb_handle);
     size_t bms_card = skip_bms ? sm_card : (size_t)bms_num_members(bms_handle);
+    size_t hybrid_card = (size_t)hybrid_bms_num_members(hybrid_handle);
 
-    if (sm_card != rb_card || sm_card != bms_card) {
-        fprintf(stderr, "  VERIFY FAIL: cardinality mismatch sm=%zu rb=%zu bms=%zu\n",
-                sm_card, rb_card, bms_card);
+    if (sm_card != rb_card || sm_card != bms_card || sm_card != hybrid_card) {
+        fprintf(stderr, "  VERIFY FAIL: cardinality mismatch sm=%zu rb=%zu bms=%zu hybrid=%zu\n",
+                sm_card, rb_card, bms_card, hybrid_card);
     } else {
         fprintf(stderr, "  Cardinality verified: %zu across all libraries\n", sm_card);
     }
@@ -648,9 +759,10 @@ static void bench_one_pattern(pattern_t *pat, bool skip_bms, bool verify_only) {
         bool sm_has = sparsemap_contains(sm_handle, bits[i]);
         bool rb_has = roaring_bitmap_contains(rb_handle, bits[i]);
         bool bms_has = skip_bms ? sm_has : bms_is_member((int)bits[i], bms_handle);
-        if (!sm_has || !rb_has || !bms_has) {
-            fprintf(stderr, "  VERIFY FAIL: bit %u missing in sm=%d rb=%d bms=%d\n",
-                    bits[i], sm_has, rb_has, bms_has);
+        bool hybrid_has = hybrid_bms_is_member((int64_t)bits[i], hybrid_handle);
+        if (!sm_has || !rb_has || !bms_has || !hybrid_has) {
+            fprintf(stderr, "  VERIFY FAIL: bit %u missing in sm=%d rb=%d bms=%d hybrid=%d\n",
+                    bits[i], sm_has, rb_has, bms_has, hybrid_has);
             break;
         }
     }
@@ -665,9 +777,10 @@ static void bench_one_pattern(pattern_t *pat, bool skip_bms, bool verify_only) {
     size_t rb_mem = roaring_bitmap_size_in_bytes(rb_handle);
     size_t bms_mem = skip_bms ? 0 :
         (offsetof(Bitmapset, words) + (size_t)bms_handle->nwords * sizeof(bitmapword));
+    size_t hybrid_mem = hybrid_bms_memory_bytes(hybrid_handle);
 
-    fprintf(stderr, "  Memory: sparsemap=%zu  croaring=%zu  bitmapset=%zu\n",
-            sm_mem, rb_mem, bms_mem);
+    fprintf(stderr, "  Memory: sparsemap=%zu  croaring=%zu  bitmapset=%zu  hybrid=%zu\n",
+            sm_mem, rb_mem, bms_mem, hybrid_mem);
 
     /* Midpoint for rank */
     uint32_t midpoint = count > 0 ? bits[count / 2] : 0;
@@ -683,12 +796,15 @@ static void bench_one_pattern(pattern_t *pat, bool skip_bms, bool verify_only) {
         void (*sm_op)(void *);
         void (*rb_op)(void *);
         void (*bms_op)(void *);
+        void (*hybrid_op)(void *);
         void *sm_ctx;
         void *rb_ctx;
         void *bms_ctx;
+        void *hybrid_ctx;
         size_t sm_mem_val;
         size_t rb_mem_val;
         size_t bms_mem_val;
+        size_t hybrid_mem_val;
     } benchmarks[13];
     int num_benchmarks = 0;
 
@@ -696,130 +812,141 @@ static void bench_one_pattern(pattern_t *pat, bool skip_bms, bool verify_only) {
     populate_ctx_t pop_ctx = { .bits = bits, .count = count };
     benchmarks[num_benchmarks++] = (typeof(benchmarks[0])){
         "populate",
-        op_populate_sm, op_populate_rb, op_populate_bms,
-        &pop_ctx, &pop_ctx, &pop_ctx,
-        sm_mem, rb_mem, bms_mem
+        op_populate_sm, op_populate_rb, op_populate_bms, op_populate_hybrid,
+        &pop_ctx, &pop_ctx, &pop_ctx, &pop_ctx,
+        sm_mem, rb_mem, bms_mem, hybrid_mem
     };
 
     /* Contains */
     contains_ctx_t cont_sm = { .handle = sm_handle, .bits = bits, .count = count < 1000 ? count : 1000 };
     contains_ctx_t cont_rb = { .handle = rb_handle, .bits = bits, .count = cont_sm.count };
     contains_ctx_t cont_bms = { .handle = bms_handle, .bits = bits, .count = cont_sm.count };
+    contains_ctx_t cont_hybrid = { .handle = hybrid_handle, .bits = bits, .count = cont_sm.count };
     benchmarks[num_benchmarks++] = (typeof(benchmarks[0])){
         "contains",
-        op_contains_sm, op_contains_rb, op_contains_bms,
-        &cont_sm, &cont_rb, &cont_bms,
-        sm_mem, rb_mem, bms_mem
+        op_contains_sm, op_contains_rb, op_contains_bms, op_contains_hybrid,
+        &cont_sm, &cont_rb, &cont_bms, &cont_hybrid,
+        sm_mem, rb_mem, bms_mem, hybrid_mem
     };
 
     /* Cardinality */
     card_ctx_t card_sm = { .handle = sm_handle };
     card_ctx_t card_rb = { .handle = rb_handle };
     card_ctx_t card_bms = { .handle = bms_handle };
+    card_ctx_t card_hybrid = { .handle = hybrid_handle };
     benchmarks[num_benchmarks++] = (typeof(benchmarks[0])){
         "cardinality",
-        op_card_sm, op_card_rb, op_card_bms,
-        &card_sm, &card_rb, &card_bms,
-        sm_mem, rb_mem, bms_mem
+        op_card_sm, op_card_rb, op_card_bms, op_card_hybrid,
+        &card_sm, &card_rb, &card_bms, &card_hybrid,
+        sm_mem, rb_mem, bms_mem, hybrid_mem
     };
 
     /* Rank */
     rank_ctx_t rank_sm_c = { .handle = sm_handle, .mid = midpoint };
     rank_ctx_t rank_rb_c = { .handle = rb_handle, .mid = midpoint };
     rank_ctx_t rank_bms_c = { .handle = bms_handle, .mid = midpoint };
+    rank_ctx_t rank_hybrid_c = { .handle = hybrid_handle, .mid = midpoint };
     benchmarks[num_benchmarks++] = (typeof(benchmarks[0])){
         "rank",
-        op_rank_sm, op_rank_rb, op_rank_bms,
-        &rank_sm_c, &rank_rb_c, &rank_bms_c,
-        sm_mem, rb_mem, bms_mem
+        op_rank_sm, op_rank_rb, op_rank_bms, op_rank_hybrid,
+        &rank_sm_c, &rank_rb_c, &rank_bms_c, &rank_hybrid_c,
+        sm_mem, rb_mem, bms_mem, hybrid_mem
     };
 
     /* Select */
     select_ctx_t sel_sm = { .handle = sm_handle, .n = sel_n };
     select_ctx_t sel_rb = { .handle = rb_handle, .n = sel_n };
     select_ctx_t sel_bms = { .handle = bms_handle, .n = sel_n };
+    select_ctx_t sel_hybrid = { .handle = hybrid_handle, .n = sel_n };
     benchmarks[num_benchmarks++] = (typeof(benchmarks[0])){
         "select",
-        op_select_sm, op_select_rb, op_select_bms,
-        &sel_sm, &sel_rb, &sel_bms,
-        sm_mem, rb_mem, bms_mem
+        op_select_sm, op_select_rb, op_select_bms, op_select_hybrid,
+        &sel_sm, &sel_rb, &sel_bms, &sel_hybrid,
+        sm_mem, rb_mem, bms_mem, hybrid_mem
     };
 
     /* Union */
     union_ctx_t union_sm_c = { .a = sm_handle, .b = sm_handle };
     union_ctx_t union_rb_c = { .a = rb_handle, .b = rb_handle };
     union_ctx_t union_bms_c = { .a = bms_handle, .b = bms_handle };
+    union_ctx_t union_hybrid_c = { .a = hybrid_handle, .b = hybrid_handle };
     benchmarks[num_benchmarks++] = (typeof(benchmarks[0])){
         "union",
-        op_union_sm, op_union_rb, op_union_bms,
-        &union_sm_c, &union_rb_c, &union_bms_c,
-        sm_mem, rb_mem, bms_mem
+        op_union_sm, op_union_rb, op_union_bms, op_union_hybrid,
+        &union_sm_c, &union_rb_c, &union_bms_c, &union_hybrid_c,
+        sm_mem, rb_mem, bms_mem, hybrid_mem
     };
 
     /* Intersection */
     intersect_ctx_t isect_sm_c = { .a = sm_handle, .b = sm_handle };
     intersect_ctx_t isect_rb_c = { .a = rb_handle, .b = rb_handle };
     intersect_ctx_t isect_bms_c = { .a = bms_handle, .b = bms_handle };
+    intersect_ctx_t isect_hybrid_c = { .a = hybrid_handle, .b = hybrid_handle };
     benchmarks[num_benchmarks++] = (typeof(benchmarks[0])){
         "intersection",
-        op_intersect_sm, op_intersect_rb, op_intersect_bms,
-        &isect_sm_c, &isect_rb_c, &isect_bms_c,
-        sm_mem, rb_mem, bms_mem
+        op_intersect_sm, op_intersect_rb, op_intersect_bms, op_intersect_hybrid,
+        &isect_sm_c, &isect_rb_c, &isect_bms_c, &isect_hybrid_c,
+        sm_mem, rb_mem, bms_mem, hybrid_mem
     };
 
     /* Difference */
     difference_ctx_t diff_sm_c = { .a = sm_handle, .b = sm_handle };
     difference_ctx_t diff_rb_c = { .a = rb_handle, .b = rb_handle };
     difference_ctx_t diff_bms_c = { .a = bms_handle, .b = bms_handle };
+    difference_ctx_t diff_hybrid_c = { .a = hybrid_handle, .b = hybrid_handle };
     benchmarks[num_benchmarks++] = (typeof(benchmarks[0])){
         "difference",
-        op_difference_sm, op_difference_rb, op_difference_bms,
-        &diff_sm_c, &diff_rb_c, &diff_bms_c,
-        sm_mem, rb_mem, bms_mem
+        op_difference_sm, op_difference_rb, op_difference_bms, op_difference_hybrid,
+        &diff_sm_c, &diff_rb_c, &diff_bms_c, &diff_hybrid_c,
+        sm_mem, rb_mem, bms_mem, hybrid_mem
     };
 
     /* Iterate */
     iter_ctx_t iter_sm_c = { .handle = sm_handle };
     iter_ctx_t iter_rb_c = { .handle = rb_handle };
     iter_ctx_t iter_bms_c = { .handle = bms_handle };
+    iter_ctx_t iter_hybrid_c = { .handle = hybrid_handle };
     benchmarks[num_benchmarks++] = (typeof(benchmarks[0])){
         "iterate",
-        op_iter_sm, op_iter_rb, op_iter_bms,
-        &iter_sm_c, &iter_rb_c, &iter_bms_c,
-        sm_mem, rb_mem, bms_mem
+        op_iter_sm, op_iter_rb, op_iter_bms, op_iter_hybrid,
+        &iter_sm_c, &iter_rb_c, &iter_bms_c, &iter_hybrid_c,
+        sm_mem, rb_mem, bms_mem, hybrid_mem
     };
 
     /* Offset (+64) */
     offset_ctx_t off_sm = { .handle = sm_handle, .offset = 64 };
     offset_ctx_t off_rb = { .handle = rb_handle, .offset = 64 };
     offset_ctx_t off_bms = { .handle = bms_handle, .offset = 64 };
+    offset_ctx_t off_hybrid = { .handle = hybrid_handle, .offset = 64 };
     benchmarks[num_benchmarks++] = (typeof(benchmarks[0])){
         "offset",
-        op_offset_sm, op_offset_rb, op_offset_bms,
-        &off_sm, &off_rb, &off_bms,
-        sm_mem, rb_mem, bms_mem
+        op_offset_sm, op_offset_rb, op_offset_bms, op_offset_hybrid,
+        &off_sm, &off_rb, &off_bms, &off_hybrid,
+        sm_mem, rb_mem, bms_mem, hybrid_mem
     };
 
     /* Minimum */
     minmax_ctx_t min_sm = { .handle = sm_handle };
     minmax_ctx_t min_rb = { .handle = rb_handle };
     minmax_ctx_t min_bms = { .handle = bms_handle };
+    minmax_ctx_t min_hybrid = { .handle = hybrid_handle };
     benchmarks[num_benchmarks++] = (typeof(benchmarks[0])){
         "minimum",
-        op_min_sm, op_min_rb, op_min_bms,
-        &min_sm, &min_rb, &min_bms,
-        sm_mem, rb_mem, bms_mem
+        op_min_sm, op_min_rb, op_min_bms, op_min_hybrid,
+        &min_sm, &min_rb, &min_bms, &min_hybrid,
+        sm_mem, rb_mem, bms_mem, hybrid_mem
     };
 
     /* Maximum */
     minmax_ctx_t max_sm = { .handle = sm_handle };
     minmax_ctx_t max_rb = { .handle = rb_handle };
     minmax_ctx_t max_bms = { .handle = bms_handle };
+    minmax_ctx_t max_hybrid = { .handle = hybrid_handle };
     benchmarks[num_benchmarks++] = (typeof(benchmarks[0])){
         "maximum",
-        op_max_sm, op_max_rb, op_max_bms,
-        &max_sm, &max_rb, &max_bms,
-        sm_mem, rb_mem, bms_mem
+        op_max_sm, op_max_rb, op_max_bms, op_max_hybrid,
+        &max_sm, &max_rb, &max_bms, &max_hybrid,
+        sm_mem, rb_mem, bms_mem, hybrid_mem
     };
 
     /* --- Run all benchmarks --- */
@@ -849,13 +976,14 @@ static void bench_one_pattern(pattern_t *pat, bool skip_bms, bool verify_only) {
             void *ctx;
             size_t mem;
             bool skip;
-        } libs[3] = {
+        } libs[4] = {
             { "sparsemap", benchmarks[b].sm_op, benchmarks[b].sm_ctx, benchmarks[b].sm_mem_val, false },
             { "croaring",  benchmarks[b].rb_op, benchmarks[b].rb_ctx, benchmarks[b].rb_mem_val, false },
             { "bitmapset", benchmarks[b].bms_op, benchmarks[b].bms_ctx, benchmarks[b].bms_mem_val, skip_bms },
+            { "hybrid",    benchmarks[b].hybrid_op, benchmarks[b].hybrid_ctx, benchmarks[b].hybrid_mem_val, false },
         };
 
-        for (int l = 0; l < 3; l++) {
+        for (int l = 0; l < 4; l++) {
             if (libs[l].skip) continue;
 
             td_histogram_t *td = td_new(TD_COMPRESSION);
@@ -891,6 +1019,7 @@ cleanup:
     free(sm_handle);
     roaring_bitmap_free(rb_handle);
     if (bms_handle) bms_free(bms_handle);
+    if (hybrid_handle) hybrid_bms_free(hybrid_handle);
 }
 
 /* ===================================================================
@@ -903,7 +1032,7 @@ static void usage(void) {
         "\n"
         "Options:\n"
         "  --pattern=NAME     Run only this pattern (dense, sparse, periodic,\n"
-        "                     clustered, powerlaw, block, alternating, worst)\n"
+        "                     clustered, powerlaw, block, alternating, worst, tid)\n"
         "  --cardinality=N    Override default cardinality\n"
         "  --verify           Only verify correctness, don't benchmark\n"
         "  --help             Show this help\n"
@@ -944,7 +1073,7 @@ int main(int argc, char **argv) {
     size_t default_card = override_cardinality ? override_cardinality : 10000;
 
     /* Build patterns */
-    #define MAX_PATTERNS 8
+    #define MAX_PATTERNS 9
     pattern_t patterns[MAX_PATTERNS];
     int npat = 0;
 
@@ -1020,6 +1149,19 @@ int main(int argc, char **argv) {
     if (!filter_pattern || strcmp(filter_pattern, "worst") == 0) {
         patterns[npat].name = "worst";
         patterns[npat].bits = gen_worst_sparse(default_card, &cnt, &uni);
+        patterns[npat].count = cnt;
+        patterns[npat].universe = uni;
+        npat++;
+    }
+
+    /* 9. TID simulation: sparse bits in huge universe */
+    if (!filter_pattern || strcmp(filter_pattern, "tid") == 0) {
+        /* n_pages scales with cardinality: default_card tuples spread across pages */
+        size_t tuples_per_page = 10;
+        size_t n_pages = default_card / tuples_per_page;
+        if (n_pages < 1) n_pages = 1;
+        patterns[npat].name = "tid";
+        patterns[npat].bits = gen_tid_sim(n_pages, tuples_per_page, &cnt, &uni);
         patterns[npat].count = cnt;
         patterns[npat].universe = uni;
         npat++;

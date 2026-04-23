@@ -2,6 +2,7 @@
 
 #include <assert.h>
 #include <errno.h>
+#include <inttypes.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -336,11 +337,11 @@ record_release_span_mutation(FILE *out, pgno_t pg, unsigned len)
 }
 
 static void
-__scan_record_offsets(uint32_t v[], size_t n, void *aux)
+__scan_record_offsets(uint64_t v[], size_t n, void *aux)
 {
   FILE *out = (FILE *)aux;
   for (size_t i = 0; i < n; i++) {
-    fprintf(out, "%u ", v[i]);
+    fprintf(out, "%" PRIu64 " ", v[i]);
   }
 }
 

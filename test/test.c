@@ -102,7 +102,7 @@ test_api_new(const MunitParameter params[], void *data)
 
   assert_ptr_not_null(map);
   assert_true(map->m_capacity == 1024);
-  assert_true(map->m_data_used == sizeof(uint32_t));
+  assert_true(map->m_data_used == sizeof(uint64_t));
   assert_true((((uint8_t)map->m_data[0]) & 0x03) == 0x00);
 
   munit_free(map);
@@ -119,11 +119,11 @@ test_api_new_realloc(const MunitParameter params[], void *data)
 
   assert_ptr_not_null(map);
   assert_true(map->m_capacity == 1024);
-  assert_true(map->m_data_used == sizeof(uint32_t));
+  assert_true(map->m_data_used == sizeof(uint64_t));
 
   map = sparsemap_set_data_size(map, NULL, 2048);
   assert_true(map->m_capacity == 2048);
-  assert_true(map->m_data_used == sizeof(uint32_t));
+  assert_true(map->m_data_used == sizeof(uint64_t));
 
   munit_free(map);
 
@@ -147,7 +147,7 @@ test_api_new_heap(const MunitParameter params[], void *data)
   sparsemap_init(map, buf, 1024);
   assert_ptr_equal(buf, map->m_data);
   assert_true(map->m_capacity == 1024);
-  assert_true(map->m_data_used == sizeof(uint32_t));
+  assert_true(map->m_data_used == sizeof(uint64_t));
 
   munit_free(map->m_data);
   munit_free(map);
@@ -170,7 +170,7 @@ test_api_new_static(const MunitParameter params[], void *data)
   sparsemap_init(map, buf, 1024);
   assert_ptr_equal(buf, map->m_data);
   assert_true(map->m_capacity == 1024);
-  assert_true(map->m_data_used == sizeof(uint32_t));
+  assert_true(map->m_data_used == sizeof(uint64_t));
 
   munit_free(map->m_data);
 
@@ -189,7 +189,7 @@ test_api_new_stack(const MunitParameter params[], void *data)
   sparsemap_init(map, buf, 1024);
   assert_ptr_equal(&buf, map->m_data);
   assert_true(map->m_capacity == 1024);
-  assert_true(map->m_data_used == sizeof(uint32_t));
+  assert_true(map->m_data_used == sizeof(uint64_t));
 
   return MUNIT_OK;
 }
@@ -741,7 +741,7 @@ test_api_scan_tear_down(void *fixture)
   test_api_tear_down(fixture);
 }
 void
-scan_for_0xfeedfacebadcoffee(uint32_t v[], size_t n, void *aux)
+scan_for_0xfeedfacebadcoffee(uint64_t v[], size_t n, void *aux)
 {
   size_t bit_pos[] = { 1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 22, 23, 24, 26, 27, 29, 31, 32, 33, 34, 35, 38, 39, 41, 43, 44, 45, 46, 47, 48, 50, 51,
     53, 54, 55, 57, 58, 59, 60, 61, 62, 63 };
@@ -1414,9 +1414,9 @@ test_api_scan_rle_tear_down(void *fixture)
 
 /* Scanner callback that counts bits and tracks last index */
 static size_t scan_rle_count = 0;
-static uint32_t scan_rle_last_idx = 0;
+static uint64_t scan_rle_last_idx = 0;
 void
-scan_rle_counter(uint32_t v[], size_t n, void *aux)
+scan_rle_counter(uint64_t v[], size_t n, void *aux)
 {
   (void)aux;
   for (size_t i = 0; i < n; i++) {

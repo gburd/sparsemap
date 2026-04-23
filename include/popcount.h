@@ -1,12 +1,14 @@
+#ifndef SPARSEMAP_POPCOUNT_H
+#define SPARSEMAP_POPCOUNT_H
+
 #if defined(__GNUC__) && (__GNUC__ >= 4)
 
 // Default to using the GCC builtin popcount.  On architectures with
 // -march popcnt, this compiles to a single popcnt instruction.
 #ifndef popcountll
 #define popcountll __builtin_popcountll
-#else
-#define popcountll sux_popcountll
 #endif
+
 #else
 /*
  *
@@ -72,4 +74,6 @@ inline int sux_popcountll(uint64_t x) {
 }
 
 #endif /* _FASTRANK_POPCOUNT_H_ */
-#endif
+#endif /* __GNUC__ >= 4 */
+
+#endif /* SPARSEMAP_POPCOUNT_H */
