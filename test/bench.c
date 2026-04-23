@@ -430,9 +430,8 @@ typedef struct {
 
 static void op_union_sm(void *ctx_) {
     union_ctx_t *ctx = ctx_;
-    sparsemap_t *dst = sparsemap_copy(ctx->a);
-    sparsemap_union(dst, ctx->b);
-    free(dst);
+    sparsemap_t *r = sparsemap_union(ctx->a, ctx->b);
+    free(r);
 }
 
 static void op_union_rb(void *ctx_) {

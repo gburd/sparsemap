@@ -50,13 +50,21 @@ int main(void) {
             return 1;
         }
 
-        sparsemap_union(map, &portion);
-
-        size_t count_after = sparsemap_cardinality(map);
-        if (count_after != amt) {
-            fprintf(stderr, "FAIL merge at i=%zu: count %zu != %zu\n",
-                    i, count_after, amt);
-            return 1;
+        {
+            sparsemap_t *merged = sparsemap_union(map, &portion);
+            if (merged == NULL) {
+                fprintf(stderr, "FAIL merge at i=%zu: union returned NULL\n", i);
+                return 1;
+            }
+            size_t count_after = sparsemap_cardinality(merged);
+            if (count_after != amt) {
+                fprintf(stderr, "FAIL merge at i=%zu: count %zu != %zu\n",
+                        i, count_after, amt);
+                free(merged);
+                return 1;
+            }
+            free(map);
+            map = merged;
         }
 
         /* Print progress occasionally */

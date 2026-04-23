@@ -52,10 +52,12 @@ int main() {
     printf("About to merge...\n");
     fflush(stdout);
 
-    sparsemap_union(map, other);
+    sparsemap_t *merged = sparsemap_union(map, other);
 
     printf("Merge completed successfully!\n");
-    print_map_state("map AFTER merge", map);
+    print_map_state("merged AFTER merge", merged);
+
+    free(merged);
 
     free(map);
     free(other);

@@ -48,16 +48,18 @@ int main() {
 
     printf("\nTest 2: Merge after split\n");
     fflush(stdout);
-    sparsemap_union(map, other);
+    sparsemap_t *merged = sparsemap_union(map, other);
     printf("Merge completed\n");
     fflush(stdout);
 
     for (int i = 2049; i < 4096; i++) {
-        if (!sparsemap_contains(map, i)) {
+        if (!sparsemap_contains(merged, i)) {
             printf("ERROR: bit %d not set after merge\n", i);
+            free(merged);
             return 1;
         }
     }
+    free(merged);
 
     printf("Test 2: PASSED\n");
     printf("\nAll tests passed!\n");

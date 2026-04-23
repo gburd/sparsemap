@@ -73,11 +73,14 @@ int main() {
     printf("=================================================================\n");
     fflush(stdout);
 
-    size_t result = sparsemap_union(map, other);
+    sparsemap_t *merged = sparsemap_union(map, other);
 
-    printf(">>> Merge returned: %zu (0 = success)\n", result);
+    printf(">>> Merge returned: %p (%s)\n", (void *)merged, merged ? "success" : "NULL");
 
-    print_detailed_state("MAP AFTER MERGE", map);
+    if (merged) {
+      print_detailed_state("MERGED AFTER MERGE", merged);
+      free(merged);
+    }
 
     printf("\n=================================================================\n");
     printf("SUCCESS: All operations completed without crash!\n");

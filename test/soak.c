@@ -503,21 +503,13 @@ __sm_merge(void **handle, void *other_handle)
 {
   sparsemap_t **map = (sparsemap_t **)handle;
   sparsemap_t *other = (sparsemap_t *)other_handle;
-  do {
-    int retval = sparsemap_union(*map, other);
-    if (retval != 0) {
-      if (errno == ENOSPC) {
-        size_t new_size = retval + (64 - (retval % 64)) + 64;
-        *map = sparsemap_set_data_size(*map, NULL, sparsemap_get_capacity(*map) + new_size);
-        assert(*map != NULL);
-        errno = 0;
-      } else {
-        assert(false);
-      }
-    } else {
-      break;
-    }
-  } while (true);
+  sparsemap_t *merged = sparsemap_union(*map, other);
+  if (merged == NULL) {
+    /* Both empty — nothing to merge, that's fine. */
+    return true;
+  }
+  free(*map);
+  *map = merged;
   return true;
 }
 

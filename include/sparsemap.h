@@ -445,21 +445,17 @@ void sparsemap_scan(const sparsemap_t *map, void (*scanner)(uint32_t vec[], size
  * Bulk operations
  * ------------------------------------------------------------------- */
 
-/** @brief Union all set bits from \a source into \a destination.
+/** @brief Create a new sparsemap containing bits set in either \a a or \a b.
  *
- * The \a source map is not modified.  The operation is logically equivalent
- * to `for each set bit b in source: sparsemap_add(destination, b)`, but is
- * performed at the chunk level for efficiency.
+ * The result is a newly allocated sparsemap whose set bits are exactly those
+ * that appear in either input map (logical OR).  Neither input is modified.
  *
- * If \a destination lacks sufficient buffer space, errno is set to ENOSPC
- * and the return value indicates how many additional bytes are needed.
- *
- * @param[in,out] destination  Map that receives the union of bits.
- * @param[in]     source       Map whose set bits are merged in.
- * @returns 0 on success, or the number of additional bytes needed (with
- *          errno=ENOSPC) on failure.
+ * @param[in] a  First input sparsemap.
+ * @param[in] b  Second input sparsemap.
+ * @returns A newly allocated sparsemap (caller must free()), or NULL on
+ *          allocation failure or if both inputs are empty/NULL.
  */
-size_t sparsemap_union(sparsemap_t *destination, sparsemap_t *source);
+sparsemap_t *sparsemap_union(const sparsemap_t *a, const sparsemap_t *b);
 
 /** @brief Create a new sparsemap containing bits set in both \a a and \a b.
  *

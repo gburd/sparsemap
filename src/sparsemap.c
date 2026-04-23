@@ -2048,55 +2048,6 @@ __sm_separate_rle_chunk(sparsemap_t *map, __sm_chunk_sep_t *sep, const uint64_t 
 }
 
 /**
- * @brief Merges two chunks from the sparse map, aligning the source chunk with
- *        the destination chunk while adjusting the underlying data structure.
- *
- * This function merges a source chunk into a destination chunk within the sparse map.
- * It adjusts offsets and manages the insertion and removal of data to keep the
- * map consistent.
- *
- * @param[in] map        Pointer to the sparse map object.
- * @param[in] src_start  Starting index of the source chunk.
- * @param[in] dst_start  Starting index of the destination chunk.
- * @param[in] capacity   The capacity of the chunk, indicating the number of elements to process.
- * @param[in] dst_chunk  Pointer to the destination chunk.
- * @param[in] src_chunk  Pointer to the source chunk.
- */
-void
-__sm_merge_chunk(sparsemap_t *map, const uint64_t src_start, const uint64_t dst_start, const uint64_t capacity, const __sm_chunk_t *dst_chunk,
-  const __sm_chunk_t *src_chunk)
-{
-  __sm_bitvec_t fill = 0;
-  const ssize_t delta = (ssize_t)src_start - (ssize_t)dst_start;
-  for (uint64_t j = 0; j < capacity; j++) {
-    ssize_t offset = __sm_get_chunk_offset(map, src_start + j);
-    if (__sm_chunk_is_set(src_chunk, j) && !__sm_chunk_is_set(dst_chunk, j + delta)) {
-      size_t position = 0;
-      switch (__sm_chunk_set_bit(dst_chunk, j + delta, &position)) {
-      case SM_NEEDS_TO_GROW:
-        offset += (ssize_t)(SM_SIZEOF_OVERHEAD + (position * sizeof(__sm_bitvec_t)));
-        __sm_insert_data(map, offset, (uint8_t *)&fill, sizeof(__sm_bitvec_t));
-        __sm_chunk_set_bit(dst_chunk, j + delta, &position);
-        break;
-      case SM_NEEDS_TO_SHRINK:
-        if (__sm_chunk_is_empty(src_chunk)) {
-          __sm_assert(position == 1);
-          __sm_remove_data(map, offset, SM_SIZEOF_OVERHEAD + (sizeof(__sm_bitvec_t) * 2));
-          __sm_set_chunk_count(map, __sm_get_chunk_count(map) - 1);
-        } else {
-          offset += SM_SIZEOF_OVERHEAD + (ssize_t)(position * sizeof(__sm_bitvec_t));
-          __sm_remove_data(map, offset, sizeof(__sm_bitvec_t));
-        }
-        break;
-      case SM_OK:
-      default:
-        break;
-      }
-    }
-  }
-}
-
-/**
  * @brief Clears the given sparse map.
  *
  * This function resets the sparse map by setting all its data to zero and updating
@@ -3738,6 +3689,14 @@ sparsemap_intersection(const sparsemap_t *a, const sparsemap_t *b)
     const size_t b_size = __sm_chunk_get_size(&b_chunk);
     const size_t b_end = (size_t)b_start + b_cap;
 
+    /* Prefetch next chunks */
+    if (ai + 1 < a_count) {
+      __builtin_prefetch(ap + SM_SIZEOF_OVERHEAD + a_size, 0, 1);
+    }
+    if (bi + 1 < b_count) {
+      __builtin_prefetch(bp + SM_SIZEOF_OVERHEAD + b_size, 0, 1);
+    }
+
     /* No overlap: a is entirely before b */
     if (a_end <= b_start) {
       ap += SM_SIZEOF_OVERHEAD + a_size;
@@ -3919,6 +3878,11 @@ sparsemap_difference(const sparsemap_t *a, const sparsemap_t *b)
     const size_t a_size = __sm_chunk_get_size(&a_chunk);
     const size_t a_end = (size_t)a_start + a_cap_bits;
 
+    /* Prefetch next a chunk */
+    if (ai + 1 < a_count) {
+      __builtin_prefetch(ap + SM_SIZEOF_OVERHEAD + a_size, 0, 1);
+    }
+
     /* If b is exhausted, copy remaining a chunks */
     if (bi >= b_count) {
       if (!__sm_copy_chunk_to_result(&result, ap)) {
@@ -4048,289 +4012,275 @@ sparsemap_difference(const sparsemap_t *a, const sparsemap_t *b)
 }
 
 /**
- * @brief Merges two sparsemaps into the destination sparsemap.
+ * @brief Create a new sparsemap containing the union of a and b.
  *
- * This function integrates chunks from the source sparsemap into the
- * destination sparsemap, updating their offsets and capacity as necessary. It
- * handles cases where chunks in the source sparsemap may overlap with,
- * precede, or follow chunks in the destination sparsemap. The function
- * employs strategies similar to a merge sort to reconcile ordered sets of
- * chunks.
+ * Uses a two-pointer chunk merge walk for O(chunks) performance instead
+ * of the previous O(cardinality x chunks) in-place mutation.  Cursors
+ * track partially-consumed chunks when one chunk extends past the other.
  *
- * The function also checks and adjusts for remaining capacity before
- * attempting the merge, ensuring that there is sufficient space in the
- * destination sparsemap to accommodate the merged data.
+ * Fast paths:
+ *   - Aligned sparse chunks: word-level OR via expand/encode helpers.
+ *   - Both RLE chunks: direct run merge (handles contiguous and gapped runs).
+ *   - Mixed/misaligned: bit-by-bit OR bounded by sparse chunk capacity.
  *
- * @param[in,out] destination Pointer to the sparsemap that will be changed to include the data from the source.
- * @param[in] source Pointer to the sparsemap that contains data to be merged into the destination.
- * @return 0 if the merge was successful, or sets errno to ENOSPC and returns
- * the amount of additional space required to successfully merge the maps.
+ * @param[in] a  First input sparsemap.
+ * @param[in] b  Second input sparsemap.
+ * @returns A newly allocated sparsemap (caller must free()), or NULL on
+ *          allocation failure or if both inputs are empty/NULL.
  */
-size_t
-sparsemap_union(sparsemap_t *destination, sparsemap_t *source)
+sparsemap_t *
+sparsemap_union(const sparsemap_t *a, const sparsemap_t *b)
 {
-  size_t src_count = __sm_get_chunk_count(source);
-  const uint64_t dst_ending_offset = sparsemap_maximum(destination);
-
-  if (src_count == 0) {
-    return 0;
+  if (a == NULL && b == NULL) {
+    return NULL;
   }
 
-  /* Ensure m_data_used is calculated (may be 0 after split). */
-  sparsemap_get_size(destination);
-  sparsemap_get_size(source);
+  const size_t a_count = a ? __sm_get_chunk_count(a) : 0;
+  const size_t b_count = b ? __sm_get_chunk_count(b) : 0;
 
-  // TODO: rethink this method of estimating space... seems off to me now...
-  const ssize_t remaining_capacity = destination->m_capacity - destination->m_data_used -
-    (source->m_data_used + src_count * (SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) * 2));
-
-  /* Estimate worst-case overhead required for merge. */
-  if (remaining_capacity <= 0) {
-    errno = ENOSPC;
-    return -remaining_capacity;
+  if (a_count == 0 && b_count == 0) {
+    return NULL;
+  }
+  if (a_count == 0) {
+    return sparsemap_copy(b);
+  }
+  if (b_count == 0) {
+    return sparsemap_copy(a);
   }
 
-  /*
-   * Strategy here it to walk the ordered set of chunks in the source map
-   * examining each one against the current destination chunk.  Then there
-   * are a number of cases to consider:
-   * - src proceeds dst
-   * - src follows dst
-   * - src and dst overlap
-   *   - perfect overlap
-   *   - non-uniform overlap
-   */
-  uint8_t *src = __sm_get_chunk_data(source, 0);
-  while (src_count) {
-    const __sm_idx_t src_start = *(__sm_idx_t *)src;
-    __sm_chunk_t src_chunk;
-    __sm_chunk_init(&src_chunk, src + SM_SIZEOF_OVERHEAD);
-    const bool src_is_rle = SM_IS_CHUNK_RLE(&src_chunk);
-    const size_t src_capacity = __sm_chunk_get_capacity(&src_chunk);
-    const ssize_t dst_offset = __sm_get_chunk_offset(destination, src_start);
-    if (dst_offset >= 0) {
-      uint8_t *dst = __sm_get_chunk_data(destination, dst_offset);
-      const __sm_idx_t dst_start = *(__sm_idx_t *)dst;
-      __sm_chunk_t dst_chunk;
-      __sm_chunk_init(&dst_chunk, dst + SM_SIZEOF_OVERHEAD);
-      const bool dst_is_rle = SM_IS_CHUNK_RLE(&dst_chunk);
-      size_t dst_capacity = __sm_chunk_get_capacity(&dst_chunk);
+  /* Allocate result with combined capacity (worst case: no overlap). */
+  size_t cap = sparsemap_get_capacity(a) + sparsemap_get_capacity(b);
+  if (cap < 1024) cap = 1024;
 
-      /* Try to expand the capacity if there's room before the start of the next chunk. */
-      if (!(src_is_rle || dst_is_rle)) {
-        if (src_start == dst_start && dst_capacity < src_capacity) {
-          const ssize_t nxt_offset = __sm_get_chunk_offset(destination, dst_start + dst_capacity + 1);
-          if (nxt_offset >= 0) {
-            uint8_t *nxt_dst = __sm_get_chunk_data(destination, nxt_offset);
-            const __sm_idx_t nxt_dst_start = *(__sm_idx_t *)nxt_dst;
-            if (nxt_dst_start > dst_start + src_capacity) {
-              __sm_chunk_increase_capacity(&dst_chunk, src_capacity);
-              dst_capacity = __sm_chunk_get_capacity(&dst_chunk);
-            }
-          }
-        }
-      }
+  sparsemap_t *result = sparsemap(cap);
+  if (result == NULL) {
+    return NULL;
+  }
 
-      /* Source chunk (sparse/RLE) precedes next destination chunk. */
-      if (src_start + src_capacity <= dst_start) {
-        /* Validate RLE chunks before inserting */
-        if (src_is_rle) {
-          const size_t src_length = __sm_chunk_rle_get_length(&src_chunk);
-          if (src_length > src_capacity) {
-            __sm_diag("merge insert: source RLE chunk has length=%zu > capacity=%zu at start=%u\n",
-                      src_length, src_capacity, src_start);
-            return -1;
-          }
-        }
+  uint8_t *ap = __sm_get_chunk_data(a, 0);
+  uint8_t *bp = __sm_get_chunk_data(b, 0);
+  size_t ai = 0, bi = 0;
 
-        const size_t src_size = __sm_chunk_get_size(&src_chunk);
-        const ssize_t offset = __sm_get_chunk_offset(destination, dst_start);
-        /* Insert a copy of the src chunk in dst at the proper offset. */
-        __sm_insert_data(destination, offset, src, SM_SIZEOF_OVERHEAD + src_size);
-        /* Update the chunk count in dst. */
-        __sm_set_chunk_count(destination, __sm_get_chunk_count(destination) + 1);
+  /* Cursors track how far into each current chunk we've already emitted.
+     A value of 0 means "fresh chunk" (reset after advancing).  When a
+     chunk is partially consumed, the cursor holds the absolute bit
+     position up to which bits have been emitted. */
+  size_t a_cursor = 0;
+  size_t b_cursor = 0;
 
-        /* Move to the next src chunk. */
-        src_count--;
-        src += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&src_chunk);
-        continue;
-      }
+  while (ai < a_count && bi < b_count) {
+    /* ---- Read chunk a metadata ---- */
+    const __sm_idx_t a_start = *(__sm_idx_t *)ap;
+    __sm_chunk_t a_chunk;
+    __sm_chunk_init(&a_chunk, ap + SM_SIZEOF_OVERHEAD);
+    const bool a_rle = SM_IS_CHUNK_RLE(&a_chunk);
+    const size_t a_cap_bits = __sm_chunk_get_capacity(&a_chunk);
+    const size_t a_size = __sm_chunk_get_size(&a_chunk);
+    const size_t a_end = (size_t)a_start + a_cap_bits;
 
-      /* Source chunk (sparse/RLE) follows next destination chunk. */
-      if (src_start >= (dst_start + dst_capacity)) {
-        /* Validate RLE chunks before inserting/appending */
-        if (src_is_rle) {
-          const size_t src_length = __sm_chunk_rle_get_length(&src_chunk);
-          if (src_length > src_capacity) {
-            __sm_diag("merge append: source RLE chunk has length=%zu > capacity=%zu at start=%u\n",
-                      src_length, src_capacity, src_start);
-            return -1;
-          }
-        }
+    /* Ensure cursor is at least at chunk start. */
+    if (a_cursor < (size_t)a_start) a_cursor = (size_t)a_start;
 
-        const size_t src_size = __sm_chunk_get_size(&src_chunk);
-        /* Insert or append a copy of the src chunk in dst. */
-        if (dst_offset == __sm_get_chunk_offset(destination, SPARSEMAP_IDX_MAX)) {
-          __sm_append_data(destination, src, SM_SIZEOF_OVERHEAD + src_size);
-        } else {
-          const ssize_t offset = __sm_get_chunk_offset(destination, src_start);
-          __sm_insert_data(destination, offset, src, SM_SIZEOF_OVERHEAD + src_size);
-        }
-        /* Update the chunk count and data_used. */
-        __sm_set_chunk_count(destination, __sm_get_chunk_count(destination) + 1);
+    /* ---- Read chunk b metadata ---- */
+    const __sm_idx_t b_start = *(__sm_idx_t *)bp;
+    __sm_chunk_t b_chunk;
+    __sm_chunk_init(&b_chunk, bp + SM_SIZEOF_OVERHEAD);
+    const bool b_rle = SM_IS_CHUNK_RLE(&b_chunk);
+    const size_t b_cap_bits = __sm_chunk_get_capacity(&b_chunk);
+    const size_t b_size = __sm_chunk_get_size(&b_chunk);
+    const size_t b_end = (size_t)b_start + b_cap_bits;
 
-        /* Move to the next src chunk. */
-        src_count--;
-        src += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&src_chunk);
-        continue;
-      }
+    if (b_cursor < (size_t)b_start) b_cursor = (size_t)b_start;
 
-      /* At this point we know that the dst chunk and src chunk overlap. */
-      const size_t src_length = __sm_chunk_rle_get_length(&src_chunk);
-      const size_t dst_length = __sm_chunk_rle_get_length(&dst_chunk);
+    /* Prefetch next chunks for the merge loop. */
+    if (ai + 1 < a_count)
+      __builtin_prefetch(ap + SM_SIZEOF_OVERHEAD + a_size, 0, 1);
+    if (bi + 1 < b_count)
+      __builtin_prefetch(bp + SM_SIZEOF_OVERHEAD + b_size, 0, 1);
 
-      if (src_is_rle && dst_is_rle) {
-        /* Both src and dst are RLE ... */
-        /* Validate source chunk before merging */
-        if (src_length > src_capacity) {
-          __sm_diag("merge RLE overlap: source chunk is invalid (length=%zu > capacity=%zu), skipping\n",
-                    src_length, src_capacity);
-          /* Move to next src chunk */
-          src_count--;
-          src += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&src_chunk);
-          continue;
-        }
-
-        /* RLE capacity is IMMUTABLE - do not recalculate */
-        const size_t dst_capacity = __sm_chunk_rle_get_capacity(&dst_chunk);
-
-        if (src_length >= dst_length) {
-          /* Source is larger than dst. Check if it fits in dst's existing capacity */
-          size_t new_length = __sm_chunk_rle_get_length(&src_chunk);
-
-          /* Validate new length fits in dst's immutable capacity */
-          if (new_length > dst_capacity) {
-            __sm_diag("merge RLE overlap: new_length=%zu exceeds dst_capacity=%zu, skipping\n",
-                      new_length, dst_capacity);
-            src_count--;
-            src += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&src_chunk);
-            continue;
-          }
-          __sm_chunk_rle_set_length(&dst_chunk, new_length);
-        }
-        if (src_start <= dst_start) {
-          /* ... and src starts before dst. */
-          *(__sm_idx_t *)dst = src_start;
-        }
-
-        /* Move to the next src chunk. */
-        src_count--;
-        src += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&src_chunk);
-        continue;
-      }
-
-      /* Source and destination start at the same point. */
-      if (src_start == dst_start && src_capacity == dst_capacity) {
-        if (src_is_rle || dst_is_rle) {
-          /* Mixed RLE/sparse overlap: merge bit-by-bit via the public API. */
-          for (uint64_t j = src_start; j < src_start + src_capacity; j++) {
-            if (sparsemap_contains(source, j)) {
-              sparsemap_add(destination, j);
-            }
-          }
-        } else {
-          /* Source and destination and a perfect overlapping non-RLE pair. */
-          __sm_merge_chunk(destination, src_start, dst_start, dst_capacity, &dst_chunk, &src_chunk);
-        }
-
-        /* Move to the next src chunk. */
-        src_count--;
-        src += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&src_chunk);
-        continue;
-      }
-
-      /* Non-uniform overlapping chunks. */
-      if (dst_start < src_start || (dst_start == src_start && dst_capacity != src_capacity)) {
-        if (src_is_rle || dst_is_rle) {
-          /* Mixed RLE/sparse overlap: merge bit-by-bit via the public API. */
-          size_t src_end = src_start + src_capacity;
-          for (uint64_t j = src_start; j < src_end; j++) {
-            if (sparsemap_contains(source, j)) {
-              sparsemap_add(destination, j);
-            }
-          }
-        } else {
-          size_t src_end = src_start + src_capacity;
-          size_t dst_end = dst_start + dst_capacity;
-          size_t overlap = src_end > dst_end ? src_capacity - (src_end - dst_end) : src_capacity;
-          __sm_merge_chunk(destination, src_start, dst_start, overlap, &dst_chunk, &src_chunk);
-          for (size_t n = src_start + overlap; n <= src_end; n++) {
-            if (sparsemap_contains(source, n)) {
-              sparsemap_add(destination, n);
-            }
-          }
-        }
-
-        /* Move to the next src chunk. */
-        src_count--;
-        src += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&src_chunk);
-        continue;
-      }
-
-      /* Fallback: any remaining overlap case (e.g., src_start > dst_start with
-       * non-uniform overlap) -- merge bit-by-bit via the public API. */
-      {
-        size_t src_end = src_start + src_capacity;
-        for (uint64_t j = src_start; j < src_end; j++) {
-          if (sparsemap_contains(source, j)) {
-            sparsemap_add(destination, j);
-          }
-        }
-      }
-
-      /* Move to the next src chunk. */
-      src_count--;
-      src += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&src_chunk);
-      continue;
-    } else {
-      /* A negative destination offset indicates an empty map. */
-
-      if (src_start >= dst_ending_offset) {
-        /* Starting offset is after destination chunks, so append data. */
-        size_t src_size = __sm_chunk_get_size(&src_chunk);
-        __sm_append_data(destination, src, SM_SIZEOF_OVERHEAD + src_size);
-
-        /* Update the chunk count and data_used. */
-        __sm_set_chunk_count(destination, __sm_get_chunk_count(destination) + 1);
-
-        /* Move to the next src chunk. */
-        src_count--;
-        src += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&src_chunk);
-        continue;
+    /* ---- No overlap: a's remaining range ends before b's ---- */
+    if (a_end <= b_cursor) {
+      if (a_cursor == (size_t)a_start) {
+        if (!__sm_copy_chunk_to_result(&result, ap)) goto fail;
       } else {
-        /* Source chunk precedes next destination chunk. */
-        size_t src_size = __sm_chunk_get_size(&src_chunk);
-        ssize_t offset = __sm_get_chunk_offset(destination, src_start);
-        if (offset < 0) {
-          /* Map is empty, append instead of insert. */
-          __sm_append_data(destination, src, SM_SIZEOF_OVERHEAD + src_size);
-        } else {
-          __sm_insert_data(destination, offset, src, SM_SIZEOF_OVERHEAD + src_size);
-        }
-
-        /* Update the chunk count and data_used. */
-        __sm_set_chunk_count(destination, __sm_get_chunk_count(destination) + 1);
-
-        /* Move to the next src chunk. */
-        src_count--;
-        src += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&src_chunk);
-        continue;
+        if (!__sm_emit_chunk_bits(&result, &a_chunk, a_rle, a_start, a_cursor, a_end)) goto fail;
       }
+      ap += SM_SIZEOF_OVERHEAD + a_size; ai++; a_cursor = 0;
+      continue;
+    }
+
+    /* ---- No overlap: b's remaining range ends before a's ---- */
+    if (b_end <= a_cursor) {
+      if (b_cursor == (size_t)b_start) {
+        if (!__sm_copy_chunk_to_result(&result, bp)) goto fail;
+      } else {
+        if (!__sm_emit_chunk_bits(&result, &b_chunk, b_rle, b_start, b_cursor, b_end)) goto fail;
+      }
+      bp += SM_SIZEOF_OVERHEAD + b_size; bi++; b_cursor = 0;
+      continue;
+    }
+
+    /* ---- Chunks overlap.  Compute overlap bounds. ---- */
+    const size_t ov_start = a_cursor > b_cursor ? a_cursor : b_cursor;
+    const size_t ov_end   = a_end < b_end ? a_end : b_end;
+
+    /* Emit pre-overlap bits from whichever cursor is behind. */
+    if (a_cursor < ov_start) {
+      if (!__sm_emit_chunk_bits(&result, &a_chunk, a_rle, a_start, a_cursor, ov_start)) goto fail;
+      a_cursor = ov_start;
+    }
+    if (b_cursor < ov_start) {
+      if (!__sm_emit_chunk_bits(&result, &b_chunk, b_rle, b_start, b_cursor, ov_start)) goto fail;
+      b_cursor = ov_start;
+    }
+
+    /* ---- Fast path: both sparse, aligned, at original start ---- */
+    if (!a_rle && !b_rle && a_start == b_start
+        && a_cursor == (size_t)a_start && b_cursor == (size_t)b_start) {
+      /* Word-level OR of two aligned sparse chunks. */
+      __sm_bitvec_t aw[SM_FLAGS_PER_INDEX], bw[SM_FLAGS_PER_INDEX];
+      int ac[SM_FLAGS_PER_INDEX], bc[SM_FLAGS_PER_INDEX];
+      __sm_expand_sparse_chunk(&a_chunk, aw, ac);
+      __sm_expand_sparse_chunk(&b_chunk, bw, bc);
+
+      __sm_bitvec_t rw[SM_FLAGS_PER_INDEX];
+      int rc[SM_FLAGS_PER_INDEX];
+      for (int i = 0; i < (int)SM_FLAGS_PER_INDEX; i++) {
+        rw[i] = aw[i] | bw[i];
+        rc[i] = (ac[i] || bc[i]) ? 1 : 0;
+      }
+
+      __sm_bitvec_t desc;
+      __sm_bitvec_t vecs[SM_FLAGS_PER_INDEX];
+      int nvecs;
+      if (__sm_encode_sparse_chunk(rw, rc, &desc, vecs, &nvecs)) {
+        if (!__sm_append_sparse_chunk(&result, a_start, desc, vecs, nvecs)) goto fail;
+      }
+
+      /* Both chunks fully consumed. */
+      ap += SM_SIZEOF_OVERHEAD + a_size; ai++; a_cursor = 0;
+      bp += SM_SIZEOF_OVERHEAD + b_size; bi++; b_cursor = 0;
+
+    } else if (a_rle && b_rle) {
+      /* ---- Both RLE: merge set-bit runs in [ov_start, ov_end) ---- */
+      const size_t a_len = __sm_chunk_rle_get_length(&a_chunk);
+      const size_t b_len = __sm_chunk_rle_get_length(&b_chunk);
+
+      /* Clamp each run to the overlap window. */
+      const size_t a_set_end = (size_t)a_start + a_len;
+      const size_t b_set_end = (size_t)b_start + b_len;
+      const size_t as = ov_start > (size_t)a_start ? ov_start : (size_t)a_start;
+      const size_t ae = ov_end < a_set_end ? ov_end : a_set_end;
+      const size_t bs = ov_start > (size_t)b_start ? ov_start : (size_t)b_start;
+      const size_t be = ov_end < b_set_end ? ov_end : b_set_end;
+
+      const bool a_has = as < ae;
+      const bool b_has = bs < be;
+
+      if (a_has && b_has) {
+        const size_t min_s = as < bs ? as : bs;
+        const size_t max_e = ae > be ? ae : be;
+        /* Check if runs overlap or are adjacent. */
+        const size_t earlier_e = as <= bs ? ae : be;
+        const size_t later_s  = as <= bs ? bs : as;
+
+        if (earlier_e >= later_s) {
+          /* Contiguous: single merged RLE. */
+          if (!__sm_append_rle_chunk(&result, (__sm_idx_t)min_s,
+                                     max_e - min_s, max_e - min_s)) goto fail;
+        } else {
+          /* Gap between runs: two separate RLE chunks. */
+          const size_t r1_s = as <= bs ? as : bs;
+          const size_t r1_e = as <= bs ? ae : be;
+          const size_t r2_s = as <= bs ? bs : as;
+          const size_t r2_e = as <= bs ? be : ae;
+          if (!__sm_append_rle_chunk(&result, (__sm_idx_t)r1_s,
+                                     r1_e - r1_s, r1_e - r1_s)) goto fail;
+          if (!__sm_append_rle_chunk(&result, (__sm_idx_t)r2_s,
+                                     r2_e - r2_s, r2_e - r2_s)) goto fail;
+        }
+      } else if (a_has) {
+        if (!__sm_append_rle_chunk(&result, (__sm_idx_t)as,
+                                   ae - as, ae - as)) goto fail;
+      } else if (b_has) {
+        if (!__sm_append_rle_chunk(&result, (__sm_idx_t)bs,
+                                   be - bs, be - bs)) goto fail;
+      }
+      /* else: no set bits in overlap — nothing to emit. */
+
+      a_cursor = ov_end;
+      b_cursor = ov_end;
+      if (a_cursor >= a_end) { ap += SM_SIZEOF_OVERHEAD + a_size; ai++; a_cursor = 0; }
+      if (b_cursor >= b_end) { bp += SM_SIZEOF_OVERHEAD + b_size; bi++; b_cursor = 0; }
+
+    } else {
+      /* ---- Mixed types or misaligned sparse: bit-by-bit OR ---- */
+      for (size_t bit = ov_start; bit < ov_end; bit++) {
+        bool a_set = a_rle
+          ? (bit - (size_t)a_start) < __sm_chunk_rle_get_length(&a_chunk)
+          : __sm_chunk_is_set(&a_chunk, bit - (size_t)a_start);
+        bool b_set = b_rle
+          ? (bit - (size_t)b_start) < __sm_chunk_rle_get_length(&b_chunk)
+          : __sm_chunk_is_set(&b_chunk, bit - (size_t)b_start);
+        if (a_set || b_set) {
+          result = __sm_grow_and_add(result, bit);
+          if (result == NULL) return NULL;
+        }
+      }
+
+      a_cursor = ov_end;
+      b_cursor = ov_end;
+      if (a_cursor >= a_end) { ap += SM_SIZEOF_OVERHEAD + a_size; ai++; a_cursor = 0; }
+      if (b_cursor >= b_end) { bp += SM_SIZEOF_OVERHEAD + b_size; bi++; b_cursor = 0; }
     }
   }
 
-  __sm_coalesce_map(destination);
-  return 0;
+  /* Copy remaining chunks from whichever map is not exhausted. */
+  while (ai < a_count) {
+    const __sm_idx_t start = *(__sm_idx_t *)ap;
+    __sm_chunk_t c;
+    __sm_chunk_init(&c, ap + SM_SIZEOF_OVERHEAD);
+    const size_t sz = __sm_chunk_get_size(&c);
+    if (a_cursor > 0 && a_cursor > (size_t)start) {
+      /* Partially consumed: emit only remaining bits. */
+      const bool rle = SM_IS_CHUNK_RLE(&c);
+      const size_t cap_bits = __sm_chunk_get_capacity(&c);
+      if (!__sm_emit_chunk_bits(&result, &c, rle, start, a_cursor, (size_t)start + cap_bits)) goto fail;
+    } else {
+      if (!__sm_copy_chunk_to_result(&result, ap)) goto fail;
+    }
+    ap += SM_SIZEOF_OVERHEAD + sz;
+    ai++;
+    a_cursor = 0;
+  }
+  while (bi < b_count) {
+    const __sm_idx_t start = *(__sm_idx_t *)bp;
+    __sm_chunk_t c;
+    __sm_chunk_init(&c, bp + SM_SIZEOF_OVERHEAD);
+    const size_t sz = __sm_chunk_get_size(&c);
+    if (b_cursor > 0 && b_cursor > (size_t)start) {
+      const bool rle = SM_IS_CHUNK_RLE(&c);
+      const size_t cap_bits = __sm_chunk_get_capacity(&c);
+      if (!__sm_emit_chunk_bits(&result, &c, rle, start, b_cursor, (size_t)start + cap_bits)) goto fail;
+    } else {
+      if (!__sm_copy_chunk_to_result(&result, bp)) goto fail;
+    }
+    bp += SM_SIZEOF_OVERHEAD + sz;
+    bi++;
+    b_cursor = 0;
+  }
+
+  if (__sm_get_chunk_count(result) == 0) {
+    free(result);
+    return NULL;
+  }
+
+  __sm_coalesce_map(result);
+  return result;
+
+fail:
+  free(result);
+  return NULL;
 }
 
 uint64_t

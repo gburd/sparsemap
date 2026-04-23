@@ -767,20 +767,16 @@ test_api_scan(const MunitParameter params[], void *data)
 static void *
 test_api_split_setup(const MunitParameter params[], void *user_data)
 {
-  uint8_t *buf = munit_calloc(1024, sizeof(uint8_t));
-  assert_ptr_not_null(buf);
-  sparsemap_t *map = (sparsemap_t *)test_api_setup(params, user_data);
-
-  sparsemap_init(map, buf, 1024);
+  (void)params;
+  (void)user_data;
+  sparsemap_t *map = sparsemap(10 * 1024);
+  assert_ptr_not_null(map);
   return (void *)map;
 }
 static void
 test_api_split_tear_down(void *fixture)
 {
-  sparsemap_t *map = (sparsemap_t *)fixture;
-  assert_ptr_not_null(map->m_data);
-  munit_free(map->m_data);
-  test_api_tear_down(fixture);
+  munit_free(fixture);
 }
 static MunitResult
 test_api_split(const MunitParameter params[], void *data)
@@ -796,14 +792,19 @@ test_api_split(const MunitParameter params[], void *data)
   sparsemap_init(&portion, buf, 1024);
 
   size_t amt = populate_map_rle(map, 0, 7, 8178);
+  sparsemap_t *current = map;
   for (uint64_t i = 0; i < amt + 2049; i++) {
     sparsemap_clear(&portion);
-    size_t rank = sparsemap_rank(map, 0, i, true);
-    offset = sparsemap_split(map, i + 1, &portion);
-    assert_true(sparsemap_cardinality(map) == rank);
+    size_t rank = sparsemap_rank(current, 0, i, true);
+    offset = sparsemap_split(current, i + 1, &portion);
+    assert_true(sparsemap_cardinality(current) == rank);
     assert_true(sparsemap_cardinality(&portion) == amt - rank);
-    sparsemap_union(map, &portion);
+    sparsemap_t *merged = sparsemap_union(current, &portion);
+    assert_ptr_not_null(merged);
+    if (current != map) free(current);
+    current = merged;
   }
+  if (current != map) free(current);
 
   sparsemap_clear(map);
   sparsemap_clear(&portion);
@@ -1079,34 +1080,54 @@ test_api_merge(const MunitParameter params[], void *data)
   assert_ptr_not_null(other);
 
   // Merge two empty maps to get an empty map.
-  sparsemap_union(map, other);
+  {
+    sparsemap_t *m = sparsemap_union(map, other);
+    // Both empty: result may be NULL.
+    if (m) free(m);
+  }
 
   // Merge a single set bit in the first chunk into the empty map.
   sparsemap_add(other, 0);
-  sparsemap_union(map, other);
-  assert_true(sparsemap_contains(other, 0));
-  assert_true(sparsemap_contains(map, 0));
+  {
+    sparsemap_t *m = sparsemap_union(map, other);
+    assert_ptr_not_null(m);
+    assert_true(sparsemap_contains(other, 0));
+    assert_true(sparsemap_contains(m, 0));
+    free(m);
+  }
   sparsemap_clear(map);
   sparsemap_clear(other);
 
   // Merge two maps with the same single bit set.
   sparsemap_add(map, 0);
   sparsemap_add(other, 0);
-  sparsemap_union(map, other);
-  assert_true(sparsemap_contains(map, 0));
+  {
+    sparsemap_t *m = sparsemap_union(map, other);
+    assert_ptr_not_null(m);
+    assert_true(sparsemap_contains(m, 0));
+    free(m);
+  }
   sparsemap_clear(map);
   sparsemap_clear(other);
 
   // Merge an empty map with one that has the first bit set.
   sparsemap_add(map, 0);
-  sparsemap_union(map, other);
-  assert_true(sparsemap_contains(map, 0));
+  {
+    sparsemap_t *m = sparsemap_union(map, other);
+    assert_ptr_not_null(m);
+    assert_true(sparsemap_contains(m, 0));
+    free(m);
+  }
   sparsemap_clear(map);
   sparsemap_clear(other);
 
   sparsemap_add(other, 2049);
-  sparsemap_union(map, other);
-  assert_true(sparsemap_contains(map, 2049));
+  {
+    sparsemap_t *m = sparsemap_union(map, other);
+    assert_ptr_not_null(m);
+    assert_true(sparsemap_contains(m, 2049));
+    free(m);
+  }
   sparsemap_clear(map);
   sparsemap_clear(other);
 
@@ -1116,18 +1137,22 @@ test_api_merge(const MunitParameter params[], void *data)
   sparsemap_add(other, 4097);
   sparsemap_add(map, 6113);
   sparsemap_add(other, 8193);
-  sparsemap_union(map, other);
-  assert_true(sparsemap_contains(map, 1));
-  assert_true(sparsemap_contains(map, 2049));
-  assert_true(sparsemap_contains(map, 2050));
-  assert_true(sparsemap_contains(map, 4097));
-  assert_true(sparsemap_contains(map, 6113));
-  assert_true(sparsemap_contains(map, 8193));
-  for (int i = 0; i < 10000; i++) {
-    if (i == 2049 || i == 1 || i == 2050 || i == 4097 || i == 6113 || i == 8193)
-      continue;
-    else
-      assert_false(sparsemap_contains(map, i));
+  {
+    sparsemap_t *m = sparsemap_union(map, other);
+    assert_ptr_not_null(m);
+    assert_true(sparsemap_contains(m, 1));
+    assert_true(sparsemap_contains(m, 2049));
+    assert_true(sparsemap_contains(m, 2050));
+    assert_true(sparsemap_contains(m, 4097));
+    assert_true(sparsemap_contains(m, 6113));
+    assert_true(sparsemap_contains(m, 8193));
+    for (int i = 0; i < 10000; i++) {
+      if (i == 2049 || i == 1 || i == 2050 || i == 4097 || i == 6113 || i == 8193)
+        continue;
+      else
+        assert_false(sparsemap_contains(m, i));
+    }
+    free(m);
   }
   sparsemap_clear(map);
   sparsemap_clear(other);
@@ -1138,12 +1163,16 @@ test_api_merge(const MunitParameter params[], void *data)
   for (int i = 2049; i < 4096; i++) {
     sparsemap_add(other, i);
   }
-  sparsemap_union(map, other);
-  assert(sparsemap_contains(map, 0));
-  assert(sparsemap_contains(map, 2048));
-  assert(sparsemap_contains(map, 8193));
-  for (int i = 2049; i < 4096; i++) {
-    assert(sparsemap_contains(map, i));
+  {
+    sparsemap_t *m = sparsemap_union(map, other);
+    assert_ptr_not_null(m);
+    assert(sparsemap_contains(m, 0));
+    assert(sparsemap_contains(m, 2048));
+    assert(sparsemap_contains(m, 8193));
+    for (int i = 2049; i < 4096; i++) {
+      assert(sparsemap_contains(m, i));
+    }
+    free(m);
   }
   sparsemap_clear(map);
   sparsemap_clear(other);
@@ -1161,9 +1190,13 @@ test_api_merge(const MunitParameter params[], void *data)
       assert_true(sparsemap_contains(other, i));
     }
   }
-  sparsemap_union(map, other);
-  for (int i = 2049; i < 4096; i++) {
-    sparsemap_contains(map, i);
+  {
+    sparsemap_t *m = sparsemap_union(map, other);
+    assert_ptr_not_null(m);
+    for (int i = 2049; i < 4096; i++) {
+      assert_true(sparsemap_contains(m, i));
+    }
+    free(m);
   }
 
   munit_free(other);
