@@ -27,6 +27,14 @@
 #define BMS_CHUNKED_ALLOC_UNIT 64
 
 /*
+ * BMS_DENSE_MAX_NWORDS must be less than 65536 so that dense nwords values
+ * never have bits set in the upper 16 bits, which would be misidentified
+ * as chunked mode by BMS_IS_CHUNKED().
+ */
+_Static_assert(BMS_DENSE_MAX_NWORDS < 65536,
+               "BMS_DENSE_MAX_NWORDS must be < 65536 for mode detection");
+
+/*
  * Memory allocation helpers that abort on failure.
  */
 static inline void *

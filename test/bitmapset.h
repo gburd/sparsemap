@@ -41,6 +41,7 @@ typedef int64_t signedbitmapword;	/* must be the matching signed type */
 typedef struct Bitmapset
 {
 	uint32_t	nwords;			/* mode + size field */
+	uint32_t	_padding;		/* align data[] to 8 bytes for bitmapword access */
 	uint8_t		data[];			/* flexible array: words[] or chunk buffer */
 } Bitmapset;
 
@@ -113,7 +114,7 @@ Bitmapset *bms_offset_members(const Bitmapset *a, int64_t offset);
 bool bms_is_subset(const Bitmapset *a, const Bitmapset *b);
 BMS_Comparison bms_subset_compare(const Bitmapset *a, const Bitmapset *b);
 bool bms_is_member(int64_t x, const Bitmapset *a);
-int64_t bms_member_index(Bitmapset *a, int64_t x);
+int64_t bms_member_index(const Bitmapset *a, int64_t x);
 bool bms_overlap(const Bitmapset *a, const Bitmapset *b);
 bool bms_nonempty_difference(const Bitmapset *a, const Bitmapset *b);
 int64_t bms_singleton_member(const Bitmapset *a);
