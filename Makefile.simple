@@ -136,7 +136,7 @@ $(SOAK_BINARY): $(SOAK_OBJECTS) $(LIB_STATIC)
 bench: $(BENCH_BINARY)
 
 $(BENCH_BINARY): $(BENCH_OBJECTS) $(LIB_STATIC)
-	$(CC) -std=gnu11 -Wall -Wextra -I./include -I./test -O2 -g -fno-omit-frame-pointer -o $@ $(BENCH_OBJECTS) $(LIB_STATIC) $(LDFLAGS) $(LIBS)
+	$(CC) -std=gnu11 -Wall -Wextra -I./include -I./test -O2 -march=native -g -fno-omit-frame-pointer -fno-semantic-interposition -o $@ $(BENCH_OBJECTS) $(LIB_STATIC) $(LDFLAGS) $(LIBS)
 
 test/test_rle_standalone.o: test/test_rle_standalone.c
 	$(CC) -std=gnu11 -Wall -Wextra -I./include -O3 -c -o $@ $<

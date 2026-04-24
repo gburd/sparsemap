@@ -1712,56 +1712,70 @@ bms_difference(const Bitmapset *a, const Bitmapset *b)
 		return r;
 	}
 
-	result = bms_copy(a);
-
-	if (BMS_NWORDS(result) > BMS_NWORDS(b))
+	/*
+	 * An empty result is a very common case, so it's worth optimizing for
+	 * that by checking inline.  This saves us a malloc/free cycle compared
+	 * to checking after-the-fact.  We inline the dense check here rather
+	 * than calling bms_nonempty_difference() so the compiler can keep this
+	 * as a tight loop without the overhead of the chunked code paths in
+	 * the full function.
+	 */
+	if (BMS_NWORDS(a) <= BMS_NWORDS(b))
 	{
-		int			lastnonzero = -1;
+		bool		has_diff = false;
 
 		i = 0;
 		do
 		{
-			BMS_WORDS(result)[i] &= ~BMS_WORDS(b)[i];
+			if ((BMS_WORDS(a)[i] & ~BMS_WORDS(b)[i]) != 0)
+			{
+				has_diff = true;
+				break;
+			}
+		} while (++i < BMS_NWORDS(a));
 
-			if (BMS_WORDS(result)[i] != 0)
-				lastnonzero = i;
-		} while (++i < BMS_NWORDS(b));
-
-		/* Check remaining words of a (untouched by b) */
-		while (i < BMS_NWORDS(result))
-		{
-			if (BMS_WORDS(result)[i] != 0)
-				lastnonzero = i;
-			i++;
-		}
-
-		if (lastnonzero == -1)
-		{
-			pfree(result);
+		if (!has_diff)
 			return NULL;
-		}
-		result->nwords = (uint32_t)(lastnonzero + 1);
+	}
+	/* else: a has more words than b, so there must be a difference */
+
+	/* Copy the left input */
+	result = bms_copy(a);
+
+	/* And remove b's bits from result */
+	if (BMS_NWORDS(result) > BMS_NWORDS(b))
+	{
+		/*
+		 * We'll never need to remove trailing zero words when 'a' has more
+		 * words than 'b' since the early-out above guarantees a non-empty
+		 * result and the additional words must be non-zero.
+		 */
+		i = 0;
+		do
+		{
+			BMS_WORDS(result)[i] &= ~BMS_WORDS(b)[i];
+		} while (++i < BMS_NWORDS(b));
 	}
 	else
 	{
 		int			lastnonzero = -1;
 
+		/* we may need to remove trailing zero words from the result. */
 		i = 0;
 		do
 		{
 			BMS_WORDS(result)[i] &= ~BMS_WORDS(b)[i];
 
+			/* remember the last non-zero word */
 			if (BMS_WORDS(result)[i] != 0)
 				lastnonzero = i;
 		} while (++i < BMS_NWORDS(result));
 
-		if (lastnonzero == -1)
-		{
-			pfree(result);
-			return NULL;
-		}
+		/* trim off trailing zero words */
 		result->nwords = (uint32_t)(lastnonzero + 1);
 	}
+
+	Assert(BMS_NWORDS(result) != 0);
 
 	return result;
 }
