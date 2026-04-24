@@ -135,8 +135,22 @@ $(SOAK_BINARY): $(SOAK_OBJECTS) $(LIB_STATIC)
 
 bench: $(BENCH_BINARY)
 
+BENCH_CFLAGS = -std=gnu11 -Wall -Wextra -I./include -I./test -O2 -march=native -g -fno-omit-frame-pointer -fno-semantic-interposition
+
+# Bench-critical objects need -march=native and -fno-semantic-interposition at
+# compile time (not just link time) so the compiler can inline across the
+# unity-build boundary and use native instructions.
+test/bench_hybrid_wrapper.o: test/bench_hybrid_wrapper.c test/bitmapset.c test/bitmapset.h test/postgres_compat.h
+	$(CC) $(BENCH_CFLAGS) -DBUILDING_OUTSIDE_POSTGRES -c -o $@ $<
+
+test/bitmapset_standalone.o: test/bitmapset_standalone.c test/bitmapset_standalone.h
+	$(CC) $(BENCH_CFLAGS) -DBUILDING_OUTSIDE_POSTGRES -c -o $@ $<
+
+test/bench.o: test/bench.c
+	$(CC) $(BENCH_CFLAGS) -DSPARSEMAP_TESTING -c -o $@ $<
+
 $(BENCH_BINARY): $(BENCH_OBJECTS) $(LIB_STATIC)
-	$(CC) -std=gnu11 -Wall -Wextra -I./include -I./test -O2 -march=native -g -fno-omit-frame-pointer -fno-semantic-interposition -o $@ $(BENCH_OBJECTS) $(LIB_STATIC) $(LDFLAGS) $(LIBS)
+	$(CC) $(BENCH_CFLAGS) -o $@ $(BENCH_OBJECTS) $(LIB_STATIC) $(LDFLAGS) $(LIBS)
 
 test/test_rle_standalone.o: test/test_rle_standalone.c
 	$(CC) -std=gnu11 -Wall -Wextra -I./include -O3 -c -o $@ $<

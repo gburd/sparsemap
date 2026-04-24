@@ -2155,6 +2155,28 @@ bms_subset_compare(const Bitmapset *a, const Bitmapset *b)
 }
 
 /*
+ * bms_is_member_chunked - chunked-mode membership test (cold path)
+ *
+ * Separated from bms_is_member so the compiler can keep the dense hot path
+ * as a lightweight function without register saves for the chunked code.
+ */
+static pg_noinline bool
+bms_is_member_chunked(int64_t x, const Bitmapset *a)
+{
+	uint64_t aligned = bms_get_chunk_aligned_offset((size_t)x);
+	size_t buf_off;
+	int idx = bms_find_chunk(a, aligned, &buf_off);
+
+	if (idx < 0)
+		return false;
+
+	BmsChunk c;
+	bms_init_chunk_at(BMS_BUF(a) + buf_off, &c);
+	size_t within = (size_t)x - (size_t)aligned;
+	return bms_chunk_is_set(&c, within);
+}
+
+/*
  * bms_is_member - is X a member of A?
  */
 bool
@@ -2163,24 +2185,13 @@ bms_is_member(int64_t x, const Bitmapset *a)
 	int64_t		wordnum,
 				bitnum;
 
-	if (x < 0)
+	if (unlikely(x < 0))
 		elog(ERROR, "negative bitmapset member not allowed");
 	if (a == NULL)
 		return false;
 
-	if (BMS_IS_CHUNKED(a))
-	{
-		uint64_t aligned = bms_get_chunk_aligned_offset((size_t)x);
-		size_t buf_off;
-		int idx = bms_find_chunk(a, aligned, &buf_off);
-		if (idx < 0)
-			return false;
-
-		BmsChunk c;
-		bms_init_chunk_at(BMS_BUF(a) + buf_off, &c);
-		size_t within = (size_t)x - (size_t)aligned;
-		return bms_chunk_is_set(&c, within);
-	}
+	if (unlikely(BMS_IS_CHUNKED(a)))
+		return bms_is_member_chunked(x, a);
 
 	wordnum = WORDNUM(x);
 	bitnum = BITNUM(x);
@@ -3106,6 +3117,65 @@ bms_join(Bitmapset *a, Bitmapset *b)
 }
 
 /*
+ * bms_next_member_chunked - chunked-mode next-member search (cold path)
+ *
+ * Separated from bms_next_member so the compiler can keep the dense hot path
+ * as a lightweight function without register saves for the chunked code.
+ */
+static pg_noinline int64_t
+bms_next_member_chunked(const Bitmapset *a, int64_t prevbit)
+{
+	unsigned used = BMS_USED_CHUNKS(a);
+	const uint8_t *p = BMS_BUF(a);
+	int64_t target = prevbit + 1;
+
+	for (unsigned ci = 0; ci < used; ci++)
+	{
+		uint64_t chunk_start = bms_read_chunk_start(p);
+		int64_t chunk_end = (int64_t)chunk_start + BMS_CHUNK_MAX_CAPACITY - 1;
+
+		if (chunk_end < target)
+		{
+			p += bms_chunk_entry_bytes(p);
+			continue;
+		}
+
+		BmsChunk c;
+		bms_init_chunk_at(p, &c);
+
+		bitmapword words[32];
+		int cap_flags[32];
+		bms_expand_chunk_words(&c, words, cap_flags);
+
+		/* Search within this chunk starting from target */
+		int64_t search_from = target;
+		if (search_from < (int64_t)chunk_start)
+			search_from = (int64_t)chunk_start;
+
+		size_t within = (size_t)(search_from - (int64_t)chunk_start);
+		int start_slot = (int)(within / BITS_PER_BITMAPWORD);
+		int start_bit = (int)(within % BITS_PER_BITMAPWORD);
+
+		for (int slot = start_slot; slot < 32; slot++)
+		{
+			bitmapword w = words[slot];
+			if (slot == start_slot)
+				w &= (~(bitmapword)0) << start_bit;
+
+			if (w != 0)
+			{
+				int64_t result = (int64_t)chunk_start + (int64_t)slot * BITS_PER_BITMAPWORD;
+				result += bmw_rightmost_one_pos(w);
+				return result;
+			}
+		}
+
+		p += bms_chunk_entry_bytes(p);
+	}
+	return -2;
+}
+
+/*
  * bms_next_member - find next member after prevbit
  *
  * Returns -2 if no more members.
@@ -3119,57 +3189,8 @@ bms_next_member(const Bitmapset *a, int64_t prevbit)
 	if (a == NULL)
 		return -2;
 
-	if (BMS_IS_CHUNKED(a))
-	{
-		unsigned used = BMS_USED_CHUNKS(a);
-		const uint8_t *p = BMS_BUF(a);
-		int64_t target = prevbit + 1;
-
-		for (unsigned ci = 0; ci < used; ci++)
-		{
-			uint64_t chunk_start = bms_read_chunk_start(p);
-			int64_t chunk_end = (int64_t)chunk_start + BMS_CHUNK_MAX_CAPACITY - 1;
-
-			if (chunk_end < target)
-			{
-				p += bms_chunk_entry_bytes(p);
-				continue;
-			}
-
-			BmsChunk c;
-			bms_init_chunk_at(p, &c);
-
-			bitmapword words[32];
-			int cap_flags[32];
-			bms_expand_chunk_words(&c, words, cap_flags);
-
-			/* Search within this chunk starting from target */
-			int64_t search_from = target;
-			if (search_from < (int64_t)chunk_start)
-				search_from = (int64_t)chunk_start;
-
-			size_t within = (size_t)(search_from - (int64_t)chunk_start);
-			int start_slot = (int)(within / BITS_PER_BITMAPWORD);
-			int start_bit = (int)(within % BITS_PER_BITMAPWORD);
-
-			for (int slot = start_slot; slot < 32; slot++)
-			{
-				bitmapword w = words[slot];
-				if (slot == start_slot)
-					w &= (~(bitmapword)0) << start_bit;
-
-				if (w != 0)
-				{
-					int64_t result = (int64_t)chunk_start + (int64_t)slot * BITS_PER_BITMAPWORD;
-					result += bmw_rightmost_one_pos(w);
-					return result;
-				}
-			}
-
-			p += bms_chunk_entry_bytes(p);
-		}
-		return -2;
-	}
+	if (unlikely(BMS_IS_CHUNKED(a)))
+		return bms_next_member_chunked(a, prevbit);
 
 	nwords = BMS_NWORDS(a);
 	prevbit++;
@@ -3195,6 +3216,103 @@ bms_next_member(const Bitmapset *a, int64_t prevbit)
 }
 
 /*
+ * bms_prev_member_chunked - chunked-mode prev-member search (cold path)
+ *
+ * Separated from bms_prev_member so the compiler can keep the dense hot path
+ * as a lightweight function without register saves for the chunked code.
+ */
+static pg_noinline int64_t
+bms_prev_member_chunked(const Bitmapset *a, int64_t prevbit)
+{
+	unsigned used = BMS_USED_CHUNKS(a);
+	if (used == 0)
+		return -2;
+
+	int64_t target;
+
+	if (prevbit == -1)
+	{
+		/*
+		 * When prevbit == -1, we want the highest member. Set target to
+		 * the last possible bit in the last chunk -- this is a tight upper
+		 * bound without needing to expand the chunk to find the exact max.
+		 */
+		const uint8_t *p = BMS_BUF(a);
+
+		for (unsigned ci = 0; ci < used - 1; ci++)
+			p += bms_chunk_entry_bytes(p);
+
+		uint64_t chunk_start = bms_read_chunk_start(p);
+
+		target = (int64_t)chunk_start + BMS_CHUNK_MAX_CAPACITY - 1;
+	}
+	else
+	{
+		target = prevbit - 1;
+		if (target < 0)
+			return -2;
+	}
+
+	/*
+	 * Walk chunks forward, keeping the highest bit <= target found
+	 * in any chunk.  Since chunks are sorted by start, once a chunk's
+	 * start exceeds target we can stop.  For each candidate chunk we
+	 * scan slots in reverse to find the highest set bit <= target.
+	 * The last chunk that yields a hit gives the final answer.
+	 */
+	const uint8_t *p = BMS_BUF(a);
+	int64_t best = -2;
+
+	for (unsigned ci = 0; ci < used; ci++)
+	{
+		uint64_t chunk_start = bms_read_chunk_start(p);
+
+		if ((int64_t)chunk_start > target)
+			break;
+
+		BmsChunk c;
+		bms_init_chunk_at(p, &c);
+
+		bitmapword words[32];
+		int cap_flags[32];
+		bms_expand_chunk_words(&c, words, cap_flags);
+
+		size_t within_limit;
+
+		if (target >= (int64_t)chunk_start + BMS_CHUNK_MAX_CAPACITY)
+			within_limit = BMS_CHUNK_MAX_CAPACITY - 1;
+		else
+			within_limit = (size_t)(target - (int64_t)chunk_start);
+
+		int end_slot = (int)(within_limit / BITS_PER_BITMAPWORD);
+		int end_bit = (int)(within_limit % BITS_PER_BITMAPWORD);
+
+		for (int slot = end_slot; slot >= 0; slot--)
+		{
+			bitmapword w = words[slot];
+
+			if (slot == end_slot)
+			{
+				int shift = BITS_PER_BITMAPWORD - (end_bit + 1);
+
+				w &= (~(bitmapword)0) >> shift;
+			}
+
+			if (w != 0)
+			{
+				best = (int64_t)chunk_start +
+					   (int64_t)slot * BITS_PER_BITMAPWORD +
+					   bmw_leftmost_one_pos(w);
+				break;
+			}
+		}
+
+		p += bms_chunk_entry_bytes(p);
+	}
+	return best;
+}
+
+/*
  * bms_prev_member - find prev member before prevbit
  *
  * Returns -2 if no more members.
@@ -3208,95 +3326,8 @@ bms_prev_member(const Bitmapset *a, int64_t prevbit)
 	if (a == NULL || prevbit == 0)
 		return -2;
 
-	if (BMS_IS_CHUNKED(a))
-	{
-		unsigned used = BMS_USED_CHUNKS(a);
-		if (used == 0)
-			return -2;
-
-		int64_t target;
-
-		if (prevbit == -1)
-		{
-			/*
-			 * When prevbit == -1, we want the highest member. Set target to
-			 * the last possible bit in the last chunk -- this is a tight upper
-			 * bound without needing to expand the chunk to find the exact max.
-			 */
-			const uint8_t *p = BMS_BUF(a);
-
-			for (unsigned ci = 0; ci < used - 1; ci++)
-				p += bms_chunk_entry_bytes(p);
-
-			uint64_t chunk_start = bms_read_chunk_start(p);
-
-			target = (int64_t)chunk_start + BMS_CHUNK_MAX_CAPACITY - 1;
-		}
-		else
-		{
-			target = prevbit - 1;
-			if (target < 0)
-				return -2;
-		}
-
-		/*
-		 * Walk chunks forward, keeping the highest bit <= target found
-		 * in any chunk.  Since chunks are sorted by start, once a chunk's
-		 * start exceeds target we can stop.  For each candidate chunk we
-		 * scan slots in reverse to find the highest set bit <= target.
-		 * The last chunk that yields a hit gives the final answer.
-		 */
-		const uint8_t *p = BMS_BUF(a);
-		int64_t best = -2;
-
-		for (unsigned ci = 0; ci < used; ci++)
-		{
-			uint64_t chunk_start = bms_read_chunk_start(p);
-
-			if ((int64_t)chunk_start > target)
-				break;
-
-			BmsChunk c;
-			bms_init_chunk_at(p, &c);
-
-			bitmapword words[32];
-			int cap_flags[32];
-			bms_expand_chunk_words(&c, words, cap_flags);
-
-			size_t within_limit;
-
-			if (target >= (int64_t)chunk_start + BMS_CHUNK_MAX_CAPACITY)
-				within_limit = BMS_CHUNK_MAX_CAPACITY - 1;
-			else
-				within_limit = (size_t)(target - (int64_t)chunk_start);
-
-			int end_slot = (int)(within_limit / BITS_PER_BITMAPWORD);
-			int end_bit = (int)(within_limit % BITS_PER_BITMAPWORD);
-
-			for (int slot = end_slot; slot >= 0; slot--)
-			{
-				bitmapword w = words[slot];
-
-				if (slot == end_slot)
-				{
-					int shift = BITS_PER_BITMAPWORD - (end_bit + 1);
-
-					w &= (~(bitmapword)0) >> shift;
-				}
-
-				if (w != 0)
-				{
-					best = (int64_t)chunk_start +
-						   (int64_t)slot * BITS_PER_BITMAPWORD +
-						   bmw_leftmost_one_pos(w);
-					break;
-				}
-			}
-
-			p += bms_chunk_entry_bytes(p);
-		}
-		return best;
-	}
+	if (unlikely(BMS_IS_CHUNKED(a)))
+		return bms_prev_member_chunked(a, prevbit);
 
 	Assert(prevbit <= (int64_t)BMS_NWORDS(a) * BITS_PER_BITMAPWORD);
 	Assert(prevbit >= -1);

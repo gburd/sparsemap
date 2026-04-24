@@ -97,10 +97,9 @@ pfree(void *ptr)
  */
 #define ERROR 21
 
-#define elog(level, ...) \
+#define elog(level, fmt, ...) \
 	do { \
-		fprintf(stderr, "ERROR: " __VA_ARGS__); \
-		fprintf(stderr, "\n"); \
+		fprintf(stderr, "ERROR: " fmt "\n", ##__VA_ARGS__); \
 		abort(); \
 	} while (0)
 
@@ -115,6 +114,8 @@ pfree(void *ptr)
  * ----------------------------------------------------------------
  */
 #define unlikely(x)		__builtin_expect(!!(x), 0)
+#define likely(x)		__builtin_expect(!!(x), 1)
+#define pg_noinline		__attribute__((noinline))
 
 #define Min(a, b)		((a) < (b) ? (a) : (b))
 #define Max(a, b)		((a) > (b) ? (a) : (b))
