@@ -2757,7 +2757,11 @@ bms_prev_member(const Bitmapset *a, int64_t prevbit)
 		int64_t target;
 		if (prevbit == -1)
 		{
-			/* Start from the very last bit of the last chunk */
+			/*
+			 * When prevbit == -1, we want the highest member. Set target to
+			 * the last possible bit in the last chunk -- this is a tight upper
+			 * bound without needing to expand the chunk to find the exact max.
+			 */
 			const uint8_t *p = BMS_BUF(a);
 			for (unsigned ci = 0; ci < used - 1; ci++)
 				p += bms_chunk_entry_bytes(p);
@@ -2858,7 +2862,25 @@ bms_prev_member(const Bitmapset *a, int64_t prevbit)
 }
 
 /*
+ * Hash a uint64_t value into an FNV-1a accumulator using canonical
+ * (little-endian) byte order via shifts, so the result is identical
+ * regardless of the host's native byte order.
+ */
+static inline void
+fnv1a_hash_uint64(uint32_t *hash, uint64_t val)
+{
+	for (int i = 0; i < 8; i++)
+	{
+		*hash ^= (unsigned char)(val >> (i * 8));
+		*hash *= 16777619u;
+	}
+}
+
+/*
  * bms_hash_value - compute a hash key for a Bitmapset (FNV-1a)
+ *
+ * Byte extraction uses shifts rather than pointer casts to ensure
+ * identical results on big-endian and little-endian machines.
  */
 uint32_t
 bms_hash_value(const Bitmapset *a)
@@ -2885,24 +2907,10 @@ bms_hash_value(const Bitmapset *a)
 			int cap_flags[32];
 			bms_expand_chunk_words(&c, words, cap_flags);
 
-			/* Hash chunk start */
-			unsigned char *sb = (unsigned char *)&chunk_start;
-			for (size_t j = 0; j < sizeof(chunk_start); j++)
-			{
-				hash ^= sb[j];
-				hash *= 16777619u;
-			}
+			fnv1a_hash_uint64(&hash, chunk_start);
 
-			/* Hash words */
 			for (int w = 0; w < 32; w++)
-			{
-				unsigned char *wb = (unsigned char *)&words[w];
-				for (size_t j = 0; j < sizeof(__sm_bitvec_t); j++)
-				{
-					hash ^= wb[j];
-					hash *= 16777619u;
-				}
-			}
+				fnv1a_hash_uint64(&hash, words[w]);
 
 			p += bms_chunk_entry_bytes(p);
 		}
@@ -2912,14 +2920,7 @@ bms_hash_value(const Bitmapset *a)
 	uint32_t	hash = 2166136261u;
 
 	for (int i = 0; i < BMS_NWORDS(a); i++)
-	{
-		unsigned char *bytes = (unsigned char *) &BMS_WORDS(a)[i];
+		fnv1a_hash_uint64(&hash, BMS_WORDS(a)[i]);
 
-		for (size_t j = 0; j < sizeof(bitmapword); j++)
-		{
-			hash ^= bytes[j];
-			hash *= 16777619u;
-		}
-	}
 	return hash;
 }

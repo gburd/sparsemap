@@ -84,6 +84,38 @@ typedef enum
 #define BITMAPSET_SIZE(nwords)	\
 	(offsetof(Bitmapset, data) + (nwords) * sizeof(bitmapword))
 
+#ifndef WORDNUM
+#define WORDNUM(x)	((x) / BITS_PER_BITMAPWORD)
+#endif
+
+/*
+ * Alignment attribute for stack-allocated Bitmapset buffers.
+ */
+#define BMS_ALIGN_ATTR __attribute__((aligned(8)))
+
+/*
+ * BMS_LOCAL -- declare a stack-allocated dense Bitmapset.
+ *
+ * Usage:
+ *     BMS_LOCAL(tmp, 2048);   // tmp covers bits 0..2048
+ *     bms_add_member(tmp, 42);
+ *     // ... use tmp as a read-only operand or in non-reallocating ops ...
+ *     // Do NOT pfree(tmp) or pass to functions that may repalloc.
+ *
+ * The variable `name` is a Bitmapset* pointing to an aligned stack buffer.
+ * Dense mode only. maxbit must be a compile-time constant for VLAs to be
+ * avoided. The buffer is zeroed.
+ *
+ * WARNING: Functions that grow the set (bms_add_member beyond maxbit,
+ * bms_union, etc.) may repalloc, which will crash on a stack pointer.
+ * Only use for bounded, known-range operations.
+ */
+#define BMS_LOCAL(name, maxbit)                                              \
+    uint8_t name##__buf[BITMAPSET_SIZE(WORDNUM(maxbit) + 1)]                \
+        BMS_ALIGN_ATTR;                                                      \
+    memset(name##__buf, 0, sizeof(name##__buf));                             \
+    Bitmapset *name = (Bitmapset *)name##__buf;                              \
+    name->nwords = (uint32_t)(WORDNUM(maxbit) + 1)
 
 /*
  * Function prototypes -- all use int64_t for member indices
