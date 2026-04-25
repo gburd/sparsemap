@@ -434,90 +434,26 @@ static void run_cutoff_sweep(void) {
 }
 
 /* ===================================================================
- * BMS_LOCAL self-test
- * =================================================================== */
-
-static void test_bms_local(void) {
-    fprintf(stderr, "Testing BMS_LOCAL macro...\n");
-
-    /* Basic: create a stack-allocated set covering bits 0..255 */
-    {
-        BMS_LOCAL(tmp, 255);
-        assert(!BMS_IS_CHUNKED(tmp));
-        assert(bms_num_members(tmp) == 0);
-
-        /* Add some members */
-        BMS_WORDS(tmp)[0] |= ((bitmapword)1 << 0);   /* bit 0 */
-        BMS_WORDS(tmp)[0] |= ((bitmapword)1 << 42);   /* bit 42 */
-        BMS_WORDS(tmp)[1] |= ((bitmapword)1 << 1);    /* bit 65 */
-        BMS_WORDS(tmp)[3] |= ((bitmapword)1 << 60);   /* bit 252 */
-
-        assert(bms_is_member(0, tmp));
-        assert(bms_is_member(42, tmp));
-        assert(bms_is_member(65, tmp));
-        assert(bms_is_member(252, tmp));
-        assert(!bms_is_member(1, tmp));
-        assert(!bms_is_member(255, tmp));
-        assert(bms_num_members(tmp) == 4);
-
-        /* Use as const operand in bms_intersect */
-        Bitmapset *heap_set = bms_make_singleton(42);
-        heap_set = bms_add_member(heap_set, 100);
-        Bitmapset *inter = bms_intersect(tmp, heap_set);
-        assert(bms_num_members(inter) == 1);
-        assert(bms_is_member(42, inter));
-        bms_free(inter);
-        bms_free(heap_set);
-    }
-
-    /* Larger: cover bits 0..2047 */
-    {
-        BMS_LOCAL(big, 2047);
-        assert(BMS_NWORDS(big) == 32);
-
-        /* Set bits via word manipulation */
-        for (int w = 0; w < 32; w++)
-            BMS_WORDS(big)[w] = (bitmapword)1 << (w & 63);
-
-        assert(bms_num_members(big) == 32);
-        assert(bms_is_member(0, big));      /* word 0, bit 0 */
-        assert(bms_is_member(65, big));     /* word 1, bit 1 */
-        assert(bms_is_member(130, big));    /* word 2, bit 2 */
-    }
-
-    fprintf(stderr, "  BMS_LOCAL: all tests passed.\n");
-}
-
-/* ===================================================================
  * Main
  * =================================================================== */
 
 int main(int argc, char **argv) {
     bool do_offset = true;
     bool do_cutoff = true;
-    bool do_test_local = false;
 
     if (argc > 1) {
         if (strcmp(argv[1], "--offset") == 0) {
             do_cutoff = false;
         } else if (strcmp(argv[1], "--cutoff") == 0) {
             do_offset = false;
-        } else if (strcmp(argv[1], "--test-local") == 0) {
-            do_offset = false;
-            do_cutoff = false;
-            do_test_local = true;
         } else if (strcmp(argv[1], "--help") == 0) {
-            fprintf(stderr, "Usage: %s [--offset|--cutoff|--test-local]\n", argv[0]);
+            fprintf(stderr, "Usage: %s [--offset|--cutoff]\n", argv[0]);
             fprintf(stderr, "  --offset      Only run the offset sweep (dense->chunked transition)\n");
             fprintf(stderr, "  --cutoff      Only run the cutoff sweep (optimal transition point)\n");
-            fprintf(stderr, "  --test-local  Run BMS_LOCAL stack-allocation self-test\n");
             fprintf(stderr, "  (default)     Run both offset and cutoff analyses\n");
             return 0;
         }
     }
-
-    if (do_test_local)
-        test_bms_local();
 
     if (do_offset)
         run_offset_sweep();

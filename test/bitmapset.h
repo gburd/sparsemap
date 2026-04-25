@@ -67,13 +67,7 @@ typedef enum
  * Mode detection and access macros
  */
 #define BMS_IS_CHUNKED(a)		((a)->nwords >> 16 != 0)
-static inline int
-BMS_NWORDS_FN(const Bitmapset *a)
-{
-	Assert(!BMS_IS_CHUNKED(a));
-	return (int)a->nwords;
-}
-#define BMS_NWORDS(a)			BMS_NWORDS_FN(a)
+#define BMS_NWORDS(a)			((int)(a)->nwords)	/* dense mode only */
 #define BMS_ALLOC_CHUNKS(a)		((a)->nwords >> 16)
 #define BMS_USED_CHUNKS(a)		((a)->nwords & 0xFFFFu)
 #define BMS_WORDS(a)			((bitmapword *)((a)->data))
@@ -108,37 +102,14 @@ BMS_NWORDS_FN(const Bitmapset *a)
 #endif
 
 /*
- * Alignment attribute for stack-allocated Bitmapset buffers.
+ * Alignment for stack arrays used in chunked-mode merge/compare loops.
+ * Aligning to 32 bytes enables AVX2 auto-vectorization of word-at-a-time ops.
  */
 #ifdef BUILDING_OUTSIDE_POSTGRES
-#define BMS_ALIGN_ATTR __attribute__((aligned(8)))
+#define BMS_SIMD_ALIGN __attribute__((aligned(32)))
 #else
-#define BMS_ALIGN_ATTR pg_attribute_aligned(8)
+#define BMS_SIMD_ALIGN pg_attribute_aligned(32)
 #endif
-
-/*
- * BMS_LOCAL -- declare a stack-allocated dense Bitmapset.
- *
- * Usage:
- *     BMS_LOCAL(tmp, 2048);   // tmp covers bits 0..2048
- *     bms_add_member(tmp, 42);
- *     // ... use tmp as a read-only operand or in non-reallocating ops ...
- *     // Do NOT pfree(tmp) or pass to functions that may repalloc.
- *
- * The variable `name` is a Bitmapset* pointing to an aligned stack buffer.
- * Dense mode only. maxbit must be a compile-time constant for VLAs to be
- * avoided. The buffer is zeroed.
- *
- * WARNING: Functions that grow the set (bms_add_member beyond maxbit,
- * bms_union, etc.) may repalloc, which will crash on a stack pointer.
- * Only use for bounded, known-range operations.
- */
-#define BMS_LOCAL(name, maxbit)                                              \
-    uint8_t name##__buf[BITMAPSET_SIZE(WORDNUM(maxbit) + 1)]                \
-        BMS_ALIGN_ATTR;                                                      \
-    memset(name##__buf, 0, sizeof(name##__buf));                             \
-    Bitmapset *name = (Bitmapset *)name##__buf;                              \
-    name->nwords = (uint32_t)(WORDNUM(maxbit) + 1)
 
 /*
  * Function prototypes
