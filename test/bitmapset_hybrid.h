@@ -15,7 +15,7 @@
  *
  * Detection: (nwords >> 16 != 0) -> chunked mode
  *
- * All member-index parameters are int64_t (widened from int).
+ * Public API uses int for member indices (matching PostgreSQL convention).
  * NULL represents the empty set.
  *
  *-------------------------------------------------------------------------
@@ -118,44 +118,48 @@ typedef enum
     name->nwords = (uint32_t)(WORDNUM(maxbit) + 1)
 
 /*
- * Function prototypes -- all use int64_t for member indices
+ * Function prototypes
+ *
+ * Public API uses int for member indices (matching PostgreSQL convention).
+ * Internally, chunked-mode helpers widen to int64_t for chunk-start
+ * arithmetic where needed.
  */
 
 Bitmapset *bms_copy(const Bitmapset *a);
 bool bms_equal(const Bitmapset *a, const Bitmapset *b);
 int bms_compare(const Bitmapset *a, const Bitmapset *b);
-Bitmapset *bms_make_singleton(int64_t x);
+Bitmapset *bms_make_singleton(int x);
 void bms_free(Bitmapset *a);
 
 Bitmapset *bms_union(const Bitmapset *a, const Bitmapset *b);
 Bitmapset *bms_intersect(const Bitmapset *a, const Bitmapset *b);
 Bitmapset *bms_difference(const Bitmapset *a, const Bitmapset *b);
-Bitmapset *bms_offset_members(const Bitmapset *a, int64_t offset);
+Bitmapset *bms_offset_members(const Bitmapset *a, int offset);
 bool bms_is_subset(const Bitmapset *a, const Bitmapset *b);
 BMS_Comparison bms_subset_compare(const Bitmapset *a, const Bitmapset *b);
-bool bms_is_member(int64_t x, const Bitmapset *a);
-int64_t bms_member_index(const Bitmapset *a, int64_t x);
+bool bms_is_member(int x, const Bitmapset *a);
+int bms_member_index(const Bitmapset *a, int x);
 bool bms_overlap(const Bitmapset *a, const Bitmapset *b);
 bool bms_nonempty_difference(const Bitmapset *a, const Bitmapset *b);
-int64_t bms_singleton_member(const Bitmapset *a);
-bool bms_get_singleton_member(const Bitmapset *a, int64_t *member);
-int64_t bms_num_members(const Bitmapset *a);
+int bms_singleton_member(const Bitmapset *a);
+bool bms_get_singleton_member(const Bitmapset *a, int *member);
+int bms_num_members(const Bitmapset *a);
 
 BMS_Membership bms_membership(const Bitmapset *a);
 
 /* These routines recycle (modify or free) their non-const inputs: */
-Bitmapset *bms_add_member(Bitmapset *a, int64_t x);
-Bitmapset *bms_del_member(Bitmapset *a, int64_t x);
+Bitmapset *bms_add_member(Bitmapset *a, int x);
+Bitmapset *bms_del_member(Bitmapset *a, int x);
 Bitmapset *bms_add_members(Bitmapset *a, const Bitmapset *b);
 Bitmapset *bms_replace_members(Bitmapset *a, const Bitmapset *b);
-Bitmapset *bms_add_range(Bitmapset *a, int64_t lower, int64_t upper);
+Bitmapset *bms_add_range(Bitmapset *a, int lower, int upper);
 Bitmapset *bms_int_members(Bitmapset *a, const Bitmapset *b);
 Bitmapset *bms_del_members(Bitmapset *a, const Bitmapset *b);
 Bitmapset *bms_join(Bitmapset *a, Bitmapset *b);
 
 /* Iteration */
-int64_t bms_next_member(const Bitmapset *a, int64_t prevbit);
-int64_t bms_prev_member(const Bitmapset *a, int64_t prevbit);
+int bms_next_member(const Bitmapset *a, int prevbit);
+int bms_prev_member(const Bitmapset *a, int prevbit);
 
 /* Hashing */
 uint32_t bms_hash_value(const Bitmapset *a);

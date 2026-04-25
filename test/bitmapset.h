@@ -14,8 +14,9 @@
  *
  * Detection: BMS_IS_CHUNKED(a) tests (nwords >> 16 != 0)
  *
- * All member-index parameters use int64_t (widened from int) to support
- * chunked mode addressing.  NULL represents the empty set.
+ * The data[] flexible array member is cast to bitmapword* in dense mode
+ * (safe under -fno-strict-aliasing, which PG requires) and accessed as
+ * raw bytes in chunked mode.  NULL represents the empty set.
  *
  * Copyright (c) 2003-2026, PostgreSQL Global Development Group
  * Chunked storage: Copyright (c) 2024-2026, Gregory Burd <greg@burd.me>
@@ -41,8 +42,8 @@ typedef int64_t signedbitmapword;	/* must be the matching signed type */
 typedef struct Bitmapset
 {
 	uint32_t	nwords;			/* mode + size field */
-	uint32_t	_padding;		/* align data[] to 8 bytes for bitmapword access */
-	uint8_t		data[];			/* flexible array: words[] or chunk buffer */
+	uint32_t	_padding;		/* align data to 8 bytes for bitmapword access */
+	uint8_t		data[];			/* dense: cast to bitmapword*; chunked: byte buffer */
 } Bitmapset;
 
 /* result of bms_subset_compare */
@@ -66,7 +67,13 @@ typedef enum
  * Mode detection and access macros
  */
 #define BMS_IS_CHUNKED(a)		((a)->nwords >> 16 != 0)
-#define BMS_NWORDS(a)			((int)(a)->nwords)		/* dense only */
+static inline int
+BMS_NWORDS_FN(const Bitmapset *a)
+{
+	Assert(!BMS_IS_CHUNKED(a));
+	return (int)a->nwords;
+}
+#define BMS_NWORDS(a)			BMS_NWORDS_FN(a)
 #define BMS_ALLOC_CHUNKS(a)		((a)->nwords >> 16)
 #define BMS_USED_CHUNKS(a)		((a)->nwords & 0xFFFFu)
 #define BMS_WORDS(a)			((bitmapword *)((a)->data))
@@ -134,45 +141,49 @@ typedef enum
     name->nwords = (uint32_t)(WORDNUM(maxbit) + 1)
 
 /*
- * Function prototypes -- all use int64_t for member indices
+ * Function prototypes
+ *
+ * Public API uses int for member indices (matching PostgreSQL convention).
+ * Internally, chunked-mode helpers widen to int64_t for chunk-start
+ * arithmetic where needed.
  */
 
 Bitmapset *bms_copy(const Bitmapset *a);
 bool bms_equal(const Bitmapset *a, const Bitmapset *b);
 int bms_compare(const Bitmapset *a, const Bitmapset *b);
-Bitmapset *bms_make_singleton(int64_t x);
+Bitmapset *bms_make_singleton(int x);
 void bms_free(Bitmapset *a);
 
 Bitmapset *bms_union(const Bitmapset *a, const Bitmapset *b);
 Bitmapset *bms_intersect(const Bitmapset *a, const Bitmapset *b);
 Bitmapset *bms_difference(const Bitmapset *a, const Bitmapset *b);
-Bitmapset *bms_offset_members(const Bitmapset *a, int64_t offset);
+Bitmapset *bms_offset_members(const Bitmapset *a, int offset);
 bool bms_is_subset(const Bitmapset *a, const Bitmapset *b);
 BMS_Comparison bms_subset_compare(const Bitmapset *a, const Bitmapset *b);
-bool bms_is_member(int64_t x, const Bitmapset *a);
-int64_t bms_member_index(const Bitmapset *a, int64_t x);
+bool bms_is_member(int x, const Bitmapset *a);
+int bms_member_index(const Bitmapset *a, int x);
 bool bms_overlap(const Bitmapset *a, const Bitmapset *b);
 bool bms_nonempty_difference(const Bitmapset *a, const Bitmapset *b);
-int64_t bms_singleton_member(const Bitmapset *a);
-bool bms_get_singleton_member(const Bitmapset *a, int64_t *member);
-int64_t bms_num_members(const Bitmapset *a);
+int bms_singleton_member(const Bitmapset *a);
+bool bms_get_singleton_member(const Bitmapset *a, int *member);
+int bms_num_members(const Bitmapset *a);
 
 /* optimized tests when we don't need to know exact membership count */
 BMS_Membership bms_membership(const Bitmapset *a);
 
 /* these routines recycle (modify or free) their non-const inputs */
-Bitmapset *bms_add_member(Bitmapset *a, int64_t x);
-Bitmapset *bms_del_member(Bitmapset *a, int64_t x);
+Bitmapset *bms_add_member(Bitmapset *a, int x);
+Bitmapset *bms_del_member(Bitmapset *a, int x);
 Bitmapset *bms_add_members(Bitmapset *a, const Bitmapset *b);
 Bitmapset *bms_replace_members(Bitmapset *a, const Bitmapset *b);
-Bitmapset *bms_add_range(Bitmapset *a, int64_t lower, int64_t upper);
+Bitmapset *bms_add_range(Bitmapset *a, int lower, int upper);
 Bitmapset *bms_int_members(Bitmapset *a, const Bitmapset *b);
 Bitmapset *bms_del_members(Bitmapset *a, const Bitmapset *b);
 Bitmapset *bms_join(Bitmapset *a, Bitmapset *b);
 
 /* support for iterating through the integer elements of a set */
-int64_t bms_next_member(const Bitmapset *a, int64_t prevbit);
-int64_t bms_prev_member(const Bitmapset *a, int64_t prevbit);
+int bms_next_member(const Bitmapset *a, int prevbit);
+int bms_prev_member(const Bitmapset *a, int prevbit);
 
 /* support for hashtables using Bitmapsets as keys */
 uint32_t bms_hash_value(const Bitmapset *a);

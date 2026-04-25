@@ -98,7 +98,7 @@ typedef __HybridBitmapset HybridBitmapset;
  */
 
 HybridBitmapset *
-hybrid_bms_add_member(HybridBitmapset *a, int64_t x)
+hybrid_bms_add_member(HybridBitmapset *a, int x)
 {
 	return __hybrid_bms_add_member(a, x);
 }
@@ -110,12 +110,12 @@ hybrid_bms_free(HybridBitmapset *a)
 }
 
 bool
-hybrid_bms_is_member(int64_t x, const HybridBitmapset *a)
+hybrid_bms_is_member(int x, const HybridBitmapset *a)
 {
 	return __hybrid_bms_is_member(x, a);
 }
 
-int64_t
+int
 hybrid_bms_num_members(const HybridBitmapset *a)
 {
 	return __hybrid_bms_num_members(a);
@@ -139,14 +139,14 @@ hybrid_bms_difference(const HybridBitmapset *a, const HybridBitmapset *b)
 	return __hybrid_bms_difference(a, b);
 }
 
-int64_t
-hybrid_bms_next_member(const HybridBitmapset *a, int64_t prevbit)
+int
+hybrid_bms_next_member(const HybridBitmapset *a, int prevbit)
 {
 	return __hybrid_bms_next_member(a, prevbit);
 }
 
 HybridBitmapset *
-hybrid_bms_offset_members(const HybridBitmapset *a, int64_t offset)
+hybrid_bms_offset_members(const HybridBitmapset *a, int offset)
 {
 	return __hybrid_bms_offset_members(a, offset);
 }

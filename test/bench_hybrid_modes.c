@@ -120,14 +120,14 @@ static bench_result_t bench_pattern(int64_t *bits, size_t count) {
     for (int i = 0; i < WARMUP; i++) {
         Bitmapset *s = NULL;
         for (size_t j = 0; j < count; j++)
-            s = bms_add_member(s, bits[j]);
+            s = bms_add_member(s, (int)bits[j]);
         bms_free(s);
     }
     for (int i = 0; i < ITERS; i++) {
         uint64_t t0 = now_ns();
         Bitmapset *s = NULL;
         for (size_t j = 0; j < count; j++)
-            s = bms_add_member(s, bits[j]);
+            s = bms_add_member(s, (int)bits[j]);
         uint64_t t1 = now_ns();
         times[i] = (double)(t1 - t0);
         bms_free(s);
@@ -138,7 +138,7 @@ static bench_result_t bench_pattern(int64_t *bits, size_t count) {
     /* Build the handle for query benchmarks */
     Bitmapset *handle = NULL;
     for (size_t j = 0; j < count; j++)
-        handle = bms_add_member(handle, bits[j]);
+        handle = bms_add_member(handle, (int)bits[j]);
 
     result.is_chunked = (handle != NULL && BMS_IS_CHUNKED(handle));
     if (handle != NULL) {
@@ -154,14 +154,14 @@ static bench_result_t bench_pattern(int64_t *bits, size_t count) {
     for (int i = 0; i < WARMUP; i++) {
         volatile bool sink = false;
         for (size_t j = 0; j < check_count; j++)
-            sink = bms_is_member(bits[j], handle);
+            sink = bms_is_member((int)bits[j], handle);
         (void)sink;
     }
     for (int i = 0; i < ITERS; i++) {
         uint64_t t0 = now_ns();
         volatile bool sink = false;
         for (size_t j = 0; j < check_count; j++)
-            sink = bms_is_member(bits[j], handle);
+            sink = bms_is_member((int)bits[j], handle);
         uint64_t t1 = now_ns();
         times[i] = (double)(t1 - t0);
         (void)sink;
@@ -171,12 +171,12 @@ static bench_result_t bench_pattern(int64_t *bits, size_t count) {
 
     /* --- Cardinality benchmark --- */
     for (int i = 0; i < WARMUP; i++) {
-        volatile int64_t c = bms_num_members(handle);
+        volatile int c = bms_num_members(handle);
         (void)c;
     }
     for (int i = 0; i < ITERS; i++) {
         uint64_t t0 = now_ns();
-        volatile int64_t c = bms_num_members(handle);
+        volatile int c = bms_num_members(handle);
         uint64_t t1 = now_ns();
         times[i] = (double)(t1 - t0);
         (void)c;
@@ -231,13 +231,13 @@ static bench_result_t bench_pattern(int64_t *bits, size_t count) {
 
     /* --- Iterate benchmark --- */
     for (int i = 0; i < WARMUP; i++) {
-        int64_t x = -1;
+        int x = -1;
         while ((x = bms_next_member(handle, x)) >= 0)
             ;
     }
     for (int i = 0; i < ITERS; i++) {
         uint64_t t0 = now_ns();
-        int64_t x = -1;
+        int x = -1;
         while ((x = bms_next_member(handle, x)) >= 0)
             ;
         uint64_t t1 = now_ns();

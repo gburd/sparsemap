@@ -3,12 +3,34 @@
  * bitmapset.c
  *	  Hybrid Bitmapset: PostgreSQL Bitmapset API with dual-mode storage
  *
+ * This file implements a drop-in replacement for PostgreSQL's Bitmapset
+ * with dual-mode storage:
+ *
  * Dense mode:   Traditional word-array storage with uint32_t nwords header
- *               and uint8_t data[] flexible array, for sets up to 262143.
+ *               and uint8_t data[] flexible array, for sets up to 262143
+ *               (BMS_DENSE_MAX_BIT, i.e. 4096 words * 64 bits).
  *
  * Chunked mode: RLE + sparse chunk encoding (from sparsemap) for large or
  *               sparse sets.  Chunks are stored inline in the data[] buffer
  *               with the nwords field split into (alloc_chunks << 16 | used).
+ *
+ * Mode detection: BMS_IS_CHUNKED(a) tests (nwords >> 16 != 0).  Dense nwords
+ * is always < 65536, so no false positives occur.
+ *
+ * Transition: Dense -> Chunked happens when a member exceeds BMS_DENSE_MAX_BIT
+ * (currently 262143).  The transition is one-way: once chunked, a set stays
+ * chunked for its lifetime.
+ *
+ * Stack usage: The heaviest stack consumer is bms_chunked_merge(), which uses
+ * ~768 bytes at function scope (wa[32], wb[32], wr[32]) plus ~384 bytes in
+ * the overlapping-chunk block (cfa, cfb, cfr, vecs).  Dense-mode callers
+ * never enter these code paths.
+ *
+ * Thread safety: Same as the existing PostgreSQL Bitmapset -- none.  Callers
+ * must coordinate access externally.
+ *
+ * Memory allocation: Uses palloc/repalloc.  On OOM, palloc calls elog(ERROR)
+ * and does not return.  This matches the existing PG Bitmapset contract.
  *
  * Copyright (c) 2003-2026, PostgreSQL Global Development Group
  * Chunked storage: Copyright (c) 2024-2026, Gregory Burd <greg@burd.me>
@@ -62,14 +84,49 @@ StaticAssertDecl(BMS_DENSE_MAX_NWORDS < 65536,
 #endif
 
 /* ----------------------------------------------------------------
- * Chunk codec types and constants
+ * Chunk Codec Binary Format
  *
- * Inlined from chunk_codec.h with SM_* -> BMS_* renames.
+ * Each chunk entry in the buffer consists of:
+ *
+ *   [start_value: 8 bytes]  uint64_t base offset (first bit in chunk / 64)
+ *   [descriptor:  8 bytes]  bitmapword with 2-bit flags per vector slot
+ *   [vectors:     N*8 bytes] 0-32 payload bitmapwords
+ *
+ * The descriptor word encodes 32 slots (2 bits each, LSB first):
+ *   00 = all zeros  (slot omitted from vectors)
+ *   01 = all ones   (slot omitted, implied ~0)
+ *   10 = mixed      (slot present in vectors array)
+ *   11 = reserved
+ *
+ * Chunk capacity: 32 slots * 64 bits = 2048 bits per chunk.
+ * Chunk entries are sorted by start_value (ascending, no duplicates).
+ *
+ * The nwords field in chunked mode: (alloc_chunks << 16) | used_chunks
+ * where alloc_chunks is in units of BMS_CHUNKED_ALLOC_UNIT bytes.
+ *
+ * Memory: palloc/repalloc are used for allocation. On OOM, palloc calls
+ * elog(ERROR) and does not return -- no NULL-return checks needed.
+ *
+ * Types and constants inlined from chunk_codec.h with SM_* -> BMS_*
+ * renames.
  * ---------------------------------------------------------------- */
 
 typedef struct {
-	bitmapword *m_data;
+	const uint8_t *m_data;		/* points to descriptor word in data[] */
 } BmsChunk;
+
+/*
+ * Read a bitmapword from the chunk buffer at the given word offset.
+ * Uses memcpy to avoid strict-aliasing violations when reading
+ * bitmapword values from the uint8_t chunk buffer.
+ */
+static inline bitmapword
+bms_chunk_read_word(const BmsChunk *chunk, int offset)
+{
+	bitmapword w;
+	memcpy(&w, chunk->m_data + offset * sizeof(bitmapword), sizeof(w));
+	return w;
+}
 
 enum
 {
@@ -123,29 +180,29 @@ enum
  * Chunk codec static functions
  * ---------------------------------------------------------------- */
 
-static inline bool
+static bool
 bms_chunk_is_rle(const BmsChunk *chunk)
 {
-	const bitmapword w = chunk->m_data[0];
+	const bitmapword w = bms_chunk_read_word(chunk, 0);
 	return (w & BMS_RLE_FLAGS_MASK) == BMS_RLE_FLAGS;
 }
 
-static inline size_t
+static size_t
 bms_chunk_rle_get_capacity(const BmsChunk *chunk)
 {
-	bitmapword w = chunk->m_data[0] & (bitmapword)BMS_RLE_CAPACITY_MASK;
+	bitmapword w = bms_chunk_read_word(chunk, 0) & (bitmapword)BMS_RLE_CAPACITY_MASK;
 	w >>= 31;
 	return w;
 }
 
-static inline size_t
+static size_t
 bms_chunk_rle_get_length(const BmsChunk *chunk)
 {
-	const bitmapword w = chunk->m_data[0] & (bitmapword)BMS_RLE_LENGTH_MASK;
+	const bitmapword w = bms_chunk_read_word(chunk, 0) & (bitmapword)BMS_RLE_LENGTH_MASK;
 	return w;
 }
 
-static inline size_t
+static size_t
 bms_chunk_calc_vector_size(const uint8_t b)
 {
 	static int lookup[] = {
@@ -170,14 +227,15 @@ bms_chunk_calc_vector_size(const uint8_t b)
 	return lookup[b];
 }
 
-static inline size_t
+static size_t
 bms_chunk_get_position(const BmsChunk *chunk, size_t bv)
 {
 	size_t position = 0;
-	uint8_t *p = (uint8_t *)chunk->m_data;
+	const uint8_t *p = chunk->m_data;
 
 	if (!bms_chunk_is_rle(chunk))
 	{
+		bitmapword desc = bms_chunk_read_word(chunk, 0);
 		const size_t num_bytes = bv / ((size_t)BMS_FLAGS_PER_INDEX_BYTE * BITS_PER_BITMAPWORD);
 		for (size_t i = 0; i < num_bytes; i++, p++)
 		{
@@ -187,7 +245,7 @@ bms_chunk_get_position(const BmsChunk *chunk, size_t bv)
 		bv -= num_bytes * BMS_FLAGS_PER_INDEX_BYTE;
 		for (size_t i = 0; i < bv; i++)
 		{
-			const size_t flags = BMS_CHUNK_GET_FLAGS(*chunk->m_data, i);
+			const size_t flags = BMS_CHUNK_GET_FLAGS(desc, i);
 			if (flags == BMS_PAYLOAD_MIXED)
 			{
 				position++;
@@ -198,14 +256,14 @@ bms_chunk_get_position(const BmsChunk *chunk, size_t bv)
 	return position;
 }
 
-static inline size_t
+static size_t
 bms_chunk_get_size(const BmsChunk *chunk)
 {
 	size_t size = sizeof(bitmapword);
 	if (unlikely(bms_chunk_is_rle(chunk)))
 		return size;
 
-	uint8_t *p = (uint8_t *)chunk->m_data;
+	const uint8_t *p = chunk->m_data;
 	for (size_t i = 0; i < sizeof(bitmapword); i++, p++)
 	{
 		size += sizeof(bitmapword) * bms_chunk_calc_vector_size(*p);
@@ -213,7 +271,7 @@ bms_chunk_get_size(const BmsChunk *chunk)
 	return size;
 }
 
-static inline size_t
+static __attribute__((unused)) size_t
 bms_chunk_get_capacity(const BmsChunk *chunk)
 {
 	if (unlikely(bms_chunk_is_rle(chunk)))
@@ -222,7 +280,7 @@ bms_chunk_get_capacity(const BmsChunk *chunk)
 	}
 
 	size_t capacity = BMS_CHUNK_MAX_CAPACITY;
-	uint8_t *p = (uint8_t *)chunk->m_data;
+	const uint8_t *p = chunk->m_data;
 
 	for (size_t i = 0; i < sizeof(bitmapword); i++, p++)
 	{
@@ -242,7 +300,7 @@ bms_chunk_get_capacity(const BmsChunk *chunk)
 	return capacity;
 }
 
-static inline bool
+static bool
 bms_chunk_is_set(const BmsChunk *chunk, const size_t idx)
 {
 	if (unlikely(bms_chunk_is_rle(chunk)))
@@ -256,7 +314,8 @@ bms_chunk_is_set(const BmsChunk *chunk, const size_t idx)
 	const size_t bv = idx / BITS_PER_BITMAPWORD;
 	Assert(bv < BMS_FLAGS_PER_INDEX);
 
-	const size_t flags = BMS_CHUNK_GET_FLAGS(*chunk->m_data, bv);
+	const bitmapword desc = bms_chunk_read_word(chunk, 0);
+	const size_t flags = BMS_CHUNK_GET_FLAGS(desc, bv);
 	switch (flags)
 	{
 	case BMS_PAYLOAD_ZEROS:
@@ -269,21 +328,21 @@ bms_chunk_is_set(const BmsChunk *chunk, const size_t idx)
 		break;
 	}
 
-	const bitmapword w = chunk->m_data[1 + bms_chunk_get_position(chunk, bv)];
+	const bitmapword w = bms_chunk_read_word(chunk, 1 + bms_chunk_get_position(chunk, bv));
 	return (w & ((bitmapword)1 << (idx % BITS_PER_BITMAPWORD))) != 0;
 }
 
-static inline uint64_t
+static uint64_t
 bms_get_chunk_aligned_offset(const size_t idx)
 {
 	const size_t capacity = BMS_CHUNK_MAX_CAPACITY;
 	return idx / capacity * capacity;
 }
 
-static inline void
+static void
 bms_expand_sparse_chunk(const BmsChunk *chunk, bitmapword words[32], int cap_flags[32])
 {
-	const bitmapword desc = chunk->m_data[0];
+	const bitmapword desc = bms_chunk_read_word(chunk, 0);
 
 	int vec_offsets[BMS_FLAGS_PER_INDEX];
 	int running = 0;
@@ -297,7 +356,7 @@ bms_expand_sparse_chunk(const BmsChunk *chunk, bitmapword words[32], int cap_fla
 	{
 		const unsigned f = (desc >> (i * 2)) & BMS_FLAG_MASK;
 		cap_flags[i] = (f != BMS_PAYLOAD_NONE);
-		words[i] = (f == BMS_PAYLOAD_MIXED) ? chunk->m_data[1 + vec_offsets[i]]
+		words[i] = (f == BMS_PAYLOAD_MIXED) ? bms_chunk_read_word(chunk, 1 + vec_offsets[i])
 				 : (f == BMS_PAYLOAD_ONES)  ? ~(bitmapword)0
 				 :                            0;
 	}
@@ -311,7 +370,7 @@ bms_expand_sparse_chunk(const BmsChunk *chunk, bitmapword words[32], int cap_fla
  * slot 31 to ZEROS (rather than NONE) to avoid collision with the RLE
  * flag encoding.  Callers must not rely on these arrays being unchanged.
  */
-static inline bool
+static bool
 bms_encode_sparse_chunk(bitmapword words[32], int cap_flags[32],
 						bitmapword *out_desc, bitmapword out_vecs[32], int *out_nvecs)
 {
@@ -413,7 +472,7 @@ bms_read_chunk_start(const uint8_t *p)
 /*
  * Write the start offset into a chunk entry in the buffer.
  */
-static inline void
+static void
 bms_write_chunk_start(uint8_t *p, uint64_t start)
 {
 	memcpy(p, &start, sizeof(uint64_t));
@@ -441,7 +500,7 @@ static inline void
 bms_init_chunk_at(const uint8_t *p, BmsChunk *c)
 {
 	Assert(((uintptr_t)(p + BMS_CHUNK_OVERHEAD) % sizeof(bitmapword)) == 0);
-	c->m_data = (bitmapword *)(p + BMS_CHUNK_OVERHEAD);
+	c->m_data = p + BMS_CHUNK_OVERHEAD;
 }
 
 /*
@@ -457,9 +516,17 @@ bms_chunk_entry_bytes(const uint8_t *p)
 
 /*
  * Total used bytes across all chunk entries in the buffer.
- * This walks all used_chunks entries - O(n) but n is typically small.
+ *
+ * This walks all used_chunks entries -- O(n) where n = number of chunks.
+ * In practice n is typically 1-5 for realistic workloads.
+ *
+ * Remaining callers (replace_chunk, insert_chunk, remove_chunk) each need
+ * the exact used-byte count for memmove sizing and cannot avoid this walk
+ * without caching the total in the struct (which would increase the header
+ * size for all bitmapsets).  The merge helper threads a running total to
+ * avoid calling this function.
  */
-static inline size_t
+static size_t
 bms_chunked_used_bytes(const Bitmapset *a)
 {
 	unsigned used = BMS_USED_CHUNKS(a);
@@ -478,7 +545,7 @@ bms_chunked_used_bytes(const Bitmapset *a)
 /*
  * Allocated buffer size for chunked mode.
  */
-static inline size_t
+static size_t
 bms_chunked_alloc_size(const Bitmapset *a)
 {
 	return (size_t)BMS_ALLOC_CHUNKS(a) * BMS_CHUNKED_ALLOC_UNIT;
@@ -494,7 +561,7 @@ bms_chunked_alloc_size(const Bitmapset *a)
  * Binary search is not possible because chunk entries are variable-length,
  * so byte offsets cannot be computed without walking from the beginning.
  */
-static inline int
+static int
 bms_find_chunk(const Bitmapset *a, uint64_t aligned, size_t *buf_off)
 {
 	unsigned used = BMS_USED_CHUNKS(a);
@@ -532,7 +599,7 @@ bms_find_chunk(const Bitmapset *a, uint64_t aligned, size_t *buf_off)
  * found.  When not found, the return value encodes the insertion index
  * as -(insertion_index + 1), and *buf_off is set to the insertion point.
  */
-static inline int
+static int
 bms_find_chunk_from(const Bitmapset *a, uint64_t aligned,
 					size_t *buf_off, unsigned start_idx)
 {
@@ -564,7 +631,7 @@ bms_find_chunk_from(const Bitmapset *a, uint64_t aligned,
  * beyond 'total_used'. May realloc; caller must refresh pointers.
  * Returns the (possibly reallocated) bitmapset.
  */
-static inline Bitmapset *
+static Bitmapset *
 bms_chunked_ensure(Bitmapset *a, size_t total_used, size_t needed)
 {
 	size_t alloc_sz = bms_chunked_alloc_size(a);
@@ -593,7 +660,7 @@ bms_chunked_ensure(Bitmapset *a, size_t total_used, size_t needed)
 /*
  * Expand any chunk (RLE or sparse) to the 32-word representation.
  */
-static inline void
+static void
 bms_expand_chunk_words(const BmsChunk *chunk, bitmapword words[32], int cap_flags[32])
 {
 	if (bms_chunk_is_rle(chunk))
@@ -622,13 +689,12 @@ bms_expand_chunk_words(const BmsChunk *chunk, bitmapword words[32], int cap_flag
  * Write encoded chunk data (descriptor + vectors) into buffer at p.
  * Returns the number of bytes written.
  */
-static inline size_t
+static size_t
 bms_write_chunk_data(uint8_t *p, bitmapword desc, bitmapword vecs[32], int nvecs)
 {
-	bitmapword *dp = (bitmapword *)p;
-	dp[0] = desc;
+	memcpy(p, &desc, sizeof(bitmapword));
 	for (int i = 0; i < nvecs; i++)
-		dp[1 + i] = vecs[i];
+		memcpy(p + (1 + i) * sizeof(bitmapword), &vecs[i], sizeof(bitmapword));
 	return (size_t)(1 + nvecs) * sizeof(bitmapword);
 }
 
@@ -636,7 +702,7 @@ bms_write_chunk_data(uint8_t *p, bitmapword desc, bitmapword vecs[32], int nvecs
  * Replace a chunk in-place in the buffer. Handles resizing if the new entry
  * is a different size than the old one.
  */
-static inline Bitmapset *
+static Bitmapset *
 bms_replace_chunk(Bitmapset *a, size_t buf_off, size_t old_entry_size,
 				  uint64_t start, bitmapword desc,
 				  bitmapword vecs[32], int nvecs)
@@ -673,7 +739,7 @@ bms_replace_chunk(Bitmapset *a, size_t buf_off, size_t old_entry_size,
  * Insert a new chunk at buf_off. Shifts existing data to make room
  * and increments used_chunks.
  */
-static inline Bitmapset *
+static Bitmapset *
 bms_insert_chunk(Bitmapset *a, size_t buf_off,
 				 uint64_t start, bitmapword desc,
 				 bitmapword vecs[32], int nvecs)
@@ -706,7 +772,7 @@ bms_insert_chunk(Bitmapset *a, size_t buf_off,
  * Remove a chunk at buf_off (of size entry_size) from the buffer.
  * Decrements used_chunks. Returns NULL if no chunks remain.
  */
-static inline Bitmapset *
+static Bitmapset *
 bms_remove_chunk(Bitmapset *a, size_t buf_off, size_t entry_size)
 {
 	size_t total_used = bms_chunked_used_bytes(a);
@@ -843,7 +909,7 @@ bms_dense_to_chunked(Bitmapset *dense)
 /*
  * Add a member to a chunked bitmapset using expand-modify-encode.
  */
-static inline Bitmapset *
+static Bitmapset *
 bms_chunked_add_member(Bitmapset *a, int64_t x)
 {
 	Assert(BMS_IS_CHUNKED(a));
@@ -908,7 +974,7 @@ bms_chunked_add_member(Bitmapset *a, int64_t x)
 /*
  * Helper: create an empty chunked bitmapset with given allocation.
  */
-static inline Bitmapset *
+static Bitmapset *
 bms_chunked_create(unsigned alloc_units)
 {
 	if (alloc_units < 1)
@@ -926,7 +992,7 @@ bms_chunked_create(unsigned alloc_units)
  * of a chunked bitmapset's buffer, incrementing used_chunks.
  * Grows if needed; returns the (possibly reallocated) bitmapset.
  */
-static inline Bitmapset *
+static Bitmapset *
 bms_append_chunk(Bitmapset *r, size_t *used_bytes,
 				 uint64_t start, bitmapword desc,
 				 bitmapword vecs[32], int nvecs)
@@ -948,6 +1014,22 @@ bms_append_chunk(Bitmapset *r, size_t *used_bytes,
 }
 
 /*
+ * Helper: append a raw chunk entry (already encoded bytes) to the end
+ * of a chunked bitmapset's buffer, incrementing used_chunks.
+ * This avoids the expand-encode round-trip for passthrough chunks.
+ */
+static Bitmapset *
+bms_append_chunk_raw(Bitmapset *r, size_t *used_bytes,
+					 const uint8_t *src, size_t entry_sz)
+{
+	r = bms_chunked_ensure(r, *used_bytes, entry_sz);
+	memcpy(BMS_BUF(r) + *used_bytes, src, entry_sz);
+	*used_bytes += entry_sz;
+	r->nwords = (BMS_ALLOC_CHUNKS(r) << 16) | (BMS_USED_CHUNKS(r) + 1);
+	return r;
+}
+
+/*
  * Helper: check if 32-word array has any non-zero word.
  */
 static inline bool
@@ -962,7 +1044,7 @@ bms_words_any_set(const bitmapword words[32])
 /*
  * Helper: merge cap_flags via OR (union of capacities).
  */
-static inline void
+static void
 bms_cap_flags_or(int dst[32], const int a[32], const int b[32])
 {
 	for (int i = 0; i < 32; i++)
@@ -997,7 +1079,7 @@ typedef struct BmsPromoted
 	Bitmapset  *tmp;			/* non-NULL if we allocated a temp copy */
 } BmsPromoted;
 
-static inline BmsPromoted
+static BmsPromoted
 bms_ensure_chunked(const Bitmapset *a)
 {
 	BmsPromoted p;
@@ -1015,12 +1097,15 @@ bms_ensure_chunked(const Bitmapset *a)
 	return p;
 }
 
-static inline void
+static void
 bms_promoted_free(BmsPromoted *p)
 {
 	if (p->tmp)
 		pfree(p->tmp);
 }
+
+/* Forward declarations for cold-path helpers used by public functions */
+static pg_noinline int64_t bms_next_member_chunked(const Bitmapset *a, int64_t prevbit);
 
 /* ================================================================
  * Public API functions
@@ -1040,11 +1125,15 @@ bms_copy(const Bitmapset *a)
 
 	if (BMS_IS_CHUNKED(a))
 	{
-		size_t alloc_sz = bms_chunked_alloc_size(a);
-		size = offsetof(Bitmapset, data) + alloc_sz;
+		/*
+		 * Copy the entire allocated buffer rather than computing the exact
+		 * used bytes (which requires an O(n) walk of all chunks).  The extra
+		 * bytes in the allocation tail are harmless -- they are never read
+		 * because chunk walks are bounded by BMS_USED_CHUNKS(a).
+		 */
+		size = offsetof(Bitmapset, data) + bms_chunked_alloc_size(a);
 		result = (Bitmapset *) palloc(size);
-		memcpy(result, a, offsetof(Bitmapset, data) + bms_chunked_used_bytes(a));
-		result->nwords = a->nwords;
+		memcpy(result, a, size);
 		return result;
 	}
 
@@ -1087,9 +1176,15 @@ bms_equal(const Bitmapset *a, const Bitmapset *b)
 		{
 			const uint8_t *ba = BMS_BUF(pa.set);
 			const uint8_t *bb = BMS_BUF(pb.set);
+			unsigned ci;
 
-			for (unsigned ci = 0; ci < used_a; ci++)
+			for (ci = 0; ci < used_a; ci++)
 			{
+				BmsChunk cha, chb;
+				bitmapword wa[32], wb[32];
+				int cfa[32], cfb[32];
+				int j;
+
 				if (bms_read_chunk_start(ba) != bms_read_chunk_start(bb))
 				{
 					equal = false;
@@ -1108,18 +1203,13 @@ bms_equal(const Bitmapset *a, const Bitmapset *b)
 					}
 				}
 
-				BmsChunk cha, chb;
-
 				bms_init_chunk_at(ba, &cha);
 				bms_init_chunk_at(bb, &chb);
-
-				bitmapword wa[32], wb[32];
-				int cfa[32], cfb[32];
 
 				bms_expand_chunk_words(&cha, wa, cfa);
 				bms_expand_chunk_words(&chb, wb, cfb);
 
-				for (int j = 0; j < 32; j++)
+				for (j = 0; j < 32; j++)
 				{
 					if (wa[j] != wb[j])
 					{
@@ -1171,12 +1261,21 @@ bms_compare(const Bitmapset *a, const Bitmapset *b)
 	{
 		BmsPromoted pa = bms_ensure_chunked(a);
 		BmsPromoted pb = bms_ensure_chunked(b);
-		unsigned used_a = BMS_USED_CHUNKS(pa.set);
-		unsigned used_b = BMS_USED_CHUNKS(pb.set);
-		const uint8_t *ba = BMS_BUF(pa.set);
-		const uint8_t *bb = BMS_BUF(pb.set);
-		unsigned ia = 0, ib = 0;
-		int result = 0;
+		unsigned used_a;
+		unsigned used_b;
+		const uint8_t *ba;
+		const uint8_t *bb;
+		unsigned ia;
+		unsigned ib;
+		int result;
+
+		used_a = BMS_USED_CHUNKS(pa.set);
+		used_b = BMS_USED_CHUNKS(pb.set);
+		ba = BMS_BUF(pa.set);
+		bb = BMS_BUF(pb.set);
+		ia = 0;
+		ib = 0;
+		result = 0;
 
 		/*
 		 * Walk chunks from low addresses to high, overwriting `result`
@@ -1211,17 +1310,17 @@ bms_compare(const Bitmapset *a, const Bitmapset *b)
 			else
 			{
 				BmsChunk cha, chb;
+				bitmapword wa[32], wb[32];
+				int cfa[32], cfb[32];
+				int j;
 
 				bms_init_chunk_at(ba, &cha);
 				bms_init_chunk_at(bb, &chb);
 
-				bitmapword wa[32], wb[32];
-				int cfa[32], cfb[32];
-
 				bms_expand_chunk_words(&cha, wa, cfa);
 				bms_expand_chunk_words(&chb, wb, cfb);
 
-				for (int j = 31; j >= 0; j--)
+				for (j = 31; j >= 0; j--)
 				{
 					if (wa[j] != wb[j])
 					{
@@ -1266,25 +1365,28 @@ bms_compare(const Bitmapset *a, const Bitmapset *b)
  * bms_make_singleton - build a bitmapset containing a single member
  */
 Bitmapset *
-bms_make_singleton(int64_t x)
+bms_make_singleton(int x)
 {
 	Bitmapset  *result;
-	int64_t		wordnum,
+	int			wordnum,
 				bitnum;
 
 	if (x < 0)
 		elog(ERROR, "negative bitmapset member not allowed");
 
-	if (x > BMS_DENSE_MAX_BIT)
+	if ((int64_t)x > BMS_DENSE_MAX_BIT)
 	{
 		/* Create a chunked bitmapset with one chunk */
-		unsigned alloc_chunks_units = 1;	/* 64 bytes is plenty for one chunk */
-		size_t alloc_sz = (size_t)alloc_chunks_units * BMS_CHUNKED_ALLOC_UNIT;
+		unsigned alloc_chunks_units;
+		size_t alloc_sz;
+
+		alloc_chunks_units = 1;	/* 64 bytes is plenty for one chunk */
+		alloc_sz = (size_t)alloc_chunks_units * BMS_CHUNKED_ALLOC_UNIT;
 		result = (Bitmapset *) palloc0(offsetof(Bitmapset, data) + alloc_sz);
 		result->nwords = (alloc_chunks_units << 16) | 0;
 
 		/* Add the single member */
-		result = bms_chunked_add_member(result, x);
+		result = bms_chunked_add_member(result, (int64_t)x);
 		return result;
 	}
 
@@ -1336,37 +1438,58 @@ static Bitmapset *
 bms_chunked_merge(const Bitmapset *a_chunked, const Bitmapset *b_chunked,
 				  BmsMergeOp op, bool *result_flag, size_t *used_bytes_out)
 {
-	unsigned used_a = BMS_USED_CHUNKS(a_chunked);
-	unsigned used_b = BMS_USED_CHUNKS(b_chunked);
-	const uint8_t *p_a = BMS_BUF(a_chunked);
-	const uint8_t *p_b = BMS_BUF(b_chunked);
-	unsigned ia = 0, ib = 0;
+	unsigned	used_a;
+	unsigned	used_b;
+	const uint8_t *p_a;
+	const uint8_t *p_b;
+	unsigned	ia;
+	unsigned	ib;
+	bool		is_set_op;
+	bool		bool_result;
+	Bitmapset  *r;
+	size_t		used_bytes;
+	size_t		est;
+	size_t		est_b;
+	size_t		passthrough_sz;
+	unsigned	alloc_units;
+	uint64_t	sa;
+	uint64_t	sb;
+	BmsChunk	ca_c;
+	BmsChunk	cb_c;
+	bitmapword	wa[32];
+	bitmapword	wb[32];
+	bitmapword	wr[32];
 
-	bool		is_set_op = (op == BMS_MERGE_OR || op == BMS_MERGE_AND ||
-							 op == BMS_MERGE_ANDNOT);
-	bool		bool_result = false;
+	used_a = BMS_USED_CHUNKS(a_chunked);
+	used_b = BMS_USED_CHUNKS(b_chunked);
+	p_a = BMS_BUF(a_chunked);
+	p_b = BMS_BUF(b_chunked);
+	ia = 0;
+	ib = 0;
+
+	is_set_op = (op == BMS_MERGE_OR || op == BMS_MERGE_AND ||
+				 op == BMS_MERGE_ANDNOT);
+	bool_result = false;
 
 	/* For set-producing ops, allocate result */
-	Bitmapset  *r = NULL;
-	size_t		used_bytes = 0;
+	r = NULL;
+	used_bytes = 0;
 
 	if (is_set_op)
 	{
-		size_t est;
-
 		if (op == BMS_MERGE_OR)
 			est = bms_chunked_used_bytes(a_chunked) +
 				  bms_chunked_used_bytes(b_chunked);
 		else
 		{
 			est = bms_chunked_used_bytes(a_chunked);
-			size_t est_b = bms_chunked_used_bytes(b_chunked);
+			est_b = bms_chunked_used_bytes(b_chunked);
 			if (op == BMS_MERGE_AND && est_b < est)
 				est = est_b;
 		}
 
-		unsigned alloc_units = (unsigned)((est + BMS_CHUNKED_ALLOC_UNIT - 1) /
-										  BMS_CHUNKED_ALLOC_UNIT);
+		alloc_units = (unsigned)((est + BMS_CHUNKED_ALLOC_UNIT - 1) /
+								 BMS_CHUNKED_ALLOC_UNIT);
 		if (alloc_units < 1)
 			alloc_units = 1;
 		r = bms_chunked_create(alloc_units);
@@ -1374,8 +1497,8 @@ bms_chunked_merge(const Bitmapset *a_chunked, const Bitmapset *b_chunked,
 
 	while (ia < used_a && ib < used_b)
 	{
-		uint64_t sa = bms_read_chunk_start(p_a);
-		uint64_t sb = bms_read_chunk_start(p_b);
+		sa = bms_read_chunk_start(p_a);
+		sb = bms_read_chunk_start(p_b);
 
 		if (sa < sb)
 		{
@@ -1384,20 +1507,10 @@ bms_chunked_merge(const Bitmapset *a_chunked, const Bitmapset *b_chunked,
 			{
 				case BMS_MERGE_OR:
 				case BMS_MERGE_ANDNOT:
-				{
-					/* Keep a's chunk */
-					BmsChunk c;
-					bms_init_chunk_at(p_a, &c);
-					bitmapword wa[32];
-					int cfa[32];
-					bms_expand_chunk_words(&c, wa, cfa);
-					bitmapword desc;
-					bitmapword vecs[32];
-					int nvecs;
-					bms_encode_sparse_chunk(wa, cfa, &desc, vecs, &nvecs);
-					r = bms_append_chunk(r, &used_bytes, sa, desc, vecs, nvecs);
+					/* Keep a's chunk: raw copy avoids expand-encode round-trip */
+					passthrough_sz = bms_chunk_entry_bytes(p_a);
+					r = bms_append_chunk_raw(r, &used_bytes, p_a, passthrough_sz);
 					break;
-				}
 				case BMS_MERGE_AND:
 					/* a-only chunk: AND produces nothing */
 					break;
@@ -1418,20 +1531,10 @@ bms_chunked_merge(const Bitmapset *a_chunked, const Bitmapset *b_chunked,
 			switch (op)
 			{
 				case BMS_MERGE_OR:
-				{
-					/* Keep b's chunk */
-					BmsChunk c;
-					bms_init_chunk_at(p_b, &c);
-					bitmapword wb[32];
-					int cfb[32];
-					bms_expand_chunk_words(&c, wb, cfb);
-					bitmapword desc;
-					bitmapword vecs[32];
-					int nvecs;
-					bms_encode_sparse_chunk(wb, cfb, &desc, vecs, &nvecs);
-					r = bms_append_chunk(r, &used_bytes, sb, desc, vecs, nvecs);
+					/* Keep b's chunk: raw copy avoids expand-encode round-trip */
+					passthrough_sz = bms_chunk_entry_bytes(p_b);
+					r = bms_append_chunk_raw(r, &used_bytes, p_b, passthrough_sz);
 					break;
-				}
 				case BMS_MERGE_AND:
 				case BMS_MERGE_ANDNOT:
 					/* b-only: AND/ANDNOT produces nothing from b */
@@ -1449,18 +1552,20 @@ bms_chunked_merge(const Bitmapset *a_chunked, const Bitmapset *b_chunked,
 		else
 		{
 			/* Overlapping chunks: expand both and apply op */
-			BmsChunk ca_c, cb_c;
+			int		cfa[32];
+			int		cfb[32];
+
 			bms_init_chunk_at(p_a, &ca_c);
 			bms_init_chunk_at(p_b, &cb_c);
-			bitmapword wa[32], wb[32];
-			int cfa[32], cfb[32];
 			bms_expand_chunk_words(&ca_c, wa, cfa);
 			bms_expand_chunk_words(&cb_c, wb, cfb);
 
 			if (is_set_op)
 			{
-				bitmapword wr[32];
-				int cfr[32];
+				int			cfr[32];
+				bitmapword	desc;
+				bitmapword	vecs[32];
+				int			nvecs;
 
 				switch (op)
 				{
@@ -1486,9 +1591,6 @@ bms_chunked_merge(const Bitmapset *a_chunked, const Bitmapset *b_chunked,
 				/* For AND/ANDNOT, only emit if result has bits */
 				if (op == BMS_MERGE_OR || bms_words_any_set(wr))
 				{
-					bitmapword desc;
-					bitmapword vecs[32];
-					int nvecs;
 					bms_encode_sparse_chunk(wr, cfr, &desc, vecs, &nvecs);
 					r = bms_append_chunk(r, &used_bytes, sa, desc, vecs, nvecs);
 				}
@@ -1496,10 +1598,11 @@ bms_chunked_merge(const Bitmapset *a_chunked, const Bitmapset *b_chunked,
 			else
 			{
 				/* Boolean ops: check word-by-word */
-				for (int j = 0; j < 32; j++)
-				{
-					bitmapword test;
+				int			j;
+				bitmapword	test;
 
+				for (j = 0; j < 32; j++)
+				{
 					if (op == BMS_MERGE_OVERLAP)
 						test = wa[j] & wb[j];
 					else /* BMS_MERGE_NONEMPTY_DIFF */
@@ -1520,24 +1623,15 @@ bms_chunked_merge(const Bitmapset *a_chunked, const Bitmapset *b_chunked,
 		}
 	}
 
-	/* Handle remaining chunks */
+	/* Handle remaining chunks: raw copy avoids expand-encode round-trip */
 	if (is_set_op && (op == BMS_MERGE_OR || op == BMS_MERGE_ANDNOT))
 	{
 		/* Copy remaining from a */
 		while (ia < used_a)
 		{
-			uint64_t sa = bms_read_chunk_start(p_a);
-			BmsChunk c;
-			bms_init_chunk_at(p_a, &c);
-			bitmapword wa[32];
-			int cfa[32];
-			bms_expand_chunk_words(&c, wa, cfa);
-			bitmapword desc;
-			bitmapword vecs[32];
-			int nvecs;
-			bms_encode_sparse_chunk(wa, cfa, &desc, vecs, &nvecs);
-			r = bms_append_chunk(r, &used_bytes, sa, desc, vecs, nvecs);
-			p_a += bms_chunk_entry_bytes(p_a);
+			passthrough_sz = bms_chunk_entry_bytes(p_a);
+			r = bms_append_chunk_raw(r, &used_bytes, p_a, passthrough_sz);
+			p_a += passthrough_sz;
 			ia++;
 		}
 	}
@@ -1547,18 +1641,9 @@ bms_chunked_merge(const Bitmapset *a_chunked, const Bitmapset *b_chunked,
 		/* Copy remaining from b */
 		while (ib < used_b)
 		{
-			uint64_t sb = bms_read_chunk_start(p_b);
-			BmsChunk c;
-			bms_init_chunk_at(p_b, &c);
-			bitmapword wb[32];
-			int cfb[32];
-			bms_expand_chunk_words(&c, wb, cfb);
-			bitmapword desc;
-			bitmapword vecs[32];
-			int nvecs;
-			bms_encode_sparse_chunk(wb, cfb, &desc, vecs, &nvecs);
-			r = bms_append_chunk(r, &used_bytes, sb, desc, vecs, nvecs);
-			p_b += bms_chunk_entry_bytes(p_b);
+			passthrough_sz = bms_chunk_entry_bytes(p_b);
+			r = bms_append_chunk_raw(r, &used_bytes, p_b, passthrough_sz);
+			p_b += passthrough_sz;
 			ib++;
 		}
 	}
@@ -1603,10 +1688,14 @@ bms_union(const Bitmapset *a, const Bitmapset *b)
 
 	if (BMS_IS_CHUNKED(a) || BMS_IS_CHUNKED(b))
 	{
-		BmsPromoted pa = bms_ensure_chunked(a);
-		BmsPromoted pb = bms_ensure_chunked(b);
-		Bitmapset *r = bms_chunked_merge(pa.set, pb.set,
-										  BMS_MERGE_OR, NULL, NULL);
+		BmsPromoted pa;
+		BmsPromoted pb;
+		Bitmapset *r;
+
+		pa = bms_ensure_chunked(a);
+		pb = bms_ensure_chunked(b);
+		r = bms_chunked_merge(pa.set, pb.set,
+							  BMS_MERGE_OR, NULL, NULL);
 		bms_promoted_free(&pa);
 		bms_promoted_free(&pb);
 		return r;
@@ -1648,10 +1737,14 @@ bms_intersect(const Bitmapset *a, const Bitmapset *b)
 
 	if (BMS_IS_CHUNKED(a) || BMS_IS_CHUNKED(b))
 	{
-		BmsPromoted pa = bms_ensure_chunked(a);
-		BmsPromoted pb = bms_ensure_chunked(b);
-		Bitmapset *r = bms_chunked_merge(pa.set, pb.set,
-										  BMS_MERGE_AND, NULL, NULL);
+		BmsPromoted pa;
+		BmsPromoted pb;
+		Bitmapset *r;
+
+		pa = bms_ensure_chunked(a);
+		pb = bms_ensure_chunked(b);
+		r = bms_chunked_merge(pa.set, pb.set,
+							  BMS_MERGE_AND, NULL, NULL);
 		bms_promoted_free(&pa);
 		bms_promoted_free(&pb);
 		return r;
@@ -1703,10 +1796,14 @@ bms_difference(const Bitmapset *a, const Bitmapset *b)
 
 	if (BMS_IS_CHUNKED(a) || BMS_IS_CHUNKED(b))
 	{
-		BmsPromoted pa = bms_ensure_chunked(a);
-		BmsPromoted pb = bms_ensure_chunked(b);
-		Bitmapset *r = bms_chunked_merge(pa.set, pb.set,
-										  BMS_MERGE_ANDNOT, NULL, NULL);
+		BmsPromoted pa;
+		BmsPromoted pb;
+		Bitmapset *r;
+
+		pa = bms_ensure_chunked(a);
+		pb = bms_ensure_chunked(b);
+		r = bms_chunked_merge(pa.set, pb.set,
+							  BMS_MERGE_ANDNOT, NULL, NULL);
 		bms_promoted_free(&pa);
 		bms_promoted_free(&pb);
 		return r;
@@ -1784,7 +1881,7 @@ bms_difference(const Bitmapset *a, const Bitmapset *b)
  * bms_offset_members - shift all members by offset
  */
 Bitmapset *
-bms_offset_members(const Bitmapset *a, int64_t offset)
+bms_offset_members(const Bitmapset *a, int offset)
 {
 	Bitmapset  *result;
 	int64_t		offset_words;
@@ -1800,15 +1897,31 @@ bms_offset_members(const Bitmapset *a, int64_t offset)
 
 	if (BMS_IS_CHUNKED(a))
 	{
-		/* Iterate all members, add offset, build new set */
-		Bitmapset *r = NULL;
-		int64_t m = -1;
-		while ((m = bms_next_member(a, m)) >= 0)
+		/*
+		 * Iterate all members using the internal chunked helper (which
+		 * works with int64_t) and build a new set.
+		 */
+		Bitmapset *r;
+		int64_t m;
+		int64_t new_m;
+
+		r = NULL;
+		m = -1;
+		while ((m = bms_next_member_chunked(a, m)) != -2)
 		{
-			int64_t new_m = m + offset;
+			new_m = m + (int64_t)offset;
 			if (new_m < 0)
 				continue;
-			r = bms_add_member(r, new_m);
+			if (new_m <= BMS_DENSE_MAX_BIT)
+				r = bms_add_member(r, (int)new_m);
+			else
+			{
+				if (r != NULL && !BMS_IS_CHUNKED(r))
+					r = bms_dense_to_chunked(r);
+				if (r == NULL)
+					r = bms_chunked_create(1);
+				r = bms_chunked_add_member(r, new_m);
+			}
 		}
 		return r;
 	}
@@ -1922,15 +2035,26 @@ bms_is_subset(const Bitmapset *a, const Bitmapset *b)
 
 	if (BMS_IS_CHUNKED(a) || BMS_IS_CHUNKED(b))
 	{
-		BmsPromoted pa = bms_ensure_chunked(a);
-		BmsPromoted pb = bms_ensure_chunked(b);
+		BmsPromoted pa;
+		BmsPromoted pb;
+		unsigned used_a;
+		unsigned used_b;
+		const uint8_t *p_a;
+		const uint8_t *p_b;
+		unsigned ia;
+		unsigned ib;
+		bool is_subset;
 
-		unsigned used_a = BMS_USED_CHUNKS(pa.set);
-		unsigned used_b = BMS_USED_CHUNKS(pb.set);
-		const uint8_t *p_a = BMS_BUF(pa.set);
-		const uint8_t *p_b = BMS_BUF(pb.set);
-		unsigned ia = 0, ib = 0;
-		bool is_subset = true;
+		pa = bms_ensure_chunked(a);
+		pb = bms_ensure_chunked(b);
+
+		used_a = BMS_USED_CHUNKS(pa.set);
+		used_b = BMS_USED_CHUNKS(pb.set);
+		p_a = BMS_BUF(pa.set);
+		p_b = BMS_BUF(pb.set);
+		ia = 0;
+		ib = 0;
+		is_subset = true;
 
 		while (ia < used_a && ib < used_b)
 		{
@@ -1951,13 +2075,15 @@ bms_is_subset(const Bitmapset *a, const Bitmapset *b)
 			else
 			{
 				BmsChunk ca_c, cb_c;
-				bms_init_chunk_at(p_a, &ca_c);
-				bms_init_chunk_at(p_b, &cb_c);
 				bitmapword wa[32], wb[32];
 				int cfa[32], cfb[32];
+				int j;
+
+				bms_init_chunk_at(p_a, &ca_c);
+				bms_init_chunk_at(p_b, &cb_c);
 				bms_expand_chunk_words(&ca_c, wa, cfa);
 				bms_expand_chunk_words(&cb_c, wb, cfb);
-				for (int j = 0; j < 32; j++)
+				for (j = 0; j < 32; j++)
 				{
 					if ((wa[j] & ~wb[j]) != 0)
 					{
@@ -2016,15 +2142,26 @@ bms_subset_compare(const Bitmapset *a, const Bitmapset *b)
 
 	if (BMS_IS_CHUNKED(a) || BMS_IS_CHUNKED(b))
 	{
-		BmsPromoted pa = bms_ensure_chunked(a);
-		BmsPromoted pb = bms_ensure_chunked(b);
+		BmsPromoted pa;
+		BmsPromoted pb;
+		unsigned used_a;
+		unsigned used_b;
+		const uint8_t *p_a;
+		const uint8_t *p_b;
+		unsigned ia;
+		unsigned ib;
+		BMS_Comparison cmp;
 
-		unsigned used_a = BMS_USED_CHUNKS(pa.set);
-		unsigned used_b = BMS_USED_CHUNKS(pb.set);
-		const uint8_t *p_a = BMS_BUF(pa.set);
-		const uint8_t *p_b = BMS_BUF(pb.set);
-		unsigned ia = 0, ib = 0;
-		BMS_Comparison cmp = BMS_EQUAL;
+		pa = bms_ensure_chunked(a);
+		pb = bms_ensure_chunked(b);
+
+		used_a = BMS_USED_CHUNKS(pa.set);
+		used_b = BMS_USED_CHUNKS(pb.set);
+		p_a = BMS_BUF(pa.set);
+		p_b = BMS_BUF(pb.set);
+		ia = 0;
+		ib = 0;
+		cmp = BMS_EQUAL;
 
 		while (ia < used_a && ib < used_b)
 		{
@@ -2058,14 +2195,16 @@ bms_subset_compare(const Bitmapset *a, const Bitmapset *b)
 			else
 			{
 				BmsChunk ca_c, cb_c;
-				bms_init_chunk_at(p_a, &ca_c);
-				bms_init_chunk_at(p_b, &cb_c);
 				bitmapword wa[32], wb[32];
 				int cfa[32], cfb[32];
+				int j;
+
+				bms_init_chunk_at(p_a, &ca_c);
+				bms_init_chunk_at(p_b, &cb_c);
 				bms_expand_chunk_words(&ca_c, wa, cfa);
 				bms_expand_chunk_words(&cb_c, wb, cfb);
 
-				for (int j = 0; j < 32; j++)
+				for (j = 0; j < 32; j++)
 				{
 					if ((wa[j] & ~wb[j]) != 0)
 					{
@@ -2161,18 +2300,22 @@ bms_subset_compare(const Bitmapset *a, const Bitmapset *b)
  * as a lightweight function without register saves for the chunked code.
  */
 static pg_noinline bool
-bms_is_member_chunked(int64_t x, const Bitmapset *a)
+bms_is_member_chunked(int x, const Bitmapset *a)
 {
-	uint64_t aligned = bms_get_chunk_aligned_offset((size_t)x);
+	uint64_t aligned;
 	size_t buf_off;
-	int idx = bms_find_chunk(a, aligned, &buf_off);
+	int idx;
+	BmsChunk c;
+	size_t within;
+
+	aligned = bms_get_chunk_aligned_offset((size_t)x);
+	idx = bms_find_chunk(a, aligned, &buf_off);
 
 	if (idx < 0)
 		return false;
 
-	BmsChunk c;
 	bms_init_chunk_at(BMS_BUF(a) + buf_off, &c);
-	size_t within = (size_t)x - (size_t)aligned;
+	within = (size_t)x - (size_t)aligned;
 	return bms_chunk_is_set(&c, within);
 }
 
@@ -2180,9 +2323,9 @@ bms_is_member_chunked(int64_t x, const Bitmapset *a)
  * bms_is_member - is X a member of A?
  */
 bool
-bms_is_member(int64_t x, const Bitmapset *a)
+bms_is_member(int x, const Bitmapset *a)
 {
-	int64_t		wordnum,
+	int			wordnum,
 				bitnum;
 
 	if (unlikely(x < 0))
@@ -2205,12 +2348,12 @@ bms_is_member(int64_t x, const Bitmapset *a)
 /*
  * bms_member_index - determine 0-based index of member x
  */
-int64_t
-bms_member_index(const Bitmapset *a, int64_t x)
+int
+bms_member_index(const Bitmapset *a, int x)
 {
-	int64_t		bitnum;
-	int64_t		wordnum;
-	int64_t		result = 0;
+	int			bitnum;
+	int			wordnum;
+	int			result = 0;
 	bitmapword	mask;
 
 	if (!bms_is_member(x, a))
@@ -2218,24 +2361,31 @@ bms_member_index(const Bitmapset *a, int64_t x)
 
 	if (BMS_IS_CHUNKED(a))
 	{
-		uint64_t aligned = bms_get_chunk_aligned_offset((size_t)x);
-		unsigned used = BMS_USED_CHUNKS(a);
-		const uint8_t *p = BMS_BUF(a);
+		uint64_t aligned;
+		unsigned used;
+		const uint8_t *p;
+		unsigned ci;
 
-		for (unsigned ci = 0; ci < used; ci++)
+		aligned = bms_get_chunk_aligned_offset((size_t)x);
+		used = BMS_USED_CHUNKS(a);
+		p = BMS_BUF(a);
+
+		for (ci = 0; ci < used; ci++)
 		{
-			uint64_t chunk_start = bms_read_chunk_start(p);
-
+			uint64_t chunk_start;
 			BmsChunk c;
-			bms_init_chunk_at(p, &c);
 			bitmapword words[32];
 			int cap_flags[32];
+			int j;
+
+			chunk_start = bms_read_chunk_start(p);
+			bms_init_chunk_at(p, &c);
 			bms_expand_chunk_words(&c, words, cap_flags);
 
 			if (chunk_start < aligned)
 			{
 				/* Count all bits in this chunk */
-				for (int j = 0; j < 32; j++)
+				for (j = 0; j < 32; j++)
 					result += bmw_popcount(words[j]);
 			}
 			else if (chunk_start == aligned)
@@ -2244,11 +2394,12 @@ bms_member_index(const Bitmapset *a, int64_t x)
 				size_t within = (size_t)x - (size_t)chunk_start;
 				int slot = (int)(within / BITS_PER_BITMAPWORD);
 				int bit = (int)(within % BITS_PER_BITMAPWORD);
+				bitmapword m;
 
-				for (int j = 0; j < slot; j++)
+				for (j = 0; j < slot; j++)
 					result += bmw_popcount(words[j]);
 
-				bitmapword m = ((bitmapword)1 << bit) - 1;
+				m = ((bitmapword)1 << bit) - 1;
 				result += bmw_popcount(words[slot] & m);
 				return result;
 			}
@@ -2267,8 +2418,12 @@ bms_member_index(const Bitmapset *a, int64_t x)
 	wordnum = WORDNUM(x);
 	bitnum = BITNUM(x);
 
-	for (int64_t i = 0; i < wordnum; i++)
-		result += bmw_popcount(BMS_WORDS(a)[i]);
+	{
+		int i;
+
+		for (i = 0; i < wordnum; i++)
+			result += bmw_popcount(BMS_WORDS(a)[i]);
+	}
 
 	mask = ((bitmapword) 1 << bitnum) - 1;
 	result += bmw_popcount(BMS_WORDS(a)[wordnum] & mask);
@@ -2290,9 +2445,13 @@ bms_overlap(const Bitmapset *a, const Bitmapset *b)
 
 	if (BMS_IS_CHUNKED(a) || BMS_IS_CHUNKED(b))
 	{
-		BmsPromoted pa = bms_ensure_chunked(a);
-		BmsPromoted pb = bms_ensure_chunked(b);
-		bool found = false;
+		BmsPromoted pa;
+		BmsPromoted pb;
+		bool found;
+
+		pa = bms_ensure_chunked(a);
+		pb = bms_ensure_chunked(b);
+		found = false;
 		bms_chunked_merge(pa.set, pb.set, BMS_MERGE_OVERLAP, &found, NULL);
 		bms_promoted_free(&pa);
 		bms_promoted_free(&pb);
@@ -2324,9 +2483,13 @@ bms_nonempty_difference(const Bitmapset *a, const Bitmapset *b)
 
 	if (BMS_IS_CHUNKED(a) || BMS_IS_CHUNKED(b))
 	{
-		BmsPromoted pa = bms_ensure_chunked(a);
-		BmsPromoted pb = bms_ensure_chunked(b);
-		bool found = false;
+		BmsPromoted pa;
+		BmsPromoted pb;
+		bool found;
+
+		pa = bms_ensure_chunked(a);
+		pb = bms_ensure_chunked(b);
+		found = false;
 		bms_chunked_merge(pa.set, pb.set,
 						  BMS_MERGE_NONEMPTY_DIFF, &found, NULL);
 		bms_promoted_free(&pa);
@@ -2348,10 +2511,10 @@ bms_nonempty_difference(const Bitmapset *a, const Bitmapset *b)
 /*
  * bms_singleton_member - return the sole integer member of set
  */
-int64_t
+int
 bms_singleton_member(const Bitmapset *a)
 {
-	int64_t		result = -1;
+	int			result = -1;
 	int			nwords;
 	int			wordnum;
 
@@ -2362,24 +2525,29 @@ bms_singleton_member(const Bitmapset *a)
 	{
 		unsigned used = BMS_USED_CHUNKS(a);
 		const uint8_t *p = BMS_BUF(a);
+		unsigned ci;
 
-		for (unsigned ci = 0; ci < used; ci++)
+		for (ci = 0; ci < used; ci++)
 		{
-			uint64_t chunk_start = bms_read_chunk_start(p);
+			uint64_t chunk_start;
 			BmsChunk c;
-			bms_init_chunk_at(p, &c);
 			bitmapword words[32];
 			int cap_flags[32];
+			bitmapword w;
+			int j;
+
+			chunk_start = bms_read_chunk_start(p);
+			bms_init_chunk_at(p, &c);
 			bms_expand_chunk_words(&c, words, cap_flags);
 
-			for (int j = 0; j < 32; j++)
+			for (j = 0; j < 32; j++)
 			{
-				bitmapword w = words[j];
+				w = words[j];
 				if (w != 0)
 				{
 					if (result >= 0 || HAS_MULTIPLE_ONES(w))
 						elog(ERROR, "bitmapset has multiple members");
-					result = (int64_t)chunk_start + (int64_t)j * BITS_PER_BITMAPWORD;
+					result = (int)((int64_t)chunk_start + (int64_t)j * BITS_PER_BITMAPWORD);
 					result += bmw_rightmost_one_pos(w);
 				}
 			}
@@ -2401,7 +2569,7 @@ bms_singleton_member(const Bitmapset *a)
 		{
 			if (result >= 0 || HAS_MULTIPLE_ONES(w))
 				elog(ERROR, "bitmapset has multiple members");
-			result = (int64_t)wordnum * BITS_PER_BITMAPWORD;
+			result = wordnum * BITS_PER_BITMAPWORD;
 			result += bmw_rightmost_one_pos(w);
 		}
 	} while (++wordnum < nwords);
@@ -2414,9 +2582,9 @@ bms_singleton_member(const Bitmapset *a)
  * bms_get_singleton_member - safe singleton check
  */
 bool
-bms_get_singleton_member(const Bitmapset *a, int64_t *member)
+bms_get_singleton_member(const Bitmapset *a, int *member)
 {
-	int64_t		result = -1;
+	int			result = -1;
 	int			nwords;
 	int			wordnum;
 
@@ -2427,24 +2595,29 @@ bms_get_singleton_member(const Bitmapset *a, int64_t *member)
 	{
 		unsigned used = BMS_USED_CHUNKS(a);
 		const uint8_t *p = BMS_BUF(a);
+		unsigned ci;
 
-		for (unsigned ci = 0; ci < used; ci++)
+		for (ci = 0; ci < used; ci++)
 		{
-			uint64_t chunk_start = bms_read_chunk_start(p);
+			uint64_t chunk_start;
 			BmsChunk c;
-			bms_init_chunk_at(p, &c);
 			bitmapword words[32];
 			int cap_flags[32];
+			bitmapword w;
+			int j;
+
+			chunk_start = bms_read_chunk_start(p);
+			bms_init_chunk_at(p, &c);
 			bms_expand_chunk_words(&c, words, cap_flags);
 
-			for (int j = 0; j < 32; j++)
+			for (j = 0; j < 32; j++)
 			{
-				bitmapword w = words[j];
+				w = words[j];
 				if (w != 0)
 				{
 					if (result >= 0 || HAS_MULTIPLE_ONES(w))
 						return false;
-					result = (int64_t)chunk_start + (int64_t)j * BITS_PER_BITMAPWORD;
+					result = (int)((int64_t)chunk_start + (int64_t)j * BITS_PER_BITMAPWORD);
 					result += bmw_rightmost_one_pos(w);
 				}
 			}
@@ -2468,7 +2641,7 @@ bms_get_singleton_member(const Bitmapset *a, int64_t *member)
 		{
 			if (result >= 0 || HAS_MULTIPLE_ONES(w))
 				return false;
-			result = (int64_t)wordnum * BITS_PER_BITMAPWORD;
+			result = wordnum * BITS_PER_BITMAPWORD;
 			result += bmw_rightmost_one_pos(w);
 		}
 	} while (++wordnum < nwords);
@@ -2481,10 +2654,10 @@ bms_get_singleton_member(const Bitmapset *a, int64_t *member)
 /*
  * bms_num_members - count members of set
  */
-int64_t
+int
 bms_num_members(const Bitmapset *a)
 {
-	int64_t		result = 0;
+	int			result = 0;
 	int			nwords;
 	int			i;
 
@@ -2495,17 +2668,19 @@ bms_num_members(const Bitmapset *a)
 	{
 		unsigned used = BMS_USED_CHUNKS(a);
 		const uint8_t *p = BMS_BUF(a);
+		unsigned ci;
 
-		for (unsigned ci = 0; ci < used; ci++)
+		for (ci = 0; ci < used; ci++)
 		{
 			BmsChunk c;
-			bms_init_chunk_at(p, &c);
-
 			bitmapword words[32];
 			int cap_flags[32];
+			int j;
+
+			bms_init_chunk_at(p, &c);
 			bms_expand_chunk_words(&c, words, cap_flags);
 
-			for (int j = 0; j < 32; j++)
+			for (j = 0; j < 32; j++)
 				result += bmw_popcount(words[j]);
 
 			p += bms_chunk_entry_bytes(p);
@@ -2541,17 +2716,19 @@ bms_membership(const Bitmapset *a)
 		unsigned used = BMS_USED_CHUNKS(a);
 		const uint8_t *p = BMS_BUF(a);
 		int found = 0;
+		unsigned ci;
 
-		for (unsigned ci = 0; ci < used && found < 2; ci++)
+		for (ci = 0; ci < used && found < 2; ci++)
 		{
 			BmsChunk c;
-			bms_init_chunk_at(p, &c);
-
 			bitmapword words[32];
 			int cap_flags[32];
+			int j;
+
+			bms_init_chunk_at(p, &c);
 			bms_expand_chunk_words(&c, words, cap_flags);
 
-			for (int j = 0; j < 32 && found < 2; j++)
+			for (j = 0; j < 32 && found < 2; j++)
 			{
 				if (words[j] != 0)
 				{
@@ -2589,9 +2766,9 @@ bms_membership(const Bitmapset *a)
  * bms_add_member - add a specified member to set
  */
 Bitmapset *
-bms_add_member(Bitmapset *a, int64_t x)
+bms_add_member(Bitmapset *a, int x)
 {
-	int64_t		wordnum,
+	int			wordnum,
 				bitnum;
 
 	if (x < 0)
@@ -2600,13 +2777,13 @@ bms_add_member(Bitmapset *a, int64_t x)
 		return bms_make_singleton(x);
 
 	if (BMS_IS_CHUNKED(a))
-		return bms_chunked_add_member(a, x);
+		return bms_chunked_add_member(a, (int64_t)x);
 
 	/* If x would exceed dense capacity, convert to chunked first */
-	if (x > BMS_DENSE_MAX_BIT)
+	if ((int64_t)x > BMS_DENSE_MAX_BIT)
 	{
 		a = bms_dense_to_chunked(a);
-		return bms_chunked_add_member(a, x);
+		return bms_chunked_add_member(a, (int64_t)x);
 	}
 
 	wordnum = WORDNUM(x);
@@ -2616,7 +2793,7 @@ bms_add_member(Bitmapset *a, int64_t x)
 	if (wordnum >= BMS_NWORDS(a))
 	{
 		int			oldnwords = BMS_NWORDS(a);
-		int64_t		i;
+		int			i;
 
 		a = (Bitmapset *) repalloc(a, BITMAPSET_SIZE(wordnum + 1));
 		a->nwords = (uint32_t)(wordnum + 1);
@@ -2637,9 +2814,9 @@ bms_add_member(Bitmapset *a, int64_t x)
  * bms_del_member - remove a specified member from set
  */
 Bitmapset *
-bms_del_member(Bitmapset *a, int64_t x)
+bms_del_member(Bitmapset *a, int x)
 {
-	int64_t		wordnum,
+	int			wordnum,
 				bitnum;
 
 	if (x < 0)
@@ -2651,31 +2828,38 @@ bms_del_member(Bitmapset *a, int64_t x)
 	{
 		uint64_t aligned = bms_get_chunk_aligned_offset((size_t)x);
 		size_t buf_off;
-		int idx = bms_find_chunk(a, aligned, &buf_off);
-		if (idx < 0)
-			return a;	/* bit not in any chunk */
-
-		uint8_t *entry = BMS_BUF(a) + buf_off;
-		size_t old_entry_size = bms_chunk_entry_bytes(entry);
-
+		int idx;
+		uint8_t *entry;
+		size_t old_entry_size;
 		BmsChunk c;
-		bms_init_chunk_at(entry, &c);
-
 		bitmapword words[32];
 		int cap_flags[32];
-		bms_expand_chunk_words(&c, words, cap_flags);
-
-		/* Clear the bit */
-		size_t within = (size_t)x - (size_t)aligned;
-		int slot = (int)(within / BITS_PER_BITMAPWORD);
-		int bit = (int)(within % BITS_PER_BITMAPWORD);
-		words[slot] &= ~((bitmapword)1 << bit);
-
-		/* Check if chunk is now empty */
+		size_t within;
+		int slot;
+		int bit;
 		bitmapword desc;
 		bitmapword vecs[32];
 		int nvecs;
-		bool has_bits = bms_encode_sparse_chunk(words, cap_flags, &desc, vecs, &nvecs);
+		bool has_bits;
+
+		idx = bms_find_chunk(a, aligned, &buf_off);
+		if (idx < 0)
+			return a;	/* bit not in any chunk */
+
+		entry = BMS_BUF(a) + buf_off;
+		old_entry_size = bms_chunk_entry_bytes(entry);
+
+		bms_init_chunk_at(entry, &c);
+		bms_expand_chunk_words(&c, words, cap_flags);
+
+		/* Clear the bit */
+		within = (size_t)x - (size_t)aligned;
+		slot = (int)(within / BITS_PER_BITMAPWORD);
+		bit = (int)(within % BITS_PER_BITMAPWORD);
+		words[slot] &= ~((bitmapword)1 << bit);
+
+		/* Check if chunk is now empty */
+		has_bits = bms_encode_sparse_chunk(words, cap_flags, &desc, vecs, &nvecs);
 
 		if (!has_bits)
 			return bms_remove_chunk(a, buf_off, old_entry_size);
@@ -2694,7 +2878,9 @@ bms_del_member(Bitmapset *a, int64_t x)
 	/* Trim trailing zero words */
 	if (BMS_WORDS(a)[wordnum] == 0 && wordnum == BMS_NWORDS(a) - 1)
 	{
-		for (int64_t i = wordnum - 1; i >= 0; i--)
+		int i;
+
+		for (i = wordnum - 1; i >= 0; i--)
 		{
 			if (BMS_WORDS(a)[i] != 0)
 			{
@@ -2794,9 +2980,9 @@ bms_replace_members(Bitmapset *a, const Bitmapset *b)
  * bms_add_range - add members in range [lower, upper]
  */
 Bitmapset *
-bms_add_range(Bitmapset *a, int64_t lower, int64_t upper)
+bms_add_range(Bitmapset *a, int lower, int upper)
 {
-	int64_t		lwordnum,
+	int			lwordnum,
 				lbitnum,
 				uwordnum,
 				ushiftbits,
@@ -2809,7 +2995,7 @@ bms_add_range(Bitmapset *a, int64_t lower, int64_t upper)
 		elog(ERROR, "negative bitmapset member not allowed");
 
 	/* If already chunked or range exceeds dense capacity, use chunked path */
-	if ((a != NULL && BMS_IS_CHUNKED(a)) || upper > BMS_DENSE_MAX_BIT)
+	if ((a != NULL && BMS_IS_CHUNKED(a)) || (int64_t)upper > BMS_DENSE_MAX_BIT)
 	{
 		if (a != NULL && !BMS_IS_CHUNKED(a))
 			a = bms_dense_to_chunked(a);
@@ -2827,28 +3013,44 @@ bms_add_range(Bitmapset *a, int64_t lower, int64_t upper)
 		 * Iterate over chunk-aligned regions in the range. For each chunk
 		 * that overlaps [lower, upper], expand, set the bits, encode, replace/insert.
 		 */
-		uint64_t first_chunk = bms_get_chunk_aligned_offset((size_t)lower);
-		uint64_t last_chunk = bms_get_chunk_aligned_offset((size_t)upper);
+		uint64_t first_chunk;
+		uint64_t last_chunk;
+		size_t scan_off;
+		unsigned scan_idx;
+		uint64_t chunk_start;
+
+		first_chunk = bms_get_chunk_aligned_offset((size_t)lower);
+		last_chunk = bms_get_chunk_aligned_offset((size_t)upper);
 
 		/* Track scan position to avoid O(n^2) re-scanning from the start */
-		size_t scan_off = 0;
-		unsigned scan_idx = 0;
+		scan_off = 0;
+		scan_idx = 0;
 
-		for (uint64_t chunk_start = first_chunk; chunk_start <= last_chunk;
+		for (chunk_start = first_chunk; chunk_start <= last_chunk;
 			 chunk_start += BMS_CHUNK_MAX_CAPACITY)
 		{
-			size_t buf_off = scan_off;
-			int idx = bms_find_chunk_from(a, chunk_start, &buf_off, scan_idx);
-
+			size_t buf_off;
+			int idx;
 			bitmapword words[32];
 			int cap_flags[32];
-			size_t old_entry_size = 0;
+			size_t old_entry_size;
+			uint8_t *entry;
+			BmsChunk c;
+			int64_t range_lo;
+			int64_t range_hi;
+			int64_t bit;
+			bitmapword desc;
+			bitmapword vecs[32];
+			int nvecs;
+
+			buf_off = scan_off;
+			idx = bms_find_chunk_from(a, chunk_start, &buf_off, scan_idx);
+			old_entry_size = 0;
 
 			if (idx >= 0)
 			{
-				uint8_t *entry = BMS_BUF(a) + buf_off;
+				entry = BMS_BUF(a) + buf_off;
 				old_entry_size = bms_chunk_entry_bytes(entry);
-				BmsChunk c;
 				bms_init_chunk_at(entry, &c);
 				bms_expand_chunk_words(&c, words, cap_flags);
 			}
@@ -2859,27 +3061,33 @@ bms_add_range(Bitmapset *a, int64_t lower, int64_t upper)
 			}
 
 			/* Set bits in range [lower, upper] within this chunk */
-			int64_t range_lo = (int64_t)chunk_start;
-			int64_t range_hi = (int64_t)chunk_start + BMS_CHUNK_MAX_CAPACITY - 1;
+			range_lo = (int64_t)chunk_start;
+			range_hi = (int64_t)chunk_start + BMS_CHUNK_MAX_CAPACITY - 1;
 			if (range_lo < lower)
 				range_lo = lower;
 			if (range_hi > upper)
 				range_hi = upper;
 
 			/* Set bits word by word within this chunk */
-			for (int64_t bit = range_lo; bit <= range_hi; )
+			for (bit = range_lo; bit <= range_hi; )
 			{
-				size_t within = (size_t)(bit - (int64_t)chunk_start);
-				int slot = (int)(within / BITS_PER_BITMAPWORD);
-				int bit_in_slot = (int)(within % BITS_PER_BITMAPWORD);
+				size_t within;
+				int slot;
+				int bit_in_slot;
+				int64_t slot_end;
+				int bit_end_in_slot;
+
+				within = (size_t)(bit - (int64_t)chunk_start);
+				slot = (int)(within / BITS_PER_BITMAPWORD);
+				bit_in_slot = (int)(within % BITS_PER_BITMAPWORD);
 
 				cap_flags[slot] = 1;
 
 				/* How many bits can we set in this slot? */
-				int64_t slot_end = (int64_t)chunk_start + (int64_t)(slot + 1) * BITS_PER_BITMAPWORD - 1;
+				slot_end = (int64_t)chunk_start + (int64_t)(slot + 1) * BITS_PER_BITMAPWORD - 1;
 				if (slot_end > range_hi)
 					slot_end = range_hi;
-				int bit_end_in_slot = (int)((size_t)(slot_end - (int64_t)chunk_start) % BITS_PER_BITMAPWORD);
+				bit_end_in_slot = (int)((size_t)(slot_end - (int64_t)chunk_start) % BITS_PER_BITMAPWORD);
 
 				if (bit_in_slot == 0 && bit_end_in_slot == BITS_PER_BITMAPWORD - 1)
 				{
@@ -2898,9 +3106,6 @@ bms_add_range(Bitmapset *a, int64_t lower, int64_t upper)
 				bit = slot_end + 1;
 			}
 
-			bitmapword desc;
-			bitmapword vecs[32];
-			int nvecs;
 			bms_encode_sparse_chunk(words, cap_flags, &desc, vecs, &nvecs);
 
 			if (idx >= 0)
@@ -2935,7 +3140,7 @@ bms_add_range(Bitmapset *a, int64_t lower, int64_t upper)
 	else if (uwordnum >= BMS_NWORDS(a))
 	{
 		int			oldnwords = BMS_NWORDS(a);
-		int64_t		i;
+		int			i;
 
 		a = (Bitmapset *) repalloc(a, BITMAPSET_SIZE(uwordnum + 1));
 		a->nwords = (uint32_t)(uwordnum + 1);
@@ -3128,11 +3333,23 @@ bms_next_member_chunked(const Bitmapset *a, int64_t prevbit)
 	unsigned used = BMS_USED_CHUNKS(a);
 	const uint8_t *p = BMS_BUF(a);
 	int64_t target = prevbit + 1;
+	unsigned ci;
 
-	for (unsigned ci = 0; ci < used; ci++)
+	for (ci = 0; ci < used; ci++)
 	{
-		uint64_t chunk_start = bms_read_chunk_start(p);
-		int64_t chunk_end = (int64_t)chunk_start + BMS_CHUNK_MAX_CAPACITY - 1;
+		uint64_t chunk_start;
+		int64_t chunk_end;
+		BmsChunk c;
+		bitmapword words[32];
+		int cap_flags[32];
+		int64_t search_from;
+		size_t within;
+		int start_slot;
+		int start_bit;
+		int slot;
+
+		chunk_start = bms_read_chunk_start(p);
+		chunk_end = (int64_t)chunk_start + BMS_CHUNK_MAX_CAPACITY - 1;
 
 		if (chunk_end < target)
 		{
@@ -3140,31 +3357,29 @@ bms_next_member_chunked(const Bitmapset *a, int64_t prevbit)
 			continue;
 		}
 
-		BmsChunk c;
 		bms_init_chunk_at(p, &c);
-
-		bitmapword words[32];
-		int cap_flags[32];
 		bms_expand_chunk_words(&c, words, cap_flags);
 
 		/* Search within this chunk starting from target */
-		int64_t search_from = target;
+		search_from = target;
 		if (search_from < (int64_t)chunk_start)
 			search_from = (int64_t)chunk_start;
 
-		size_t within = (size_t)(search_from - (int64_t)chunk_start);
-		int start_slot = (int)(within / BITS_PER_BITMAPWORD);
-		int start_bit = (int)(within % BITS_PER_BITMAPWORD);
+		within = (size_t)(search_from - (int64_t)chunk_start);
+		start_slot = (int)(within / BITS_PER_BITMAPWORD);
+		start_bit = (int)(within % BITS_PER_BITMAPWORD);
 
-		for (int slot = start_slot; slot < 32; slot++)
+		for (slot = start_slot; slot < 32; slot++)
 		{
 			bitmapword w = words[slot];
+
 			if (slot == start_slot)
 				w &= (~(bitmapword)0) << start_bit;
 
 			if (w != 0)
 			{
 				int64_t result = (int64_t)chunk_start + (int64_t)slot * BITS_PER_BITMAPWORD;
+
 				result += bmw_rightmost_one_pos(w);
 				return result;
 			}
@@ -3180,22 +3395,23 @@ bms_next_member_chunked(const Bitmapset *a, int64_t prevbit)
  *
  * Returns -2 if no more members.
  */
-int64_t
-bms_next_member(const Bitmapset *a, int64_t prevbit)
+int
+bms_next_member(const Bitmapset *a, int prevbit)
 {
 	int			nwords;
 	bitmapword	mask;
+	int			wordnum;
 
 	if (a == NULL)
 		return -2;
 
 	if (unlikely(BMS_IS_CHUNKED(a)))
-		return bms_next_member_chunked(a, prevbit);
+		return (int)bms_next_member_chunked(a, (int64_t)prevbit);
 
 	nwords = BMS_NWORDS(a);
 	prevbit++;
 	mask = (~(bitmapword) 0) << BITNUM(prevbit);
-	for (int64_t wordnum = WORDNUM(prevbit); wordnum < nwords; wordnum++)
+	for (wordnum = WORDNUM(prevbit); wordnum < nwords; wordnum++)
 	{
 		bitmapword	w = BMS_WORDS(a)[wordnum];
 
@@ -3203,7 +3419,7 @@ bms_next_member(const Bitmapset *a, int64_t prevbit)
 
 		if (w != 0)
 		{
-			int64_t		result;
+			int			result;
 
 			result = wordnum * BITS_PER_BITMAPWORD;
 			result += bmw_rightmost_one_pos(w);
@@ -3225,10 +3441,13 @@ static pg_noinline int64_t
 bms_prev_member_chunked(const Bitmapset *a, int64_t prevbit)
 {
 	unsigned used = BMS_USED_CHUNKS(a);
+	int64_t target;
+	const uint8_t *p;
+	int64_t best;
+	unsigned ci;
+
 	if (used == 0)
 		return -2;
-
-	int64_t target;
 
 	if (prevbit == -1)
 	{
@@ -3237,12 +3456,14 @@ bms_prev_member_chunked(const Bitmapset *a, int64_t prevbit)
 		 * the last possible bit in the last chunk -- this is a tight upper
 		 * bound without needing to expand the chunk to find the exact max.
 		 */
-		const uint8_t *p = BMS_BUF(a);
+		uint64_t chunk_start;
 
-		for (unsigned ci = 0; ci < used - 1; ci++)
+		p = BMS_BUF(a);
+
+		for (ci = 0; ci < used - 1; ci++)
 			p += bms_chunk_entry_bytes(p);
 
-		uint64_t chunk_start = bms_read_chunk_start(p);
+		chunk_start = bms_read_chunk_start(p);
 
 		target = (int64_t)chunk_start + BMS_CHUNK_MAX_CAPACITY - 1;
 	}
@@ -3260,34 +3481,37 @@ bms_prev_member_chunked(const Bitmapset *a, int64_t prevbit)
 	 * scan slots in reverse to find the highest set bit <= target.
 	 * The last chunk that yields a hit gives the final answer.
 	 */
-	const uint8_t *p = BMS_BUF(a);
-	int64_t best = -2;
+	p = BMS_BUF(a);
+	best = -2;
 
-	for (unsigned ci = 0; ci < used; ci++)
+	for (ci = 0; ci < used; ci++)
 	{
-		uint64_t chunk_start = bms_read_chunk_start(p);
+		uint64_t chunk_start;
+		BmsChunk c;
+		bitmapword words[32];
+		int cap_flags[32];
+		size_t within_limit;
+		int end_slot;
+		int end_bit;
+		int slot;
+
+		chunk_start = bms_read_chunk_start(p);
 
 		if ((int64_t)chunk_start > target)
 			break;
 
-		BmsChunk c;
 		bms_init_chunk_at(p, &c);
-
-		bitmapword words[32];
-		int cap_flags[32];
 		bms_expand_chunk_words(&c, words, cap_flags);
-
-		size_t within_limit;
 
 		if (target >= (int64_t)chunk_start + BMS_CHUNK_MAX_CAPACITY)
 			within_limit = BMS_CHUNK_MAX_CAPACITY - 1;
 		else
 			within_limit = (size_t)(target - (int64_t)chunk_start);
 
-		int end_slot = (int)(within_limit / BITS_PER_BITMAPWORD);
-		int end_bit = (int)(within_limit % BITS_PER_BITMAPWORD);
+		end_slot = (int)(within_limit / BITS_PER_BITMAPWORD);
+		end_bit = (int)(within_limit % BITS_PER_BITMAPWORD);
 
-		for (int slot = end_slot; slot >= 0; slot--)
+		for (slot = end_slot; slot >= 0; slot--)
 		{
 			bitmapword w = words[slot];
 
@@ -3317,29 +3541,30 @@ bms_prev_member_chunked(const Bitmapset *a, int64_t prevbit)
  *
  * Returns -2 if no more members.
  */
-int64_t
-bms_prev_member(const Bitmapset *a, int64_t prevbit)
+int
+bms_prev_member(const Bitmapset *a, int prevbit)
 {
-	int64_t		ushiftbits;
+	int			ushiftbits;
 	bitmapword	mask;
+	int			wordnum;
 
 	if (a == NULL || prevbit == 0)
 		return -2;
 
 	if (unlikely(BMS_IS_CHUNKED(a)))
-		return bms_prev_member_chunked(a, prevbit);
+		return (int)bms_prev_member_chunked(a, (int64_t)prevbit);
 
-	Assert(prevbit <= (int64_t)BMS_NWORDS(a) * BITS_PER_BITMAPWORD);
+	Assert(prevbit <= (int)BMS_NWORDS(a) * BITS_PER_BITMAPWORD);
 	Assert(prevbit >= -1);
 
 	if (prevbit == -1)
-		prevbit = (int64_t)BMS_NWORDS(a) * BITS_PER_BITMAPWORD - 1;
+		prevbit = BMS_NWORDS(a) * BITS_PER_BITMAPWORD - 1;
 	else
 		prevbit--;
 
 	ushiftbits = BITS_PER_BITMAPWORD - (BITNUM(prevbit) + 1);
 	mask = (~(bitmapword) 0) >> ushiftbits;
-	for (int64_t wordnum = WORDNUM(prevbit); wordnum >= 0; wordnum--)
+	for (wordnum = WORDNUM(prevbit); wordnum >= 0; wordnum--)
 	{
 		bitmapword	w = BMS_WORDS(a)[wordnum];
 
@@ -3347,7 +3572,7 @@ bms_prev_member(const Bitmapset *a, int64_t prevbit)
 
 		if (w != 0)
 		{
-			int64_t		result;
+			int			result;
 
 			result = wordnum * BITS_PER_BITMAPWORD;
 			result += bmw_leftmost_one_pos(w);
@@ -3367,7 +3592,9 @@ bms_prev_member(const Bitmapset *a, int64_t prevbit)
 static inline void
 fnv1a_hash_uint64(uint32_t *hash, uint64_t val)
 {
-	for (int i = 0; i < 8; i++)
+	int i;
+
+	for (i = 0; i < 8; i++)
 	{
 		*hash ^= (unsigned char)(val >> (i * 8));
 		*hash *= 16777619u;
@@ -3395,23 +3622,24 @@ bms_hash_value(const Bitmapset *a)
 	{
 		unsigned used = BMS_USED_CHUNKS(a);
 		const uint8_t *p = BMS_BUF(a);
+		unsigned ci;
 
-		for (unsigned ci = 0; ci < used; ci++)
+		for (ci = 0; ci < used; ci++)
 		{
-			uint64_t chunk_start = bms_read_chunk_start(p);
+			uint64_t chunk_start;
 			BmsChunk c;
 			uint64_t base_word;
-
-			bms_init_chunk_at(p, &c);
-
 			bitmapword words[32];
 			int cap_flags[32];
+			int w;
 
+			chunk_start = bms_read_chunk_start(p);
+			bms_init_chunk_at(p, &c);
 			bms_expand_chunk_words(&c, words, cap_flags);
 
 			/* Hash non-zero words using absolute word index */
 			base_word = chunk_start / BITS_PER_BITMAPWORD;
-			for (int w = 0; w < 32; w++)
+			for (w = 0; w < 32; w++)
 			{
 				if (words[w] == 0)
 					continue;
@@ -3426,13 +3654,17 @@ bms_hash_value(const Bitmapset *a)
 	}
 
 	/* Dense mode: same scheme - hash (word_index, word_value) for non-zero */
-	for (int i = 0; i < BMS_NWORDS(a); i++)
 	{
-		if (BMS_WORDS(a)[i] == 0)
-			continue;
+		int i;
 
-		fnv1a_hash_uint64(&hash, (uint64_t)i);
-		fnv1a_hash_uint64(&hash, BMS_WORDS(a)[i]);
+		for (i = 0; i < BMS_NWORDS(a); i++)
+		{
+			if (BMS_WORDS(a)[i] == 0)
+				continue;
+
+			fnv1a_hash_uint64(&hash, (uint64_t)i);
+			fnv1a_hash_uint64(&hash, BMS_WORDS(a)[i]);
+		}
 	}
 	return hash;
 }

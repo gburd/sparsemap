@@ -339,7 +339,7 @@ static void op_populate_hybrid(void *ctx_) {
     populate_ctx_t *ctx = ctx_;
     HybridBitmapset *b = NULL;
     for (size_t i = 0; i < ctx->count; i++)
-        b = hybrid_bms_add_member(b, (int64_t)ctx->bits[i]);
+        b = hybrid_bms_add_member(b, (int)ctx->bits[i]);
     hybrid_bms_free(b);
 }
 
@@ -372,7 +372,7 @@ static void op_contains_bms(void *ctx_) {
 static void op_contains_hybrid(void *ctx_) {
     contains_ctx_t *ctx = ctx_;
     for (size_t i = 0; i < ctx->count; i++)
-        ctx->sink = hybrid_bms_is_member((int64_t)ctx->bits[i], ctx->handle);
+        ctx->sink = hybrid_bms_is_member((int)ctx->bits[i], ctx->handle);
 }
 
 /* --- Cardinality --- */
@@ -432,7 +432,7 @@ static void op_rank_bms(void *ctx_) {
 static void op_rank_hybrid(void *ctx_) {
     rank_ctx_t *ctx = ctx_;
     size_t c = 0;
-    int64_t x = -1;
+    int x = -1;
     while ((x = hybrid_bms_next_member(ctx->handle, x)) >= 0) {
         if ((uint32_t)x <= ctx->mid) c++;
         else break;
@@ -472,7 +472,7 @@ static void op_select_bms(void *ctx_) {
 
 static void op_select_hybrid(void *ctx_) {
     select_ctx_t *ctx = ctx_;
-    int64_t x = -1;
+    int x = -1;
     uint32_t count = 0;
     while ((x = hybrid_bms_next_member(ctx->handle, x)) >= 0) {
         if (count == ctx->n) { ctx->sink = (uint32_t)x; return; }
@@ -611,9 +611,9 @@ static void op_iter_bms(void *ctx_) {
 static void op_iter_hybrid(void *ctx_) {
     iter_ctx_t *ctx = ctx_;
     ctx->checksum = 0;
-    int64_t x = -1;
+    int x = -1;
     while ((x = hybrid_bms_next_member(ctx->handle, x)) >= 0)
-        ctx->checksum += (uint64_t)x;
+        ctx->checksum += (uint32_t)x;
 }
 
 /* --- Offset --- */
@@ -642,7 +642,7 @@ static void op_offset_bms(void *ctx_) {
 
 static void op_offset_hybrid(void *ctx_) {
     offset_ctx_t *ctx = ctx_;
-    HybridBitmapset *r = hybrid_bms_offset_members(ctx->handle, (int64_t)ctx->offset);
+    HybridBitmapset *r = hybrid_bms_offset_members(ctx->handle, (int)ctx->offset);
     if (r) hybrid_bms_free(r);
 }
 
@@ -670,7 +670,7 @@ static void op_min_bms(void *ctx_) {
 
 static void op_min_hybrid(void *ctx_) {
     minmax_ctx_t *ctx = ctx_;
-    int64_t r = hybrid_bms_next_member(ctx->handle, -1);
+    int r = hybrid_bms_next_member(ctx->handle, -1);
     ctx->sink = (r >= 0) ? (uint32_t)r : 0;
 }
 
@@ -695,7 +695,7 @@ static void op_max_bms(void *ctx_) {
 
 static void op_max_hybrid(void *ctx_) {
     minmax_ctx_t *ctx = ctx_;
-    int64_t last = -1, x = -1;
+    int last = -1, x = -1;
     while ((x = hybrid_bms_next_member(ctx->handle, x)) >= 0)
         last = x;
     ctx->sink = (last >= 0) ? (uint32_t)last : 0;
@@ -739,7 +739,7 @@ static void bench_one_pattern(pattern_t *pat, bool skip_bms, bool verify_only) {
     /* Hybrid bitmapset: never skipped -- it handles large universes */
     HybridBitmapset *hybrid_handle = NULL;
     for (size_t i = 0; i < count; i++)
-        hybrid_handle = hybrid_bms_add_member(hybrid_handle, (int64_t)bits[i]);
+        hybrid_handle = hybrid_bms_add_member(hybrid_handle, (int)bits[i]);
 
     /* --- Verify cross-library correctness --- */
     size_t sm_card = sparsemap_cardinality(sm_handle);
@@ -759,7 +759,7 @@ static void bench_one_pattern(pattern_t *pat, bool skip_bms, bool verify_only) {
         bool sm_has = sparsemap_contains(sm_handle, bits[i]);
         bool rb_has = roaring_bitmap_contains(rb_handle, bits[i]);
         bool bms_has = skip_bms ? sm_has : bms_is_member((int)bits[i], bms_handle);
-        bool hybrid_has = hybrid_bms_is_member((int64_t)bits[i], hybrid_handle);
+        bool hybrid_has = hybrid_bms_is_member((int)bits[i], hybrid_handle);
         if (!sm_has || !rb_has || !bms_has || !hybrid_has) {
             fprintf(stderr, "  VERIFY FAIL: bit %u missing in sm=%d rb=%d bms=%d hybrid=%d\n",
                     bits[i], sm_has, rb_has, bms_has, hybrid_has);

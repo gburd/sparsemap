@@ -135,7 +135,7 @@ $(SOAK_BINARY): $(SOAK_OBJECTS) $(LIB_STATIC)
 
 bench: $(BENCH_BINARY)
 
-BENCH_CFLAGS = -std=gnu11 -Wall -Wextra -I./include -I./test -O2 -march=native -g -fno-omit-frame-pointer -fno-semantic-interposition
+BENCH_CFLAGS = -std=gnu11 -Wall -Wextra -I./include -I./test -O2 -march=native -g -fno-omit-frame-pointer -fno-semantic-interposition -fno-strict-aliasing
 
 # Bench-critical objects need -march=native and -fno-semantic-interposition at
 # compile time (not just link time) so the compiler can inline across the

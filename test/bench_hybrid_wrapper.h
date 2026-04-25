@@ -18,15 +18,15 @@
 typedef struct HybridBitmapset HybridBitmapset;
 
 /* Wrapper functions with hybrid_ prefix */
-HybridBitmapset *hybrid_bms_add_member(HybridBitmapset *a, int64_t x);
+HybridBitmapset *hybrid_bms_add_member(HybridBitmapset *a, int x);
 void hybrid_bms_free(HybridBitmapset *a);
-bool hybrid_bms_is_member(int64_t x, const HybridBitmapset *a);
-int64_t hybrid_bms_num_members(const HybridBitmapset *a);
+bool hybrid_bms_is_member(int x, const HybridBitmapset *a);
+int hybrid_bms_num_members(const HybridBitmapset *a);
 HybridBitmapset *hybrid_bms_union(const HybridBitmapset *a, const HybridBitmapset *b);
 HybridBitmapset *hybrid_bms_intersect(const HybridBitmapset *a, const HybridBitmapset *b);
 HybridBitmapset *hybrid_bms_difference(const HybridBitmapset *a, const HybridBitmapset *b);
-int64_t hybrid_bms_next_member(const HybridBitmapset *a, int64_t prevbit);
-HybridBitmapset *hybrid_bms_offset_members(const HybridBitmapset *a, int64_t offset);
+int hybrid_bms_next_member(const HybridBitmapset *a, int prevbit);
+HybridBitmapset *hybrid_bms_offset_members(const HybridBitmapset *a, int offset);
 HybridBitmapset *hybrid_bms_copy(const HybridBitmapset *a);
 
 /* Memory size reporting */
