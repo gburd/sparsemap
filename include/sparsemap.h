@@ -140,10 +140,10 @@ extern "C" {
 #endif
 
 /** Library version (kept in sync with meson.build's project(version: ...)). */
-#define SM_VERSION_STRING "1.1.0"
+#define SM_VERSION_STRING "1.1.1"
 #define SM_VERSION_MAJOR  1
 #define SM_VERSION_MINOR  1
-#define SM_VERSION_PATCH  0
+#define SM_VERSION_PATCH  1
 
 /** Opaque handle to a sparsemap instance. */
 typedef struct sparsemap sparsemap_t;

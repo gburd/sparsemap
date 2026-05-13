@@ -6,6 +6,67 @@ follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.1.1] — 2026-05-13
+
+Deferred-bug closure release.
+
+### Fixed
+
+- **Deferred bug #3 (sm_split underflow):** `sm_open` now temporarily
+  sets `m_data_used = m_capacity` before calling `__sm_get_size_impl`,
+  so the v1.0.0 empty-map guard in `__sm_get_chunk_count` doesn't
+  short-circuit when sm_open is initializing a fully-populated stunt
+  buffer.  Closes the test_api_split ASan failure that's been open
+  since v1.0.0.  Drops the `-fno-stack-protector` workaround on
+  test_main.
+- **Deferred bug #2 (UBSan misalignment):** chunk descriptors and
+  payload vectors live at offset 4-mod-8 in the buffer.  Introduced
+  `__sm_bitvec_unaligned_t` (uint64_t with `aligned(1)`) for
+  `__sm_chunk_t.m_data` so loads and stores through it are
+  unaligned-safe.  Modern compilers lower to single native
+  load/store; strict-alignment cpus get correct byte-shuffled access.
+- **`sm_fill_factor` bugs:** returned NaN on empty maps (0/0),
+  returned a percentage despite docs saying `[0, 1]`, and used max
+  (not max-min+1) for the range.  Reimplemented to match the
+  documented contract.
+- **Logic bug in `__sm_separate_rle_chunk`:** vector-within-chunk
+  index was computed as `(aligned_idx + lrl) / SM_BITS_PER_VECTOR`,
+  which mixes absolute bit position with chunk-relative length and
+  produced shift exponents up to 952 (UB).  Fixed to use just `lrl /
+  SM_BITS_PER_VECTOR`.
+- **Logic bug in test-only QCC_genChunk shuffle:** size_t underflow.
+  Replaced with proper Fisher-Yates step.
+- **Test-only struct overlay misalignment:** test code was overlaying
+  `__sm_chunk_t` on misaligned malloc'd buffers.  Refactored to
+  stack-local chunk struct.
+
+### Added
+
+- `tests/test_coverage.c` exercises sm_fill_factor, sm_owned_copy,
+  sm_free, sm_capacity_remaining, sm_minimum, sm_maximum, sm_select
+  edge cases, sm_span dense-run case.  Caught the sm_fill_factor bug
+  fixed above.
+- `SM_LIKELY` / `SM_UNLIKELY` macros over `__builtin_expect`.
+- `__attribute__((hot))` on `sm_add`, `sm_remove`, `sm_contains`.
+
+### Verified
+
+  Regular  (x86_64): 5/5 PASS
+  ASan     (x86_64): 5/5 PASS, 0 errors
+  UBSan    (x86_64): 5/5 PASS, 0 distinct runtime errors
+  Valgrind (x86_64): 50/50 sub-tests in test_main, 0 errors, 0 leaks
+  RISC-V   (rv):     5/5 PASS
+
+  All deferred bugs from v1.0.0 / v1.1.0 closed.  No `-fno-stack-protector`
+  or `-U_FORTIFY_SOURCE` workarounds remain in tests/meson.build.
+
+### Known limitations
+
+- Test coverage measured at 38.8% lines / 28.6% branches / 70.8%
+  functions.  Reaching the >95% target is multi-day focused
+  property-test work primarily targeting the RLE separation and
+  chunk-merge code paths.  Future work.
+
 ## [1.1.0] — 2026-05-13
 
 API rename, RISC-V portability fix, and v1.0.0 followups.
