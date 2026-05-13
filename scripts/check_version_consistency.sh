@@ -5,7 +5,7 @@
 # version string disagrees across its three sources of truth:
 #
 #   meson.build               (project(version: '...'))
-#   include/sparsemap.h       (SPARSEMAP_VERSION_STRING define)
+#   include/sparsemap.h       (SM_VERSION_STRING define)
 #   CHANGELOG.md              (most recent ## section header)
 #
 # CI runs this on every push so a version bump that forgets one
@@ -19,8 +19,8 @@ MESON=$(grep -E "^[[:space:]]*version[[:space:]]*:" meson.build \
         | head -1 \
         | sed -E "s/.*version[[:space:]]*:[[:space:]]*'([^']+)'.*/\1/")
 
-# 2. include/sparsemap.h — look for SPARSEMAP_VERSION_STRING.
-HEADER=$(grep -E '^#define[[:space:]]+SPARSEMAP_VERSION_STRING' \
+# 2. include/sparsemap.h — look for SM_VERSION_STRING.
+HEADER=$(grep -E '^#define[[:space:]]+SM_VERSION_STRING' \
          include/sparsemap.h 2>/dev/null \
          | head -1 \
          | sed -E 's/.*"([^"]+)".*/\1/')
@@ -46,7 +46,7 @@ if [ -z "$MESON" ]; then
 fi
 
 if [ -n "$HEADER" ] && [ "$HEADER" != "$MESON" ]; then
-    printf 'check_version: include/sparsemap.h SPARSEMAP_VERSION_STRING %s != meson %s\n' \
+    printf 'check_version: include/sparsemap.h SM_VERSION_STRING %s != meson %s\n' \
            "$HEADER" "$MESON" >&2
     fail=1
 fi

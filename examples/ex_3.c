@@ -58,17 +58,17 @@ main(void)
   uint8_t *buf = calloc(1024, sizeof(uint8_t));
 
   // create the sparse bitmap
-  sparsemap_t *map = sparsemap_wrap(buf, sizeof(uint8_t) * 1024);
+  sparsemap_t *map = sm_wrap(buf, sizeof(uint8_t) * 1024);
 
   // set all the bits on in a random order
   for (i = 0; i < 1024; i++) {
     __diag("set %d\n", array[i]);
-    sparsemap_add(map, array[i]);
-    assert(sparsemap_contains(map, array[i]) == true);
+    sm_add(map, array[i]);
+    assert(sm_contains(map, array[i]) == true);
   }
 
-  sparsemap_add(map, 1025);
-  assert(sparsemap_contains(map, 1025) == true);
+  sm_add(map, 1025);
+  assert(sm_contains(map, 1025) == true);
 
   return 0;
 }

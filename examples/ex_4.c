@@ -24,7 +24,7 @@ main(void)
   uint8_t *buf = calloc((size_t)3 * 1024, sizeof(uint8_t));
 
   // create the sparse bitmap
-  sparsemap_t *map = sparsemap_wrap(buf, sizeof(uint8_t) * 3 * 1024);
+  sparsemap_t *map = sm_wrap(buf, sizeof(uint8_t) * 3 * 1024);
 
   // create an array of ints
   setup_test_array(array, TEST_ARRAY_SIZE, 1024 * 3);
@@ -36,8 +36,8 @@ main(void)
 
   // set all the bits on in a random order
   for (i = 0; i < TEST_ARRAY_SIZE; i++) {
-    sparsemap_add(map, array[i]);
-    assert(sparsemap_contains(map, array[i]) == true);
+    sm_add(map, array[i]);
+    assert(sm_contains(map, array[i]) == true);
   }
 
   // for (size_t len = 1; len < 20; len++) {
@@ -50,23 +50,23 @@ main(void)
   // for (size_t len = 8; len <= 8; len++) {
   for (size_t len = 372; len <= 372; len++) {
     __diag("================> %lu\n", len);
-    sparsemap_clear(map);
+    sm_clear(map);
     // set all the bits on in a random order
     ensure_sequential_set(array, TEST_ARRAY_SIZE, (int)len);
     shuffle(array, TEST_ARRAY_SIZE);
     print_spans(array, TEST_ARRAY_SIZE);
     for (i = 0; i < TEST_ARRAY_SIZE; i++) {
-      sparsemap_add(map, array[i]);
-      assert(sparsemap_contains(map, array[i]) == true);
+      sm_add(map, array[i]);
+      assert(sm_contains(map, array[i]) == true);
     }
     has_span(map, array, TEST_ARRAY_SIZE, (int)len);
-    uint64_t l = sparsemap_span(map, 0, len, true);
-    if (SPARSEMAP_FOUND(l)) {
+    uint64_t l = sm_span(map, 0, len, true);
+    if (SM_FOUND(l)) {
       __diag("Found span in map starting at %lu of length %lu\n", l, len);
       __diag("is_span(%lu, %lu) == %s\n", l, len, is_span(array, TEST_ARRAY_SIZE, l, len) ? "yes" : "no");
       i = (int)l;
       do {
-        bool set = sparsemap_contains(map, i);
+        bool set = sm_contains(map, i);
         if (set) {
           __diag("verified %d was set\n", i);
         } else {

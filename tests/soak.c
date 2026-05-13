@@ -349,8 +349,8 @@ record_merge_mutation(FILE *out, void *handle)
 {
   if (recording) {
     sparsemap_t *map = (sparsemap_t *)handle;
-    fprintf(out, "merge %zu ", sparsemap_maximum(map));
-    sparsemap_scan(map, __scan_record_offsets, 0, (void *)out);
+    fprintf(out, "merge %zu ", sm_maximum(map));
+    sm_scan(map, __scan_record_offsets, 0, (void *)out);
     fprintf(out, "\n");
   }
 }
@@ -360,10 +360,10 @@ record_checkpoint(FILE *out, void *handle)
 {
   if (recording) {
     sparsemap_t *map = (sparsemap_t *)handle;
-    size_t capacity = sparsemap_get_capacity(map);
-    size_t buffer_size = sparsemap_get_size(map);
+    size_t capacity = sm_get_capacity(map);
+    size_t buffer_size = sm_get_size(map);
     size_t encoded_size = b64_encoded_size(buffer_size);
-    char *encoded = b64_encode(sparsemap_get_data(map), buffer_size);
+    char *encoded = b64_encode(sm_get_data(map), buffer_size);
     fprintf(out, "checkpoint %zu %zu %zu ", capacity, buffer_size, encoded_size);
     fprintf(out, "%s", encoded);
     fprintf(out, "\n");
@@ -377,11 +377,11 @@ _sparsemap_set(sparsemap_t **_map, uint64_t idx, bool value)
 {
   sparsemap_t *map = *_map, *new_map = NULL;
   do {
-    uint64_t l = sparsemap_assign(map, idx, value);
+    uint64_t l = sm_assign(map, idx, value);
     if (l != idx) {
       if (errno == ENOSPC) {
-        size_t capacity = sparsemap_get_capacity(map) + 64;
-        new_map = sparsemap_set_data_size(map, NULL, capacity);
+        size_t capacity = sm_get_capacity(map) + 64;
+        new_map = sm_set_data_size(map, NULL, capacity);
         assert(new_map != NULL);
         errno = 0;
         *_map = new_map;
@@ -420,7 +420,7 @@ static bool
 __sm_is_set(void *handle, pgno_t pg)
 {
   sparsemap_t *map = (sparsemap_t *)handle;
-  return sparsemap_contains(map, pg);
+  return sm_contains(map, pg);
 }
 
 static pgno_t
@@ -434,8 +434,8 @@ static pgno_t
 __sm_find_span(void *handle, unsigned len)
 {
   sparsemap_t *map = (sparsemap_t *)handle;
-  pgno_t pgno = (pgno_t)sparsemap_span(map, 0, len, true);
-  return SPARSEMAP_NOT_FOUND(pgno) ? (pgno_t)-1 : pgno;
+  pgno_t pgno = (pgno_t)sm_span(map, 0, len, true);
+  return SM_NOT_FOUND(pgno) ? (pgno_t)-1 : pgno;
 }
 
 static bool
@@ -463,7 +463,7 @@ __sm_is_span(void *handle, pgno_t pg, unsigned len)
 {
   sparsemap_t *map = (sparsemap_t *)handle;
   for (pgno_t i = pg; i < pg + len; i++) {
-    if (sparsemap_contains(map, i) != true) {
+    if (sm_contains(map, i) != true) {
       return false;
     }
   }
@@ -475,7 +475,7 @@ __sm_is_empty(void *handle, pgno_t pg, unsigned len)
 {
   sparsemap_t *map = (sparsemap_t *)handle;
   for (pgno_t i = 0; i < len; i++) {
-    if (sparsemap_contains(map, pg + i) != false) {
+    if (sm_contains(map, pg + i) != false) {
       return false;
     }
   }
@@ -488,7 +488,7 @@ __sm_is_first(void *handle, pgno_t pg, unsigned len)
   sparsemap_t *map = (sparsemap_t *)handle;
   for (uint64_t i = 0; i < pg + len; i++) {
     uint64_t j = 0;
-    while (sparsemap_contains(map, i + j) == true && j < len) {
+    while (sm_contains(map, i + j) == true && j < len) {
       j++;
     }
     if (j == len) {
@@ -503,7 +503,7 @@ __sm_merge(void **handle, void *other_handle)
 {
   sparsemap_t **map = (sparsemap_t **)handle;
   sparsemap_t *other = (sparsemap_t *)other_handle;
-  sparsemap_t *merged = sparsemap_union(*map, other);
+  sparsemap_t *merged = sm_union(*map, other);
   if (merged == NULL) {
     /* Both empty — nothing to merge, that's fine. */
     return true;
@@ -517,14 +517,14 @@ static size_t
 __sm_size(void *handle)
 {
   sparsemap_t *map = (sparsemap_t *)handle;
-  return sparsemap_get_size(map);
+  return sm_get_size(map);
 }
 
 static size_t
 __sm_count(void *handle)
 {
   sparsemap_t *map = (sparsemap_t *)handle;
-  return sparsemap_rank(map, 0, SPARSEMAP_IDX_MAX, true);
+  return sm_rank(map, 0, SM_IDX_MAX, true);
 }
 
 /* midl ------------------------------------------------------------------ */
@@ -1114,13 +1114,13 @@ verify_sm_eq_rb(sparsemap_t *map, roaring_bitmap_t *rbm)
   roaring_iterator_init(rbm, &iter);
   for (uint64_t i = 0; i <= max; i++) {
     if (i == iter.current_value) {
-      if (sparsemap_contains(map, i) == false) {
+      if (sm_contains(map, i) == false) {
         fprintf(stdout, "- %zu ", i);
         ret = false;
       }
       roaring_uint32_iterator_advance(&iter);
     } else {
-      if (sparsemap_contains(map, i) == true) {
+      if (sm_contains(map, i) == true) {
         fprintf(stdout, "+ %zu ", i);
         ret = false;
       }
@@ -1138,13 +1138,13 @@ verify_sm_eq_ml(sparsemap_t *map, MDB_IDL list)
     unsigned skipped = i == 1 ? 0 : list[i - 1] - list[i] - 1;
     if (skipped) {
       for (MDB_ID j = list[i - 1]; j > list[i]; j--) {
-        if (sparsemap_contains(map, pg - j) != false) {
+        if (sm_contains(map, pg - j) != false) {
           fprintf(stdout, "+ %zu ", pg - j);
           ret = false;
         }
       }
     }
-    if (sparsemap_contains(map, pg) != true) {
+    if (sm_contains(map, pg) != true) {
       fprintf(stdout, "- %zu ", pg);
       ret = false;
     }
@@ -1379,12 +1379,12 @@ main(int argc, char *argv[])
         // Find a hole in the map to replenish.
         do {
           len = toss(15) + 1;
-          pgno = sparsemap_span(handles[SM], 0, len, false);
-        } while (SPARSEMAP_NOT_FOUND(pgno) && --retries);
+          pgno = sm_span(handles[SM], 0, len, false);
+        } while (SM_NOT_FOUND(pgno) && --retries);
         if (retries == 0) {
           goto larger_please;
         }
-        if (SPARSEMAP_FOUND(pgno)) {
+        if (SM_FOUND(pgno)) {
           foreach(types)
           {
             assert(invoke(type, is_empty, pgno, len));
@@ -1408,7 +1408,7 @@ main(int argc, char *argv[])
       size_t new_offset, new_amt;
     larger_please:
       new_amt = 1024 + (xorshift32() % 2048) + toss(1024);
-      new_offset = sparsemap_maximum(handles[SM]) + 1;
+      new_offset = sm_maximum(handles[SM]) + 1;
 
       // Build a new container to merge with the existing one.
       foreach(types)

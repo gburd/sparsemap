@@ -290,13 +290,13 @@ static void op_populate_sm(void *ctx_) {
     for (size_t i = 0; i < ctx->count; i++) {
         uint64_t r;
         do {
-            r = sparsemap_add(map, ctx->bits[i]);
-            if (SPARSEMAP_NOT_FOUND(r) && errno == ENOSPC) {
-                size_t cap = sparsemap_get_capacity(map);
-                map = sparsemap_set_data_size(map, NULL, cap * 2);
+            r = sm_add(map, ctx->bits[i]);
+            if (SM_NOT_FOUND(r) && errno == ENOSPC) {
+                size_t cap = sm_get_capacity(map);
+                map = sm_set_data_size(map, NULL, cap * 2);
                 errno = 0;
             }
-        } while (SPARSEMAP_NOT_FOUND(r));
+        } while (SM_NOT_FOUND(r));
     }
     free(map);
 }
@@ -328,7 +328,7 @@ typedef struct {
 static void op_contains_sm(void *ctx_) {
     contains_ctx_t *ctx = ctx_;
     for (size_t i = 0; i < ctx->count; i++)
-        ctx->sink = sparsemap_contains(ctx->handle, ctx->bits[i]);
+        ctx->sink = sm_contains(ctx->handle, ctx->bits[i]);
 }
 
 static void op_contains_rb(void *ctx_) {
@@ -351,7 +351,7 @@ typedef struct {
 
 static void op_card_sm(void *ctx_) {
     card_ctx_t *ctx = ctx_;
-    ctx->sink = sparsemap_cardinality(ctx->handle);
+    ctx->sink = sm_cardinality(ctx->handle);
 }
 
 static void op_card_rb(void *ctx_) {
@@ -373,7 +373,7 @@ typedef struct {
 
 static void op_rank_sm(void *ctx_) {
     rank_ctx_t *ctx = ctx_;
-    ctx->sink = sparsemap_rank(ctx->handle, 0, ctx->mid, true);
+    ctx->sink = sm_rank(ctx->handle, 0, ctx->mid, true);
 }
 
 static void op_rank_rb(void *ctx_) {
@@ -401,7 +401,7 @@ typedef struct {
 
 static void op_select_sm(void *ctx_) {
     select_ctx_t *ctx = ctx_;
-    uint64_t r = sparsemap_select(ctx->handle, ctx->n, true);
+    uint64_t r = sm_select(ctx->handle, ctx->n, true);
     ctx->sink = (uint32_t)r;
 }
 
@@ -431,7 +431,7 @@ typedef struct {
 
 static void op_union_sm(void *ctx_) {
     union_ctx_t *ctx = ctx_;
-    sparsemap_t *r = sparsemap_union(ctx->a, ctx->b);
+    sparsemap_t *r = sm_union(ctx->a, ctx->b);
     free(r);
 }
 
@@ -455,7 +455,7 @@ typedef struct {
 
 static void op_intersect_sm(void *ctx_) {
     intersect_ctx_t *ctx = ctx_;
-    sparsemap_t *r = sparsemap_intersection(ctx->a, ctx->b);
+    sparsemap_t *r = sm_intersection(ctx->a, ctx->b);
     if (r) free(r);
 }
 
@@ -479,7 +479,7 @@ typedef struct {
 
 static void op_difference_sm(void *ctx_) {
     difference_ctx_t *ctx = ctx_;
-    sparsemap_t *r = sparsemap_difference(ctx->a, ctx->b);
+    sparsemap_t *r = sm_difference(ctx->a, ctx->b);
     if (r) free(r);
 }
 
@@ -510,7 +510,7 @@ static void sm_bench_scan_cb(uint32_t vec[], size_t n, void *aux) {
 static void op_iter_sm(void *ctx_) {
     iter_ctx_t *ctx = ctx_;
     ctx->checksum = 0;
-    sparsemap_scan(ctx->handle, sm_bench_scan_cb, 0, (void *)&ctx->checksum);
+    sm_scan(ctx->handle, sm_bench_scan_cb, 0, (void *)&ctx->checksum);
 }
 
 static void op_iter_rb(void *ctx_) {
@@ -540,7 +540,7 @@ typedef struct {
 
 static void op_offset_sm(void *ctx_) {
     offset_ctx_t *ctx = ctx_;
-    sparsemap_t *r = sparsemap_offset(ctx->handle, ctx->offset);
+    sparsemap_t *r = sm_offset(ctx->handle, ctx->offset);
     if (r) free(r);
 }
 
@@ -564,7 +564,7 @@ typedef struct {
 
 static void op_min_sm(void *ctx_) {
     minmax_ctx_t *ctx = ctx_;
-    ctx->sink = (uint32_t)sparsemap_minimum(ctx->handle);
+    ctx->sink = (uint32_t)sm_minimum(ctx->handle);
 }
 
 static void op_min_rb(void *ctx_) {
@@ -581,7 +581,7 @@ static void op_min_bms(void *ctx_) {
 /* --- Maximum --- */
 static void op_max_sm(void *ctx_) {
     minmax_ctx_t *ctx = ctx_;
-    ctx->sink = (uint32_t)sparsemap_maximum(ctx->handle);
+    ctx->sink = (uint32_t)sm_maximum(ctx->handle);
 }
 
 static void op_max_rb(void *ctx_) {
@@ -613,13 +613,13 @@ static void bench_one_pattern(pattern_t *pat, bool skip_bms, bool verify_only) {
     for (size_t i = 0; i < count; i++) {
         uint64_t r;
         do {
-            r = sparsemap_add(sm_handle, bits[i]);
-            if (SPARSEMAP_NOT_FOUND(r) && errno == ENOSPC) {
-                size_t cap = sparsemap_get_capacity(sm_handle);
-                sm_handle = sparsemap_set_data_size(sm_handle, NULL, cap * 2);
+            r = sm_add(sm_handle, bits[i]);
+            if (SM_NOT_FOUND(r) && errno == ENOSPC) {
+                size_t cap = sm_get_capacity(sm_handle);
+                sm_handle = sm_set_data_size(sm_handle, NULL, cap * 2);
                 errno = 0;
             }
-        } while (SPARSEMAP_NOT_FOUND(r));
+        } while (SM_NOT_FOUND(r));
     }
 
     roaring_bitmap_t *rb_handle = roaring_bitmap_create();
@@ -633,7 +633,7 @@ static void bench_one_pattern(pattern_t *pat, bool skip_bms, bool verify_only) {
     }
 
     /* --- Verify cross-library correctness --- */
-    size_t sm_card = sparsemap_cardinality(sm_handle);
+    size_t sm_card = sm_cardinality(sm_handle);
     size_t rb_card = (size_t)roaring_bitmap_get_cardinality(rb_handle);
     size_t bms_card = skip_bms ? sm_card : (size_t)bms_num_members(bms_handle);
 
@@ -646,7 +646,7 @@ static void bench_one_pattern(pattern_t *pat, bool skip_bms, bool verify_only) {
 
     /* Verify contains for a sample of bits */
     for (size_t i = 0; i < count && i < 100; i++) {
-        bool sm_has = sparsemap_contains(sm_handle, bits[i]);
+        bool sm_has = sm_contains(sm_handle, bits[i]);
         bool rb_has = roaring_bitmap_contains(rb_handle, bits[i]);
         bool bms_has = skip_bms ? sm_has : bms_is_member((int)bits[i], bms_handle);
         if (!sm_has || !rb_has || !bms_has) {
@@ -662,7 +662,7 @@ static void bench_one_pattern(pattern_t *pat, bool skip_bms, bool verify_only) {
     }
 
     /* --- Memory --- */
-    size_t sm_mem = sparsemap_get_size(sm_handle) + 32; /* opaque struct overhead */
+    size_t sm_mem = sm_get_size(sm_handle) + 32; /* opaque struct overhead */
     size_t rb_mem = roaring_bitmap_size_in_bytes(rb_handle);
     size_t bms_mem = skip_bms ? 0 :
         (offsetof(Bitmapset, words) + (size_t)bms_handle->nwords * sizeof(bitmapword));

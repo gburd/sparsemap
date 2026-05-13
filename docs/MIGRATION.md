@@ -11,15 +11,15 @@ you sync to v1.0.0 and how to drop your local patches.
   `palloc(sizeof(sparsemap_t))` or `calloc(1, sizeof(sparsemap_t))`,
   recompile against the v1 header and you're done — the new field
   zero-initializes correctly.
-- **`sparsemap_set_data_size` no longer silently no-ops.**  See
+- **`sm_set_data_size` no longer silently no-ops.**  See
   [HEISENBUG_REPORT.md](../HEISENBUG_REPORT.md) for what it used to
   do; the new behavior is in [API.md](API.md).
 - **`__sm_get_chunk_count` returns 0 when `m_data_used == 0`.**
   Drop any local patches that defended against the "garbage chunk
   count" bug.
-- **Two new public functions:** `sparsemap_create()` (verb-named
-  alias of `sparsemap()`), `sparsemap_free()` (lineage-aware
-  disposal), `sparsemap_owned_copy()` (universal lineage normalizer).
+- **Two new public functions:** `sm_create()` (verb-named
+  alias of `sparsemap()`), `sm_free()` (lineage-aware
+  disposal), `sm_owned_copy()` (universal lineage normalizer).
 
 ## Per-consumer notes
 
@@ -30,25 +30,25 @@ You can drop these local patches:
 | pg_tre patch                          | Reason                          |
 |---------------------------------------|----------------------------------|
 | `BUG FIX: m_data_used = 0 but ...`    | `__sm_get_chunk_count` now      |
-|   in sparsemap_intersection           | guards internally.              |
+|   in sm_intersection           | guards internally.              |
 | `BUG FIX: m_data_used = 0 but ...`    | Same.                           |
-|   in sparsemap_union                  |                                  |
+|   in sm_union                  |                                  |
 | `BUG FIX: m_data_used = 0 but ...`    | Same.                           |
-|   in sparsemap_maximum                |                                  |
+|   in sm_maximum                |                                  |
 | `BUG FIX: m_data_used = 0 but ...`    | Same.                           |
 |   in __sm_rank_vec                    |                                  |
 
 You can also simplify:
 
 - `pg_tre_posting_materialize`: replace the manual
-  `sparsemap()`-then-memcpy-then-`sparsemap_open` dance with
-  `sparsemap_owned_copy(wrap'd_map)`.
+  `sparsemap()`-then-memcpy-then-`sm_open` dance with
+  `sm_owned_copy(wrap'd_map)`.
 - `materialize_merged_postings`: same simplification.
 - `apply_tuple_bloom_filter`: the grow-and-recheck workaround can
   stay (it's still good defensive code), but the underlying bug it
   worked around is fixed.
 - The pending-list overlay's `palloc`'d `uint64` array workaround
-  can either stay or be reverted to `sparsemap_wrap` + `sparsemap_add`
+  can either stay or be reverted to `sm_wrap` + `sm_add`
   loop — the wrap-and-grow path is now safe.
 
 Sync via `contrib/pg_tre_sync.sh PATH/TO/pg_tre`.
@@ -56,7 +56,7 @@ Sync via `contrib/pg_tre_sync.sh PATH/TO/pg_tre`.
 ### postgres/undo
 
 postgres/undo's vendored copy is largely API-compatible already
-(it added `sparsemap_create` and `sparsemap_free` which v1 now
+(it added `sm_create` and `sm_free` which v1 now
 ships upstream).  The differences:
 
 - `__sm_alloc_kind` field is new; postgres palloc'd struct
@@ -73,7 +73,7 @@ fixed in v1.0.1.
 
 Sync via `contrib/postgres_undo_sync.sh PATH/TO/postgres`.
 
-## Disposal: when to use `sparsemap_free` vs libc `free`
+## Disposal: when to use `sm_free` vs libc `free`
 
 Pre-v1, every `sparsemap()` map could be disposed with libc `free()`
 because struct and buffer were always one allocation.  In v1, the
@@ -81,15 +81,15 @@ wrap-and-grow promotion produces `SM_OWNED_SPLIT` maps that have a
 *separately* malloc'd buffer.  Libc `free()` on those leaks the
 buffer.
 
-**Rule of thumb:** use `sparsemap_free()` going forward.  It works
+**Rule of thumb:** use `sm_free()` going forward.  It works
 for every lineage, and you no longer have to know which lineage
 your map has.
 
 For backward compatibility, `sparsemap()` /
-`sparsemap_create()` / `sparsemap_copy()` results can still be
+`sm_create()` / `sm_copy()` results can still be
 disposed with libc `free()` — they're always `SM_OWNED_CONTIGUOUS`,
 so a single `free()` releases everything.  Only the wrap-and-grow
-case requires `sparsemap_free()`.
+case requires `sm_free()`.
 
 ## Sanitizer / hardening notes
 

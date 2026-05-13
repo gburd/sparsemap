@@ -17,13 +17,13 @@ state to a single canonical `main`.
 
 ### Added
 
-- `sparsemap_create(size)` — verb-named allocator (postgres/undo
+- `sm_create(size)` — verb-named allocator (postgres/undo
   compatible name).  `sparsemap()` is kept as a deprecated alias.
-- `sparsemap_free(map)` — lineage-aware disposal.  Frees the struct
+- `sm_free(map)` — lineage-aware disposal.  Frees the struct
   for `SM_OWNED_CONTIGUOUS` and `SM_WRAPPED` lineages; frees both
   the data buffer and the struct for `SM_OWNED_SPLIT` (the lineage
   produced by growing a wrap'd map).
-- `sparsemap_owned_copy(map)` — guaranteed-owned, guaranteed-growable
+- `sm_owned_copy(map)` — guaranteed-owned, guaranteed-growable
   copy of any sparsemap regardless of lineage.  The universal escape
   hatch for callers who don't trust their input's provenance.
 - `__sm_check_invariants` — internal invariant checker that runs at
@@ -42,15 +42,15 @@ state to a single canonical `main`.
 
 ### Fixed
 
-- **HEISENBUG**: `sparsemap_set_data_size(map, NULL, size)` no longer
+- **HEISENBUG**: `sm_set_data_size(map, NULL, size)` no longer
   silently no-ops the realloc on wrap'd maps.  See
   `HEISENBUG_REPORT.md` for the original bug; see `docs/API.md` for
   the new lineage-aware behavior.
 - **`__sm_get_chunk_count` empty-map bug**: returns 0 when
   `m_data_used < SM_SIZEOF_OVERHEAD` instead of reading garbage from
   uninitialized buffer bytes.  This kills four downstream
-  victim-function bugs (in `sparsemap_intersection`,
-  `sparsemap_union`, `sparsemap_maximum`, `__sm_rank_vec`) at the
+  victim-function bugs (in `sm_intersection`,
+  `sm_union`, `sm_maximum`, `__sm_rank_vec`) at the
   source.  pg_tre's four local `BUG FIX` patches can be dropped when
   syncing to v1.
 - Missing `SM_ENOUGH_SPACE` guards in `__sm_map_set` at four sites
@@ -66,7 +66,7 @@ state to a single canonical `main`.
 
 ### Deprecated
 
-- `sparsemap()` — use `sparsemap_create()` instead.  Kept as alias
+- `sparsemap()` — use `sm_create()` instead.  Kept as alias
   for v1.x; removed in v2.
 
 ### Repository hygiene

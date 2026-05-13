@@ -5,19 +5,19 @@
  * Documents and exercises the production-blocking bug filed in
  * HEISENBUG_REPORT.md by pg_tre maintainers:
  *
- *   sparsemap_set_data_size(map, NULL, size) silently no-ops the
- *   reallocation when `map` was created via sparsemap_wrap() (or
+ *   sm_set_data_size(map, NULL, size) silently no-ops the
+ *   reallocation when `map` was created via sm_wrap() (or
  *   any other lineage where m_data is not contiguous-with-struct),
  *   yet still updates m_capacity to the requested size.  The next
- *   sparsemap_add() then writes past the actual buffer end and
+ *   sm_add() then writes past the actual buffer end and
  *   corrupts the libc heap.
  *
  * Two bug classes:
  *
- *   1. Direct: caller does sparsemap_wrap + sparsemap_set_data_size
- *      + sparsemap_add.  Single-threaded, deterministic, ASan-visible.
+ *   1. Direct: caller does sm_wrap + sm_set_data_size
+ *      + sm_add.  Single-threaded, deterministic, ASan-visible.
  *
- *   2. Indirect: sparsemap_union/_intersection/_difference allocate
+ *   2. Indirect: sm_union/_intersection/_difference allocate
  *      their result via sparsemap() (so the *result* is owned-
  *      contiguous and safe to grow), but if either input is wrap'd
  *      then mid-merge invariants break.  The chunks are read from
@@ -81,7 +81,7 @@ static int g_total = 0;
  * Bug shape: caller wraps a 256-byte buffer, then asks the library to
  * grow to 4096 bytes via the (NULL, size) form, expecting the library
  * to handle reallocation.  Today the library silently no-ops the grow
- * and just sets m_capacity = 4096.  Subsequent sparsemap_add calls
+ * and just sets m_capacity = 4096.  Subsequent sm_add calls
  * write past the original 256-byte buffer.
  *
  * Post-fix contract: either grow succeeds (transparently promoting
@@ -93,7 +93,7 @@ CASE(test_wrap_then_grow_via_set_data_size_null)
 {
     _Alignas(uint64_t) uint8_t small[256];
     memset(small, 0, sizeof(small));
-    sparsemap_t *map = sparsemap_wrap(small, sizeof(small));
+    sparsemap_t *map = sm_wrap(small, sizeof(small));
     EXPECT(map != NULL, "wrap allocates handle");
 
     /*
@@ -101,7 +101,7 @@ CASE(test_wrap_then_grow_via_set_data_size_null)
      * must be SM_SIZEOF_OVERHEAD (4) and chunk_count must be 0.
      * (See test_empty_map.c for the empty-map invariants.)
      */
-    sparsemap_clear(map);
+    sm_clear(map);
 
     /*
      * Now ask the library to grow.  Today this silently sets
@@ -111,11 +111,11 @@ CASE(test_wrap_then_grow_via_set_data_size_null)
      *     promoted to owned-split or owned-contiguous), or
      *   - return NULL with m_capacity unchanged at 256.
      */
-    sparsemap_t *grown = sparsemap_set_data_size(map, NULL, 4096);
+    sparsemap_t *grown = sm_set_data_size(map, NULL, 4096);
 
     if (grown == NULL) {
         /* Acceptable failure mode: caller's buffer is intact. */
-        EXPECT(sparsemap_get_capacity(map) == 256,
+        EXPECT(sm_get_capacity(map) == 256,
                "rejected grow leaves capacity unchanged");
         free(map);
         return 0;
@@ -126,7 +126,7 @@ CASE(test_wrap_then_grow_via_set_data_size_null)
      * library actually owns; if we now write 1024 bits we must not
      * corrupt the caller's `small` buffer.
      */
-    EXPECT(sparsemap_get_capacity(grown) >= 4096,
+    EXPECT(sm_get_capacity(grown) >= 4096,
            "post-grow capacity reflects the new buffer");
 
     /* Write a sentinel pattern into `small` after the grow. */
@@ -140,13 +140,13 @@ CASE(test_wrap_then_grow_via_set_data_size_null)
      * has its own 4096-byte buffer.
      */
     for (uint64_t i = 0; i < 100; i++) {
-        const uint64_t r = sparsemap_add(grown, i * 8);
+        const uint64_t r = sm_add(grown, i * 8);
         EXPECT(r == i * 8, "add succeeds in grown map");
     }
 
     /* Verify the bits we set are observable. */
     for (uint64_t i = 0; i < 100; i++) {
-        EXPECT(sparsemap_contains(grown, i * 8),
+        EXPECT(sm_contains(grown, i * 8),
                "set bit reads back as set");
     }
 
@@ -156,7 +156,7 @@ CASE(test_wrap_then_grow_via_set_data_size_null)
                "caller's wrap buffer untouched after grow");
     }
 
-    sparsemap_free(grown);
+    sm_free(grown);
     return 0;
 }
 
@@ -174,29 +174,29 @@ CASE(test_wrap_then_swap_buffer)
 {
     _Alignas(uint64_t) uint8_t small[256];
     memset(small, 0, sizeof(small));
-    sparsemap_t *map = sparsemap_wrap(small, sizeof(small));
+    sparsemap_t *map = sm_wrap(small, sizeof(small));
     EXPECT(map != NULL, "wrap allocates handle");
 
-    sparsemap_clear(map);
+    sm_clear(map);
 
     /* Caller-managed grow: copy the bits into a larger buffer. */
     _Alignas(uint64_t) uint8_t big[4096];
     memset(big, 0, sizeof(big));
     memcpy(big, small, sizeof(small));
 
-    sparsemap_t *grown = sparsemap_set_data_size(map, big, sizeof(big));
+    sparsemap_t *grown = sm_set_data_size(map, big, sizeof(big));
     EXPECT(grown != NULL, "swap-buffer grow succeeds");
-    EXPECT(sparsemap_get_capacity(grown) == sizeof(big),
+    EXPECT(sm_get_capacity(grown) == sizeof(big),
            "post-swap capacity equals new buffer size");
 
     /* Adding bits writes into `big`, not `small`. */
     for (uint64_t i = 0; i < 100; i++) {
-        sparsemap_add(grown, i * 8);
+        sm_add(grown, i * 8);
     }
 
     /*
      * `small` still holds whatever serialized empty-map state we wrote
-     * via sparsemap_clear.  At minimum, the first SM_SIZEOF_OVERHEAD
+     * via sm_clear.  At minimum, the first SM_SIZEOF_OVERHEAD
      * bytes must be zero (chunk count 0); bytes after that may be
      * anything.  Just verify the library didn't write into `small`
      * past byte 4 — for our purposes, bytes [4, 256) should still
@@ -214,53 +214,53 @@ CASE(test_wrap_then_swap_buffer)
 
     /*
      * Post-swap, lineage is SM_WRAPPED again (we handed the library a
-     * caller-owned buffer).  Disposing with sparsemap_free leaves
+     * caller-owned buffer).  Disposing with sm_free leaves
      * `big` for the caller.
      */
-    sparsemap_free(grown);
+    sm_free(grown);
     return 0;
 }
 
 /* ------------------------------------------------------------------ */
-/*  sparsemap_owned_copy() normalizes lineage                          */
+/*  sm_owned_copy() normalizes lineage                          */
 /* ------------------------------------------------------------------ */
 
 /*
- * Whatever the lineage of the input, sparsemap_owned_copy() returns an
+ * Whatever the lineage of the input, sm_owned_copy() returns an
  * SM_OWNED_CONTIGUOUS map: a single allocation that's safe to grow and
- * dispose with sparsemap_free or libc free.
+ * dispose with sm_free or libc free.
  */
 CASE(test_owned_copy_normalizes_lineage)
 {
     /* Make a wrap'd input. */
     _Alignas(uint64_t) uint8_t buf[1024];
     memset(buf, 0, sizeof(buf));
-    sparsemap_t *wrapped = sparsemap_wrap(buf, sizeof(buf));
-    sparsemap_clear(wrapped);
+    sparsemap_t *wrapped = sm_wrap(buf, sizeof(buf));
+    sm_clear(wrapped);
     for (uint64_t i = 0; i < 50; i++) {
-        sparsemap_add(wrapped, i * 16);
+        sm_add(wrapped, i * 16);
     }
 
     /* Copy with normalized lineage. */
-    sparsemap_t *owned = sparsemap_owned_copy(wrapped);
+    sparsemap_t *owned = sm_owned_copy(wrapped);
     EXPECT(owned != NULL, "owned_copy succeeds");
 
     /* Same observable state. */
-    EXPECT(sparsemap_cardinality(owned) == 50,
+    EXPECT(sm_cardinality(owned) == 50,
            "copy has same cardinality");
     for (uint64_t i = 0; i < 50; i++) {
-        EXPECT(sparsemap_contains(owned, i * 16),
+        EXPECT(sm_contains(owned, i * 16),
                "copy contains same bits");
     }
 
     /* The copy can be grown. */
-    sparsemap_t *grown = sparsemap_set_data_size(owned, NULL, 4096);
+    sparsemap_t *grown = sm_set_data_size(owned, NULL, 4096);
     EXPECT(grown != NULL, "owned_copy result is growable");
-    EXPECT(sparsemap_get_capacity(grown) >= 4096,
+    EXPECT(sm_get_capacity(grown) >= 4096,
            "grown capacity reflects requested size");
 
-    sparsemap_free(grown);
-    sparsemap_free(wrapped);
+    sm_free(grown);
+    sm_free(wrapped);
     return 0;
 }
 
@@ -269,7 +269,7 @@ CASE(test_owned_copy_normalizes_lineage)
 /* ------------------------------------------------------------------ */
 
 /*
- * sparsemap_union allocates its result via sparsemap() so the result
+ * sm_union allocates its result via sparsemap() so the result
  * is owned-contiguous from the start.  The result-side grow path is
  * what __sm_ensure_capacity uses; that path must work regardless of
  * input lineages.
@@ -279,10 +279,10 @@ CASE(test_union_with_wrapped_input_grows_result)
     /* Input A: wrap'd, populated densely.  We'll drive the result. */
     _Alignas(uint64_t) uint8_t a_buf[2048];
     memset(a_buf, 0, sizeof(a_buf));
-    sparsemap_t *a = sparsemap_wrap(a_buf, sizeof(a_buf));
-    sparsemap_clear(a);
+    sparsemap_t *a = sm_wrap(a_buf, sizeof(a_buf));
+    sm_clear(a);
     for (uint64_t i = 0; i < 256; i++) {
-        if (sparsemap_add(a, i * 64) != i * 64) {
+        if (sm_add(a, i * 64) != i * 64) {
             break; /* wrap'd, no auto-grow */
         }
     }
@@ -290,9 +290,9 @@ CASE(test_union_with_wrapped_input_grows_result)
     /* Input B: owned-contiguous, populated with disjoint bits. */
     sparsemap_t *b = sparsemap(2048);
     EXPECT(b != NULL, "owned input allocates");
-    sparsemap_clear(b);
+    sm_clear(b);
     for (uint64_t i = 0; i < 256; i++) {
-        if (sparsemap_add(b, 1000000 + i * 64) != 1000000 + i * 64) {
+        if (sm_add(b, 1000000 + i * 64) != 1000000 + i * 64) {
             break;
         }
     }
@@ -302,15 +302,15 @@ CASE(test_union_with_wrapped_input_grows_result)
      * contiguous and must contain the union of bits without
      * corrupting either input's buffer.
      */
-    sparsemap_t *u = sparsemap_union(a, b);
+    sparsemap_t *u = sm_union(a, b);
     EXPECT(u != NULL, "union returns a non-NULL result");
 
     /* Spot-check a few bits from each side. */
-    EXPECT(sparsemap_contains(u, 0), "bit from a");
-    EXPECT(sparsemap_contains(u, 64), "bit from a");
-    EXPECT(sparsemap_contains(u, 1000000), "bit from b");
-    EXPECT(sparsemap_contains(u, 1000064), "bit from b");
-    EXPECT(!sparsemap_contains(u, 1), "unset bit");
+    EXPECT(sm_contains(u, 0), "bit from a");
+    EXPECT(sm_contains(u, 64), "bit from a");
+    EXPECT(sm_contains(u, 1000000), "bit from b");
+    EXPECT(sm_contains(u, 1000064), "bit from b");
+    EXPECT(!sm_contains(u, 1), "unset bit");
 
     free(u);
     free(b);
@@ -328,32 +328,32 @@ CASE(test_intersection_difference_with_wrapped)
     _Alignas(uint64_t) uint8_t b_buf[2048];
     memset(a_buf, 0, sizeof(a_buf));
     memset(b_buf, 0, sizeof(b_buf));
-    sparsemap_t *a = sparsemap_wrap(a_buf, sizeof(a_buf));
-    sparsemap_t *b = sparsemap_wrap(b_buf, sizeof(b_buf));
-    sparsemap_clear(a);
-    sparsemap_clear(b);
+    sparsemap_t *a = sm_wrap(a_buf, sizeof(a_buf));
+    sparsemap_t *b = sm_wrap(b_buf, sizeof(b_buf));
+    sm_clear(a);
+    sm_clear(b);
 
     /* Overlapping but not identical populations. */
     for (uint64_t i = 0; i < 100; i++) {
-        sparsemap_add(a, i * 100);
-        sparsemap_add(b, i * 100 + (i % 2));
+        sm_add(a, i * 100);
+        sm_add(b, i * 100 + (i % 2));
     }
 
-    sparsemap_t *intr = sparsemap_intersection(a, b);
-    sparsemap_t *diff = sparsemap_difference(a, b);
+    sparsemap_t *intr = sm_intersection(a, b);
+    sparsemap_t *diff = sm_difference(a, b);
 
     /* Even-index bits are in both (i*100 == i*100 + 0); odd-index aren't. */
-    EXPECT(sparsemap_contains(intr, 0), "even index in intersection");
-    EXPECT(sparsemap_contains(intr, 200), "even index in intersection");
-    EXPECT(!sparsemap_contains(intr, 100), "odd index NOT in intersection");
+    EXPECT(sm_contains(intr, 0), "even index in intersection");
+    EXPECT(sm_contains(intr, 200), "even index in intersection");
+    EXPECT(!sm_contains(intr, 100), "odd index NOT in intersection");
 
-    EXPECT(!sparsemap_contains(diff, 0), "even index NOT in difference");
-    EXPECT(sparsemap_contains(diff, 100), "odd index in difference");
+    EXPECT(!sm_contains(diff, 0), "even index NOT in difference");
+    EXPECT(sm_contains(diff, 100), "odd index in difference");
 
-    sparsemap_free(intr);
-    sparsemap_free(diff);
-    sparsemap_free(a);
-    sparsemap_free(b);
+    sm_free(intr);
+    sm_free(diff);
+    sm_free(a);
+    sm_free(b);
     return 0;
 }
 

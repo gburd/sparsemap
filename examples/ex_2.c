@@ -28,19 +28,19 @@ main(void)
   uint8_t *buf = calloc(1024, sizeof(uint8_t));
 
   // create the sparse bitmap
-  sparsemap_t *map = sparsemap_wrap(buf, sizeof(uint8_t) * 1024);
+  sparsemap_t *map = sm_wrap(buf, sizeof(uint8_t) * 1024);
 
   // Set every other bit (pathologically worst case) to see what happens
   // when the map is full.
   for (i = 0; i < 7744; i++) {
     if (!i % 2) {
-      sparsemap_add(map, i);
-      assert(sparsemap_contains(map, i) == true);
+      sm_add(map, i);
+      assert(sm_contains(map, i) == true);
     }
   }
   // On 1024 KiB of buffer with every other bit set the map holds 7744 bits
   // and then runs out of space.  This next _set() call will fail.
-  sparsemap_add(map, ++i);
-  assert(sparsemap_contains(map, i) == true);
+  sm_add(map, ++i);
+  assert(sm_contains(map, i) == true);
   return 0;
 }

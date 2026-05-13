@@ -66,12 +66,12 @@ Use it from C:
 ```c
 #include <sparsemap/sparsemap.h>
 
-sparsemap_t *map = sparsemap_create(4096);
-sparsemap_add(map, 42);
-sparsemap_add(map, 1024);
-assert(sparsemap_contains(map, 42));
-assert(sparsemap_cardinality(map) == 2);
-sparsemap_free(map);
+sparsemap_t *map = sm_create(4096);
+sm_add(map, 42);
+sm_add(map, 1024);
+assert(sm_contains(map, 42));
+assert(sm_cardinality(map) == 2);
+sm_free(map);
 ```
 
 ## Documentation

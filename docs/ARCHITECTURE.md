@@ -89,14 +89,14 @@ records how its data buffer was provisioned:
 
 | Lineage              | How it's set                                  | How to dispose                               |
 |----------------------|-----------------------------------------------|----------------------------------------------|
-| `SM_OWNED_CONTIGUOUS`| `sparsemap_create()`, `sparsemap_copy()`,    | `sparsemap_free()` *or* libc `free()`        |
-|                      | `sparsemap_owned_copy()`                     |                                              |
-| `SM_WRAPPED`         | `sparsemap_wrap()`, `sparsemap_init()`,      | `sparsemap_free()` (caller frees buffer)     |
-|                      | `sparsemap_open()`                           |                                              |
-| `SM_OWNED_SPLIT`     | promoted from `SM_WRAPPED` by                | `sparsemap_free()` (libc free leaks!)        |
-|                      | `sparsemap_set_data_size(map, NULL, larger)` |                                              |
+| `SM_OWNED_CONTIGUOUS`| `sm_create()`, `sm_copy()`,    | `sm_free()` *or* libc `free()`        |
+|                      | `sm_owned_copy()`                     |                                              |
+| `SM_WRAPPED`         | `sm_wrap()`, `sm_init()`,      | `sm_free()` (caller frees buffer)     |
+|                      | `sm_open()`                           |                                              |
+| `SM_OWNED_SPLIT`     | promoted from `SM_WRAPPED` by                | `sm_free()` (libc free leaks!)        |
+|                      | `sm_set_data_size(map, NULL, larger)` |                                              |
 
-The lineage tag drives `sparsemap_set_data_size`'s behavior so it can
+The lineage tag drives `sm_set_data_size`'s behavior so it can
 never silently no-op a resize — see [API.md](API.md) for the full
 contract and [MIGRATION.md](MIGRATION.md) for what changed in v1.
 

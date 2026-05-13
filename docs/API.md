@@ -10,30 +10,30 @@ and how it interacts with the lifetime contract.  See
 
 - All functions taking a `sparsemap_t *` accept NULL only where
   documented; otherwise NULL inputs are undefined.
-- Functions that mutate the map return `SPARSEMAP_IDX_MAX` and set
+- Functions that mutate the map return `SM_IDX_MAX` and set
   `errno` to `ENOSPC` when the backing buffer is full.  Grow the
-  buffer with `sparsemap_set_data_size()` and retry.
+  buffer with `sm_set_data_size()` and retry.
 - All allocation functions return `NULL` on failure.
 
 ## Lifecycle
 
 | Function                 | Returns         | Lineage of result      |
 |--------------------------|-----------------|------------------------|
-| `sparsemap_create(size)` | `sparsemap_t *` | `SM_OWNED_CONTIGUOUS`  |
+| `sm_create(size)` | `sparsemap_t *` | `SM_OWNED_CONTIGUOUS`  |
 | `sparsemap()`            | (alias)         | `SM_OWNED_CONTIGUOUS`  |
-| `sparsemap_copy(other)`  | `sparsemap_t *` | `SM_OWNED_CONTIGUOUS`  |
-| `sparsemap_owned_copy(map)` | `sparsemap_t *` | `SM_OWNED_CONTIGUOUS`  |
-| `sparsemap_wrap(buf,sz)` | `sparsemap_t *` | `SM_WRAPPED`           |
-| `sparsemap_init(map,buf,sz)` | `void`      | `SM_WRAPPED`           |
-| `sparsemap_open(map,buf,sz)` | `void`      | `SM_WRAPPED`           |
-| `sparsemap_free(map)`    | `void`          | (disposes any lineage) |
-| `sparsemap_clear(map)`   | `void`          | (preserves lineage)    |
+| `sm_copy(other)`  | `sparsemap_t *` | `SM_OWNED_CONTIGUOUS`  |
+| `sm_owned_copy(map)` | `sparsemap_t *` | `SM_OWNED_CONTIGUOUS`  |
+| `sm_wrap(buf,sz)` | `sparsemap_t *` | `SM_WRAPPED`           |
+| `sm_init(map,buf,sz)` | `void`      | `SM_WRAPPED`           |
+| `sm_open(map,buf,sz)` | `void`      | `SM_WRAPPED`           |
+| `sm_free(map)`    | `void`          | (disposes any lineage) |
+| `sm_clear(map)`   | `void`          | (preserves lineage)    |
 
-`sparsemap()` is a deprecated alias of `sparsemap_create()`; new
+`sparsemap()` is a deprecated alias of `sm_create()`; new
 code should use the verb-named version.  Both will accept callers
 identically through v1.x; the alias is removed in v2.
 
-`sparsemap_owned_copy()` is the "I don't trust this map's lineage"
+`sm_owned_copy()` is the "I don't trust this map's lineage"
 escape hatch.  Pass any sparsemap (yours, library-returned, or
 deserialized) and get back a self-contained copy that's safe to grow
 and dispose.
@@ -42,7 +42,7 @@ and dispose.
 
 ```c
 sparsemap_t *
-sparsemap_set_data_size(sparsemap_t *map, uint8_t *data, size_t size);
+sm_set_data_size(sparsemap_t *map, uint8_t *data, size_t size);
 ```
 
 Two calling forms.  See [HEISENBUG_REPORT.md](../HEISENBUG_REPORT.md)
@@ -66,7 +66,7 @@ returns `NULL` on allocation failure.  **Never** silently no-ops.
 |                        | **Lineage transitions to `SM_OWNED_SPLIT`**.   |
 |                        | Caller's original buffer is untouched and      |
 |                        | still theirs to free.  The promoted map MUST   |
-|                        | be disposed with `sparsemap_free()` — libc     |
+|                        | be disposed with `sm_free()` — libc     |
 |                        | `free()` leaks the new buffer.                 |
 
 ### `data != NULL`: caller-supplied buffer
@@ -81,10 +81,10 @@ the pointer).
 
 | Function                         | Description                              |
 |----------------------------------|------------------------------------------|
-| `sparsemap_contains(map, idx)`   | Test bit; returns `bool`.                |
-| `sparsemap_assign(map, idx, v)`  | Set or clear, depending on `v`.          |
-| `sparsemap_add(map, idx)`        | Set bit to 1.                            |
-| `sparsemap_remove(map, idx)`     | Clear bit (set to 0).                    |
+| `sm_contains(map, idx)`   | Test bit; returns `bool`.                |
+| `sm_assign(map, idx, v)`  | Set or clear, depending on `v`.          |
+| `sm_add(map, idx)`        | Set bit to 1.                            |
+| `sm_remove(map, idx)`     | Clear bit (set to 0).                    |
 
 `add` / `remove` / `assign` may trigger chunk transitions:
 
@@ -94,38 +94,38 @@ the pointer).
 - Adjacent chunks that form a contiguous run are coalesced into a
   single RLE chunk.
 
-All three return `SPARSEMAP_IDX_MAX` with `errno=ENOSPC` if the
+All three return `SM_IDX_MAX` with `errno=ENOSPC` if the
 buffer is full.
 
 ## Aggregate queries
 
 | Function                    | Description                                |
 |-----------------------------|--------------------------------------------|
-| `sparsemap_cardinality(m)`  | Number of set bits.  Equivalent to        |
-|                             | `rank(m, 0, SPARSEMAP_IDX_MAX, true)`.    |
-| `sparsemap_minimum(m)`      | Lowest set bit, or 0 if empty.             |
-| `sparsemap_maximum(m)`      | Highest set bit, or 0 if empty.            |
-| `sparsemap_fill_factor(m)`  | cardinality / (max - min + 1).             |
+| `sm_cardinality(m)`  | Number of set bits.  Equivalent to        |
+|                             | `rank(m, 0, SM_IDX_MAX, true)`.    |
+| `sm_minimum(m)`      | Lowest set bit, or 0 if empty.             |
+| `sm_maximum(m)`      | Highest set bit, or 0 if empty.            |
+| `sm_fill_factor(m)`  | cardinality / (max - min + 1).             |
 
 ## Rank / select / span
 
 | Function                              | Description                       |
 |---------------------------------------|-----------------------------------|
-| `sparsemap_rank(m, x, y, value)`      | Count bits matching `value` in    |
+| `sm_rank(m, x, y, value)`      | Count bits matching `value` in    |
 |                                       | inclusive range `[x, y]`.         |
-| `sparsemap_select(m, n, value)`       | Index of the n-th matching bit    |
+| `sm_select(m, n, value)`       | Index of the n-th matching bit    |
 |                                       | (0-based).  RLE chunks O(1).      |
-| `sparsemap_span(m, start, len, value)`| First run of ≥`len` consecutive   |
+| `sm_span(m, start, len, value)`| First run of ≥`len` consecutive   |
 |                                       | matching bits at or after `start`.|
 
-`select` returns `SPARSEMAP_IDX_MAX` if fewer than `n + 1` matches
+`select` returns `SM_IDX_MAX` if fewer than `n + 1` matches
 exist; `span` does the same if no run of the requested length exists.
 
 ## Iteration
 
 ```c
 void
-sparsemap_scan(const sparsemap_t *m,
+sm_scan(const sparsemap_t *m,
                void (*scanner)(uint32_t vec[], size_t n, void *aux),
                size_t skip, void *aux);
 ```
@@ -138,16 +138,16 @@ the first callback.  `aux` is passed through verbatim.
 
 | Function                            | Description                       |
 |-------------------------------------|-----------------------------------|
-| `sparsemap_union(a, b)`             | Logical OR.  Returns a new map.   |
-| `sparsemap_intersection(a, b)`      | Logical AND.                      |
-| `sparsemap_difference(a, b)`        | a AND NOT b.                      |
-| `sparsemap_split(map, idx, other)`  | Move bits at/after `idx` from    |
+| `sm_union(a, b)`             | Logical OR.  Returns a new map.   |
+| `sm_intersection(a, b)`      | Logical AND.                      |
+| `sm_difference(a, b)`        | a AND NOT b.                      |
+| `sm_split(map, idx, other)`  | Move bits at/after `idx` from    |
 |                                     | `map` into `other`.               |
-| `sparsemap_offset(map, offset)`     | Return a new map with all bits   |
+| `sm_offset(map, offset)`     | Return a new map with all bits   |
 |                                     | shifted by `offset` (signed).     |
 
 All result-returning bulk operations produce `SM_OWNED_CONTIGUOUS`
-maps; the result is safe to grow and dispose with `sparsemap_free()`
+maps; the result is safe to grow and dispose with `sm_free()`
 or libc `free()`.
 
 ## Compile-time options

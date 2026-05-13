@@ -173,7 +173,7 @@ due to the O(chunks) linear scan in `__sm_get_chunk_offset` for each query.
 | periodic    | 4,019,783    | 101,433   | **90,329** |
 | sparse      | 4,899,218    | 103,927   | **122,541**|
 
-Populate is sparsemap's most expensive operation. Each `sparsemap_add`
+Populate is sparsemap's most expensive operation. Each `sm_add`
 does an O(chunks) scan plus potential data movement. CRoaring and bitmapset
 amortize insertion much better.
 

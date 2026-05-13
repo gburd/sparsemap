@@ -7,14 +7,14 @@
  *
  *   __sm_get_chunk_count(map) reads *(uint32_t *)&map->m_data[0]
  *   regardless of map->m_data_used.  When m_data_used == 0
- *   (post-sparsemap_wrap with no subsequent clear/open, or any other
+ *   (post-sm_wrap with no subsequent clear/open, or any other
  *   path that produces a zero-used map) the read returns whatever
  *   garbage is in the first four bytes of the wrapped buffer.
  *   Functions that iterate chunks then walk past the buffer end:
  *
- *     - sparsemap_intersection   (line 2473 in pg_tre's vendored copy)
- *     - sparsemap_union          (line 2994)
- *     - sparsemap_maximum        (line 1733)
+ *     - sm_intersection   (line 2473 in pg_tre's vendored copy)
+ *     - sm_union          (line 2994)
+ *     - sm_maximum        (line 1733)
  *     - __sm_rank_vec            (line 3506)
  *
  * pg_tre carries 4 local "BUG FIX: m_data_used = 0 but garbage chunk
@@ -66,7 +66,7 @@ static int g_total = 0;
 
 /*
  * Wrap a buffer that has non-zero content in its first 4 bytes and
- * never call sparsemap_clear or sparsemap_open.  m_data_used == 0,
+ * never call sm_clear or sm_open.  m_data_used == 0,
  * so __sm_get_chunk_count must report 0 — not whatever uint32_t lives
  * at m_data[0..3].
  *
@@ -78,15 +78,15 @@ CASE(test_max_on_zero_used_with_dirty_buffer)
 {
     _Alignas(uint64_t) uint8_t buf[256];
     memset(buf, 0xFF, sizeof(buf)); /* every byte non-zero */
-    sparsemap_t *map = sparsemap_wrap(buf, sizeof(buf));
+    sparsemap_t *map = sm_wrap(buf, sizeof(buf));
     EXPECT(map != NULL, "wrap succeeds");
 
     /*
-     * Per the post-fix contract, sparsemap_maximum on an
+     * Per the post-fix contract, sm_maximum on an
      * uninitialized-buffer map must return 0 (the documented
      * empty-map sentinel) rather than reading garbage chunk metadata.
      */
-    const uint64_t mx = sparsemap_maximum(map);
+    const uint64_t mx = sm_maximum(map);
     EXPECT(mx == 0, "maximum on zero-used map is 0");
 
     free(map);
@@ -97,11 +97,11 @@ CASE(test_rank_on_zero_used_with_dirty_buffer)
 {
     _Alignas(uint64_t) uint8_t buf[256];
     memset(buf, 0xAB, sizeof(buf));
-    sparsemap_t *map = sparsemap_wrap(buf, sizeof(buf));
+    sparsemap_t *map = sm_wrap(buf, sizeof(buf));
     EXPECT(map != NULL, "wrap succeeds");
 
     /* Rank of "set bits" in any range of an empty map must be 0. */
-    const size_t r_set = sparsemap_rank(map, 0, 1000, true);
+    const size_t r_set = sm_rank(map, 0, 1000, true);
     EXPECT(r_set == 0, "rank(set) on zero-used map is 0");
 
     free(map);
@@ -112,22 +112,22 @@ CASE(test_union_with_zero_used_input)
 {
     _Alignas(uint64_t) uint8_t bad[256];
     memset(bad, 0x55, sizeof(bad));
-    sparsemap_t *a = sparsemap_wrap(bad, sizeof(bad));
+    sparsemap_t *a = sm_wrap(bad, sizeof(bad));
 
     sparsemap_t *b = sparsemap(2048);
-    sparsemap_clear(b);
-    sparsemap_add(b, 42);
-    sparsemap_add(b, 4242);
+    sm_clear(b);
+    sm_add(b, 42);
+    sm_add(b, 4242);
 
     /*
      * Union of a zero-used map and a populated map should be
      * equivalent to the populated map — it must not iterate `a`'s
      * garbage chunk metadata.
      */
-    sparsemap_t *u = sparsemap_union(a, b);
+    sparsemap_t *u = sm_union(a, b);
     EXPECT(u != NULL, "union returns non-NULL");
-    EXPECT(sparsemap_contains(u, 42), "bit from b present in union");
-    EXPECT(sparsemap_contains(u, 4242), "bit from b present in union");
+    EXPECT(sm_contains(u, 42), "bit from b present in union");
+    EXPECT(sm_contains(u, 4242), "bit from b present in union");
 
     free(u);
     free(b);
@@ -139,14 +139,14 @@ CASE(test_intersection_with_zero_used_input)
 {
     _Alignas(uint64_t) uint8_t bad[256];
     memset(bad, 0x77, sizeof(bad));
-    sparsemap_t *a = sparsemap_wrap(bad, sizeof(bad));
+    sparsemap_t *a = sm_wrap(bad, sizeof(bad));
 
     sparsemap_t *b = sparsemap(2048);
-    sparsemap_clear(b);
-    sparsemap_add(b, 42);
+    sm_clear(b);
+    sm_add(b, 42);
 
     /* Intersection of zero-used and anything must be empty (no crash). */
-    sparsemap_t *i = sparsemap_intersection(a, b);
+    sparsemap_t *i = sm_intersection(a, b);
 
     /*
      * Some implementations return NULL for an empty intersection.
@@ -154,7 +154,7 @@ CASE(test_intersection_with_zero_used_input)
      * that contains `b`'s bits.
      */
     if (i != NULL) {
-        EXPECT(!sparsemap_contains(i, 42),
+        EXPECT(!sm_contains(i, 42),
                "intersection with zero-used must be empty");
         free(i);
     }
@@ -168,8 +168,8 @@ CASE(test_intersection_with_zero_used_input)
 /* ------------------------------------------------------------------ */
 
 /*
- * After sparsemap_create() / sparsemap() / sparsemap_init() /
- * sparsemap_clear(), the map must be in the canonical empty state:
+ * After sm_create() / sparsemap() / sm_init() /
+ * sm_clear(), the map must be in the canonical empty state:
  *   m_data_used == SM_SIZEOF_OVERHEAD
  *   chunk_count == 0
  *
@@ -182,10 +182,10 @@ CASE(test_fresh_map_is_empty)
     sparsemap_t *m = sparsemap(2048);
     EXPECT(m != NULL, "fresh allocation succeeds");
 
-    EXPECT(sparsemap_cardinality(m) == 0, "fresh cardinality is 0");
-    EXPECT(sparsemap_maximum(m) == 0, "fresh maximum is 0");
-    EXPECT(sparsemap_minimum(m) == 0, "fresh minimum is 0");
-    EXPECT(sparsemap_rank(m, 0, UINT64_MAX, true) == 0,
+    EXPECT(sm_cardinality(m) == 0, "fresh cardinality is 0");
+    EXPECT(sm_maximum(m) == 0, "fresh maximum is 0");
+    EXPECT(sm_minimum(m) == 0, "fresh minimum is 0");
+    EXPECT(sm_rank(m, 0, UINT64_MAX, true) == 0,
            "fresh rank(set) is 0");
 
     free(m);
@@ -195,14 +195,14 @@ CASE(test_fresh_map_is_empty)
 CASE(test_cleared_map_is_empty)
 {
     sparsemap_t *m = sparsemap(2048);
-    sparsemap_add(m, 100);
-    sparsemap_add(m, 1000);
-    EXPECT(sparsemap_cardinality(m) == 2, "populated cardinality 2");
+    sm_add(m, 100);
+    sm_add(m, 1000);
+    EXPECT(sm_cardinality(m) == 2, "populated cardinality 2");
 
-    sparsemap_clear(m);
-    EXPECT(sparsemap_cardinality(m) == 0, "post-clear cardinality 0");
-    EXPECT(sparsemap_maximum(m) == 0, "post-clear maximum 0");
-    EXPECT(!sparsemap_contains(m, 100), "post-clear bit absent");
+    sm_clear(m);
+    EXPECT(sm_cardinality(m) == 0, "post-clear cardinality 0");
+    EXPECT(sm_maximum(m) == 0, "post-clear maximum 0");
+    EXPECT(!sm_contains(m, 100), "post-clear bit absent");
 
     free(m);
     return 0;
