@@ -69,8 +69,26 @@ void __attribute__((format(printf, 4, 5))) __sm_diag_(const char *file, const in
 typedef uint64_t __sm_bitvec_t;
 typedef uint32_t __sm_idx_t;
 
-typedef struct {
-  __sm_bitvec_t *m_data;
+/*
+ * __sm_bitvec_unaligned_t: a 64-bit unsigned alias that the compiler
+ * treats as having 1-byte alignment, so loads and stores through a
+ * pointer of this type emit unaligned-safe code.
+ *
+ * Required because chunk descriptors land at offset 4 mod 8 within
+ * the map's data buffer (the chunk-count header is 4 bytes, then
+ * chunks start, each prefixed by a 4-byte start-offset).  The chunk
+ * descriptor (__sm_bitvec_t) thus lives at a 4-aligned, not 8-aligned,
+ * address.  Without this typedef, accesses through chunk->m_data trip
+ * UBSan and would trap on strict-alignment cpus.
+ *
+ * gcc and clang lower the unaligned access to whatever the platform
+ * requires (a single load on x86_64, two byte-shuffled half-loads on
+ * a strict-alignment cpu).  Zero overhead on the common targets.
+ */
+typedef uint64_t __sm_bitvec_unaligned_t __attribute__((aligned(1)));
+
+typedef struct __attribute__((aligned(1))) {
+  __sm_bitvec_unaligned_t *m_data;
 } __sm_chunk_t;
 
 typedef struct {
@@ -264,7 +282,7 @@ typedef struct {
 #define SM_CHUNK_GET_FLAGS(data, at) ((((data)) & ((__sm_bitvec_t)SM_FLAG_MASK << ((at)*2))) >> ((at)*2))
 #define SM_CHUNK_SET_FLAGS(data, at, to) ((data) = ((data) & ~((__sm_bitvec_t)SM_FLAG_MASK << ((at)*2))) | ((__sm_bitvec_t)(to) << ((at)*2)))
 #define SM_IS_CHUNK_RLE(chunk) \
-  (((*((__sm_bitvec_t *)(chunk)->m_data) & (((__sm_bitvec_t)0x3) << (SM_BITS_PER_VECTOR - 2))) >> (SM_BITS_PER_VECTOR - 2)) == SM_PAYLOAD_NONE)
+  (((*((__sm_bitvec_unaligned_t *)(chunk)->m_data) & (((__sm_bitvec_t)0x3) << (SM_BITS_PER_VECTOR - 2))) >> (SM_BITS_PER_VECTOR - 2)) == SM_PAYLOAD_NONE)
 
 /*
  * RLE (Run-Length Encoding) Format
@@ -647,7 +665,7 @@ __sm_chunk_get_position(const __sm_chunk_t *chunk, size_t bv)
 static void
 __sm_chunk_init(__sm_chunk_t *chunk, uint8_t *data)
 {
-  chunk->m_data = (__sm_bitvec_t *)data;
+  chunk->m_data = (__sm_bitvec_unaligned_t *)data;
 }
 
 /**
@@ -2173,7 +2191,16 @@ __sm_separate_rle_chunk(sparsemap_t *map, __sm_chunk_sep_t *sep, const uint64_t 
         }
         /* ... do we have a mixed flag to create and vector to assign? ... */
         if (lrl % SM_BITS_PER_VECTOR) {
-          SM_CHUNK_SET_FLAGS(lrc.m_data[0], (aligned_idx + lrl) / SM_BITS_PER_VECTOR, SM_PAYLOAD_MIXED);
+          /*
+           * The vector index is *within* the chunk, not absolute.
+           * Pre-fix this was `(aligned_idx + lrl) / SM_BITS_PER_VECTOR`
+           * which mixes absolute bit position (aligned_idx) with a
+           * chunk-relative length (lrl) and produces shift exponents
+           * way past 64 — UBSan flagged this with shift-exponent
+           * errors of 64 / 92 / 638 / 702.  See
+           * .agent/notes/phase1-deferred-bugs.md (#2 substep).
+           */
+          SM_CHUNK_SET_FLAGS(lrc.m_data[0], lrl / SM_BITS_PER_VECTOR, SM_PAYLOAD_MIXED);
           lrc.m_data[1] |= ~(__sm_bitvec_t)0 >> (SM_BITS_PER_VECTOR - lrl) % SM_BITS_PER_VECTOR;
           /* ... record our chunk size ... */
           sep->ex[i].size = SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) * 2;
@@ -2973,7 +3000,7 @@ __sm_map_set(sparsemap_t *map, uint64_t idx, const bool coalesce)
     __sm_store_idx((uint8_t *)p, __sm_get_chunk_aligned_offset(idx));
     __sm_set_chunk_count(map, 1);
 
-    const __sm_bitvec_t *v = (__sm_bitvec_t *)((uintptr_t)p + SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t));
+    const __sm_bitvec_unaligned_t *v = (__sm_bitvec_unaligned_t *)((uintptr_t)p + SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t));
     ret_idx = __sparsemap_add(map, idx, p, 0, v);
 
     __sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
@@ -3008,7 +3035,7 @@ __sm_map_set(sparsemap_t *map, uint64_t idx, const bool coalesce)
     __sm_store_idx((uint8_t *)p, __sm_get_chunk_aligned_offset(idx));
     __sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
 
-    const __sm_bitvec_t *v = (__sm_bitvec_t *)((uintptr_t)p + SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t));
+    const __sm_bitvec_unaligned_t *v = (__sm_bitvec_unaligned_t *)((uintptr_t)p + SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t));
     ret_idx = __sparsemap_add(map, idx, p, offset, v);
     goto done;
   }
@@ -3108,7 +3135,7 @@ __sm_map_set(sparsemap_t *map, uint64_t idx, const bool coalesce)
     __sm_assert(start == __sm_get_chunk_aligned_offset(start));
     __sm_set_chunk_count(map, __sm_get_chunk_count(map) + 1);
 
-    const __sm_bitvec_t *v = (__sm_bitvec_t *)((uintptr_t)p + SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t));
+    const __sm_bitvec_unaligned_t *v = (__sm_bitvec_unaligned_t *)((uintptr_t)p + SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t));
     ret_idx = __sparsemap_add(map, idx, p, offset, v);
     __sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
     goto done;
@@ -4240,7 +4267,7 @@ next_chunk:
 static bool
 __sm_copy_chunk_to_result(sparsemap_t **resultp, const uint8_t *chunk_ptr)
 {
-  const __sm_chunk_t chunk = { .m_data = (__sm_bitvec_t *)(chunk_ptr + SM_SIZEOF_OVERHEAD) };
+  const __sm_chunk_t chunk = { .m_data = (__sm_bitvec_unaligned_t *)(chunk_ptr + SM_SIZEOF_OVERHEAD) };
   const size_t chunk_bytes = SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&chunk);
   if (!__sm_ensure_capacity(resultp, chunk_bytes)) {
     return false;
@@ -5579,13 +5606,13 @@ QCC_genChunk()
     const uint64_t from = 1, to = SM_CHUNK_RLE_MAX_LENGTH;
     const unsigned int len = ((unsigned int)random() % (to - from)) + from;
     // First allocate enough room for the chunk data ...
-    uint8_t *p = malloc(SM_SIZEOF_OVERHEAD + sizeof(__sm_chunk_t) + (sizeof(__sm_bitvec_t) * 2));
+    uint8_t *p = malloc(SM_SIZEOF_OVERHEAD + (sizeof(__sm_bitvec_t) * 2));
     // ... then set the offset to the length so we can test for that later ...
     __sm_store_idx((uint8_t *)p, len);
     // ... next is the chunk begins after the offset ...
-    __sm_chunk_t *chunk = (__sm_chunk_t *)((uintptr_t)p + SM_SIZEOF_OVERHEAD);
+    __sm_chunk_t chunk_local = { .m_data = (__sm_bitvec_unaligned_t *)((uintptr_t)p + SM_SIZEOF_OVERHEAD) };
+    __sm_chunk_t *chunk = &chunk_local;
     // ... this contains a single vector ...
-    chunk->m_data = (__sm_bitvec_t *)((uintptr_t)chunk + sizeof(__sm_chunk_t));
     chunk->m_data[0] = 0;
     // ... set the flags on this vector to indicate that is it RLE ...
     __sm_chunk_set_rle(chunk);
@@ -5606,20 +5633,24 @@ QCC_genChunk()
   const unsigned int len = ((unsigned int)random() % (to - from)) + from;
   const unsigned int cut = ((unsigned int)random() % ((SM_FLAGS_PER_INDEX - len) - from)) + from;
   // First allocate enough room for the chunk data ...
-  uint8_t *p = malloc(SM_SIZEOF_OVERHEAD + sizeof(__sm_chunk_t) + (sizeof(__sm_bitvec_t) * (len + 1)));
+  uint8_t *p = malloc(SM_SIZEOF_OVERHEAD + (sizeof(__sm_bitvec_t) * (len + 1)));
   // ... then set the offset to the capacity ...
   __sm_store_idx((uint8_t *)p, SM_CHUNK_MAX_CAPACITY - (cut * SM_BITS_PER_VECTOR));
   // ... next is the chunk begins after the offset ...
-  __sm_chunk_t *chunk = (__sm_chunk_t *)((uintptr_t)p + SM_SIZEOF_OVERHEAD);
-  // ... this contains a len + 1 vectors ...
-  chunk->m_data = (__sm_bitvec_t *)((uintptr_t)chunk + sizeof(__sm_chunk_t));
+  __sm_chunk_t chunk_local = { .m_data = (__sm_bitvec_unaligned_t *)((uintptr_t)p + SM_SIZEOF_OVERHEAD) };
+  __sm_chunk_t *chunk = &chunk_local;
   // ... the first is the descriptor with the flags ...
-  __sm_bitvec_t *desc = chunk->m_data;
+  __sm_bitvec_unaligned_t *desc = chunk->m_data;
   *desc = 0;
   // ... ensure that exactly `len` flags are set to SM_PAYLOAD_MIXED ...
   for (size_t i = 0; i < len; i++) {
     SM_CHUNK_SET_FLAGS(*desc, i, SM_PAYLOAD_MIXED);
-    chunk->m_data[1 + i] = (uintptr_t)chunk + i;
+    /*
+     * The marker is `(uintptr_t)p + i` so that the test consumer can
+     * recompute it from the same buffer base, regardless of where
+     * the stack-local __sm_chunk_t happens to sit.
+     */
+    chunk->m_data[1 + i] = (uintptr_t)p + i;
   }
   // ... and, on average, 50% of the rest are SM_PAYLOAD_ONES ...
   for (size_t i = len; i < SM_FLAGS_PER_INDEX - cut; i++) {
@@ -5630,7 +5661,9 @@ QCC_genChunk()
   }
   // ... shuffle those around ...
   for (size_t i = 0; i < SM_FLAGS_PER_INDEX - cut - 1; i++) {
-    const size_t j = ((size_t)random() % SM_FLAGS_PER_INDEX) - cut - i + i;
+    const size_t range = SM_FLAGS_PER_INDEX - cut - i - 1;
+    if (range == 0) break;
+    const size_t j = i + 1 + ((size_t)random() % range);
     const int flags = SM_CHUNK_GET_FLAGS(*desc, j);
     SM_CHUNK_SET_FLAGS(*desc, j, SM_CHUNK_GET_FLAGS(*desc, i));
     SM_CHUNK_SET_FLAGS(*desc, i, flags);
@@ -5687,7 +5720,15 @@ _tst_chunk_get_position(QCC_GenValue **vals, int len, QCC_Stamp **stamp)
   (void)len;
   (void)stamp;
   uint8_t *p = QCC_getValue(vals, 0, void *);
-  __sm_chunk_t *chunk = (__sm_chunk_t *)((uintptr_t)p + SM_SIZEOF_OVERHEAD);
+  /*
+   * The buffer's layout is: 4-byte start offset, then the chunk's
+   * bitvec data (descriptor + optional vectors).  Construct a
+   * stack-local __sm_chunk_t pointing at the bitvecs; do NOT cast
+   * the buffer to __sm_chunk_t * (which would interpret the
+   * descriptor as the m_data pointer).
+   */
+  __sm_chunk_t chunk_local = { .m_data = (__sm_bitvec_unaligned_t *)((uintptr_t)p + SM_SIZEOF_OVERHEAD) };
+  __sm_chunk_t *chunk = &chunk_local;
   size_t pos;
 
   if (__sm_chunk_is_rle(chunk)) {
@@ -5704,7 +5745,7 @@ _tst_chunk_get_position(QCC_GenValue **vals, int len, QCC_Stamp **stamp)
       switch (flag) {
       case SM_PAYLOAD_MIXED:
         pos = __sm_chunk_get_position(chunk, i);
-        if (chunk->m_data[1 + pos] != (uintptr_t)chunk + pos) {
+        if (chunk->m_data[1 + pos] != (uintptr_t)p + pos) {
           return QCC_FAIL;
         }
         mixed++;
@@ -5732,7 +5773,9 @@ _tst_chunk_get_capacity(QCC_GenValue **vals, int len, QCC_Stamp **stamp)
   (void)stamp;
   uint8_t *p = (uint8_t *)QCC_getValue(vals, 0, void *);
   __sm_idx_t start = __sm_load_idx((const uint8_t *)p);
-  __sm_chunk_t *chunk = (__sm_chunk_t *)((uintptr_t)p + SM_SIZEOF_OVERHEAD);
+  /* See _tst_chunk_get_position above for layout notes. */
+  __sm_chunk_t chunk_local = { .m_data = (__sm_bitvec_unaligned_t *)((uintptr_t)p + SM_SIZEOF_OVERHEAD) };
+  __sm_chunk_t *chunk = &chunk_local;
 
   if (__sm_chunk_is_rle(chunk)) {
     if (__sm_chunk_rle_get_length(chunk) != start) {
