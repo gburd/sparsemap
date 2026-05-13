@@ -186,12 +186,29 @@ typedef struct {
   size_t count;
 } __sm_chunk_sep_t;
 
-#define SM_ENOUGH_SPACE(need)                          \
-  do {                                                 \
-    if (map->m_data_used + (need) > map->m_capacity) { \
-      errno = ENOSPC;                                  \
-      return SPARSEMAP_IDX_MAX;                        \
-    }                                                  \
+/*
+ * SM_ENOUGH_SPACE: if growing m_data_used by `need` bytes would push
+ * past m_capacity, return SPARSEMAP_IDX_MAX with errno=ENOSPC.
+ *
+ * The +SM_SIZEOF_OVERHEAD slack accounts for an off-by-4 read in
+ * __sm_insert_data: the memmove length there is `m_data_used -
+ * offset`, which over-counts by SM_SIZEOF_OVERHEAD when m_data_used
+ * includes the chunk-count header (the post-sparsemap_clear()
+ * convention).  Without the slack the over-read writes
+ * SM_SIZEOF_OVERHEAD bytes past the buffer end at the boundary.
+ * Fixing the off-by-4 in __sm_insert_data directly is preferable
+ * but breaks the alternate convention used by
+ * sparsemap_wrap()-without-clear callers, where m_data_used does
+ * not include the header.
+ *
+ * See .agent/notes/phase1-deferred-bugs.md (#1).
+ */
+#define SM_ENOUGH_SPACE(need)                                                  \
+  do {                                                                         \
+    if (map->m_data_used + (need) + SM_SIZEOF_OVERHEAD > map->m_capacity) {    \
+      errno = ENOSPC;                                                          \
+      return SPARSEMAP_IDX_MAX;                                                \
+    }                                                                          \
   } while (0)
 
 #define SM_CHUNK_GET_FLAGS(data, at) ((((data)) & ((__sm_bitvec_t)SM_FLAG_MASK << ((at)*2))) >> ((at)*2))
