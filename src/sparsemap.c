@@ -3564,6 +3564,18 @@ static bool
 __sm_ensure_capacity(sparsemap_t **resultp, size_t needed)
 {
   sparsemap_t *result = *resultp;
+  /*
+   * Defense in depth: the only callers of __sm_ensure_capacity are
+   * sparsemap_union / _intersection / _difference, which all allocate
+   * their result via sparsemap_create() (SM_OWNED_CONTIGUOUS).  Any
+   * other lineage at this point indicates an internal API misuse —
+   * fail loudly under SPARSEMAP_TESTING so we catch it now rather
+   * than three operations downstream when the heap finally notices.
+   */
+  __sm_when_diag({
+    __sm_assert(result->m_alloc_kind == SM_OWNED_CONTIGUOUS
+             || result->m_alloc_kind == SM_OWNED_SPLIT);
+  });
   if (result->m_data_used + needed <= result->m_capacity) {
     return true;
   }
