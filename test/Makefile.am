@@ -1,6 +1,6 @@
-TESTS = test test_rle_standalone
+TESTS = test test_rle_standalone test_heisenbug test_empty_map
 
-check_PROGRAMS = test test_rle_standalone soak
+check_PROGRAMS = test test_rle_standalone test_heisenbug test_empty_map soak
 
 AM_CPPFLAGS = -I$(top_srcdir)/include -I$(top_srcdir)/test
 AM_LDFLAGS = -L$(top_builddir)/src
@@ -29,6 +29,16 @@ test_LDADD = -lpthread -lm
 # Standalone RLE test (links against library)
 test_rle_standalone_SOURCES = test_rle_standalone.c
 test_rle_standalone_CFLAGS = $(AM_CFLAGS)
+
+# Heisenbug regression: sparsemap_set_data_size + wrap'd map.
+# See HEISENBUG_REPORT.md and .agent/notes/sparsemap-cleanup-plan.md.
+test_heisenbug_SOURCES = test_heisenbug.c
+test_heisenbug_CFLAGS = $(AM_CFLAGS)
+
+# Empty-map / m_data_used==0 regression.  See pg_tre's
+# doc/sparsemap-bugfix-m_data_used-0.md and the consolidation plan.
+test_empty_map_SOURCES = test_empty_map.c
+test_empty_map_CFLAGS = $(AM_CFLAGS)
 
 # Soak test (links against library)
 soak_SOURCES = \
