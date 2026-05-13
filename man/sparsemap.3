@@ -1,22 +1,139 @@
 .\" SPDX-License-Identifier: MIT
-.TH sparsemap 3 "2026-05-13" "sparsemap 1.0.0" "Sparsemap Library"
+.\"
+.TH sparsemap 3 "2026-05-13" "sparsemap 1.1.0" "Sparsemap Library"
 .SH NAME
-sparsemap \- sparse, compressed bitmap with run-length encoding
+sm_create, sm_free, sm_add, sm_contains, sm_remove, sm_cardinality,
+sm_union, sm_intersection, sm_difference \- sparse compressed bitmap
 .SH SYNOPSIS
 .nf
 .B #include <sparsemap/sparsemap.h>
 .PP
-.BI "sparsemap_t *sparsemap_create(size_t " size );
-.BI "void sparsemap_free(sparsemap_t *" map );
-.BI "uint64_t sparsemap_add(sparsemap_t *" map ", uint64_t " idx );
-.BI "bool sparsemap_contains(sparsemap_t *" map ", uint64_t " idx );
+Lifecycle:
+.RS
+.BI "sparsemap_t *sm_create(size_t " size );
+.BI "sparsemap_t *sm_copy(const sparsemap_t *" other );
+.BI "sparsemap_t *sm_owned_copy(const sparsemap_t *" map );
+.BI "sparsemap_t *sm_wrap(uint8_t *" data ", size_t " size );
+.BI "void sm_init(sparsemap_t *" map ", uint8_t *" data ", size_t " size );
+.BI "void sm_open(sparsemap_t *" map ", uint8_t *" data ", size_t " size );
+.BI "void sm_clear(sparsemap_t *" map );
+.BI "void sm_free(sparsemap_t *" map );
+.BI "sparsemap_t *sm_set_data_size(sparsemap_t *" map ", uint8_t *" data ", size_t " size );
+.RE
+.PP
+Single-bit:
+.RS
+.BI "bool sm_contains(sparsemap_t *" map ", uint64_t " idx );
+.BI "uint64_t sm_add(sparsemap_t *" map ", uint64_t " idx );
+.BI "uint64_t sm_remove(sparsemap_t *" map ", uint64_t " idx );
+.BI "uint64_t sm_assign(sparsemap_t *" map ", uint64_t " idx ", bool " value );
+.RE
+.PP
+Aggregates and queries:
+.RS
+.BI "size_t sm_cardinality(sparsemap_t *" map );
+.BI "uint64_t sm_minimum(const sparsemap_t *" map );
+.BI "uint64_t sm_maximum(const sparsemap_t *" map );
+.BI "size_t sm_rank(sparsemap_t *" map ", uint64_t " x ", uint64_t " y ", bool " value );
+.BI "uint64_t sm_select(sparsemap_t *" map ", uint64_t " n ", bool " value );
+.BI "uint64_t sm_span(sparsemap_t *" map ", uint64_t " start ", size_t " len ", bool " value );
+.RE
+.PP
+Bulk:
+.RS
+.BI "sparsemap_t *sm_union(const sparsemap_t *" a ", const sparsemap_t *" b );
+.BI "sparsemap_t *sm_intersection(const sparsemap_t *" a ", const sparsemap_t *" b );
+.BI "sparsemap_t *sm_difference(const sparsemap_t *" a ", const sparsemap_t *" b );
+.BI "uint64_t sm_split(sparsemap_t *" map ", uint64_t " idx ", sparsemap_t *" other );
+.BI "sparsemap_t *sm_offset(const sparsemap_t *" map ", ssize_t " offset );
 .fi
 .SH DESCRIPTION
-Sparsemap is a mutable, resizable, compressed bitmap optimized for
-workloads with long runs of consecutive set or unset bits.  See
-\fBsparsemap\fR(7) for the conceptual overview and the project's
-\fIdocs/API.md\fR for the full API reference.
+Sparsemap is a mutable, resizable, run-length-encoded compressed
+bitmap.  Best case stores 16 KB of consecutive set bits in 8 bytes;
+worst case is uncompressed (2048 bits + 8 bytes overhead per chunk).
+See
+.BR sparsemap (7)
+for the architecture and the project's
+.IR docs/API.md
+for the full reference.
+.PP
+The library is single-threaded.  Concurrent reads of an immutable map
+are safe; any writer must hold an external lock.
+.SH ALLOCATION LINEAGE
+Every sparsemap has an internal allocation-lineage tag controlling
+how its data buffer can be resized and freed.  Three lineages exist:
+.TP
+.B SM_OWNED_CONTIGUOUS
+.IR sm_create (),
+.IR sm_copy (),
+.IR sm_owned_copy ().
+The struct and buffer are one heap block.  Free with
+.IR sm_free ()
+or libc
+.IR free ().
+.TP
+.B SM_WRAPPED
+.IR sm_wrap (),
+.IR sm_init (),
+.IR sm_open ().
+The library does not own the data buffer.  Free with
+.IR sm_free ()
+(frees the struct only); the caller frees their buffer
+independently.
+.TP
+.B SM_OWNED_SPLIT
+Produced when
+.IR sm_set_data_size ()
+grows a wrapped map: the library allocates a fresh buffer.  Must be
+freed with
+.IR sm_free ()
+\(em libc
+.IR free ()
+will leak the buffer.
+.PP
+.IR sm_set_data_size (
+.I map
+, NULL,
+.I new_size
+)
+never silently no-ops.  Pre-v1 callers may have relied on the broken
+behavior; see the
+.IR HEISENBUG_REPORT.md
+file in the source distribution.
+.SH ERRORS
+Mutating functions return
+.B SM_IDX_MAX
+and set
+.I errno
+to
+.B ENOSPC
+when the backing buffer is full.  The caller can grow with
+.IR sm_set_data_size ()
+and retry.  Allocation functions return
+.B NULL
+on allocation failure.
+.SH BACKWARD COMPATIBILITY
+v1.1 renamed the public prefix from
+.B sparsemap_
+to
+.B sm_
+for shorter, BSD-style names.  The old names are kept as
+.B #define
+aliases so pre-v1.1 callers compile without change.  Define
+.B SM_NO_LEGACY_ALIASES
+before
+.B #include\ <sparsemap/sparsemap.h>
+to opt out and force-fail anything not yet migrated.
 .SH SEE ALSO
 .BR sparsemap (7)
+.SH BUGS
+.IR docs/API.md " §" "Known issues"
+in the source distribution.  v1.1.0 has two known sanitizer-only
+issues: (1) a deferred bug in
+.IR sm_split ()
+when separating an RLE chunk in unusual positions, and (2) UBSan
+warnings about misaligned 8-byte loads inside the chunk codec.
+Neither affects production builds on x86_64, aarch64, or standard
+RISC-V.
 .SH AUTHOR
-Gregory Burd <greg@burd.me>
+Gregory Burd <greg@burd.me>.

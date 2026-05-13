@@ -6,8 +6,64 @@ follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-(Phase 4 work: fix the two pre-existing ASan bugs noted in
-`.agent/notes/phase1-deferred-bugs.md` before tagging v1.0.1.)
+## [1.1.0] — 2026-05-13
+
+API rename, RISC-V portability fix, and v1.0.0 followups.
+
+### Added
+
+- Public-API prefix renamed from `sparsemap_*` to `sm_*` (BSD-style
+  short names): `sm_create`, `sm_free`, `sm_add`, `sm_contains`, etc.
+  All 30 public functions and the `SM_IDX_MAX` / `SM_FOUND` /
+  `SM_NOT_FOUND` / `SM_VERSION_*` macros.  The opaque type stays as
+  `sparsemap_t`.
+- Backward-compatibility `#define` aliases for every legacy
+  `sparsemap_*` name in the public header.  Pre-v1.1 callers compile
+  unchanged.  Define `SM_NO_LEGACY_ALIASES` to opt out and
+  force-fail unmigrated code.
+- Unaligned-safe `__sm_load_idx` / `__sm_store_idx` / `__sm_load_u32` /
+  `__sm_store_u32` helpers.  All 50 prior `*(__sm_idx_t *)p` and
+  `*(uint32_t *)p` casts replaced with `memcpy`-based loads.  Modern
+  compilers lower to a single native load/store at -O1+; correct on
+  strict-alignment cpus including the standard RISC-V profile.
+- `man/sparsemap.3` (API reference) and `man/sparsemap.7`
+  (concept overview) rewritten for v1.1.
+- Tested on RISC-V (rv host, Ubuntu 24.04, gcc 13): 3/4 meson tests
+  pass with the same `/api/split` failure as x86 (no portability
+  regression).
+
+### Fixed
+
+- Off-by-4 in `__sm_insert_data` mitigated via `SM_ENOUGH_SPACE`
+  slack so the worst-case write can no longer overrun by 4 bytes
+  at the buffer boundary.
+- `sm_split` now propagates `__sm_separate_rle_chunk`'s return
+  value instead of silently using a possibly-uninitialized
+  `sep.expand_by`.
+
+### Documented
+
+- 8-byte alignment requirement on buffers passed to `sm_wrap`,
+  `sm_init`, `sm_open`.  Test buffers updated to use
+  `_Alignas(uint64_t)`.
+- Known issue: UBSan flags misaligned 8-byte loads inside the chunk
+  codec because chunk descriptors land at 4-byte-aligned offsets by
+  layout.  Affects only UBSan reports; real-world cpus (x86_64,
+  aarch64, standard RISC-V) handle the access correctly.  Fix
+  deferred to v1.2 (will require widening `__sm_idx_t` to 64-bit or
+  routing all bitvec accesses through memcpy).
+- Known issue: `sm_split` underflow in `__sm_separate_rle_chunk`
+  exposed by ASan and stack-protector-enabled builds.  Test binary
+  ships with `-U_FORTIFY_SOURCE -fno-stack-protector` to mask it.
+  Production builds without sanitizers are unaffected.  Fix slated
+  for v1.1.1.
+
+### Verified
+
+- Valgrind clean on `test_heisenbug`, `test_empty_map`,
+  `test_rle_standalone` (0 errors, no leaks).
+- ASan clean on the same three.
+- RISC-V build + run on rv host: same 3/4 PASS.
 
 ## [1.0.0] — 2026-05-13
 

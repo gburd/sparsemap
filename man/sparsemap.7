@@ -1,15 +1,72 @@
 .\" SPDX-License-Identifier: MIT
-.TH sparsemap 7 "2026-05-13" "sparsemap 1.0.0" "Sparsemap Concepts"
+.\"
+.TH sparsemap 7 "2026-05-13" "sparsemap 1.1.0" "Sparsemap Concepts"
 .SH NAME
-sparsemap \- conceptual overview of the sparsemap compressed bitmap
+sparsemap \- conceptual overview of the compressed bitmap library
 .SH DESCRIPTION
-Sparsemap is a sparse, compressed bitmap library.  Best case stores
-2048 bits in 8 bytes via run-length encoding; worst case is
-uncompressed (2048 bits + 8 bytes overhead).  Three-tier hierarchy:
-bit vectors, chunks (sparse or RLE), and a top-level map of chunks.
-See \fIdocs/ARCHITECTURE.md\fR in the source distribution for the
-full design.
+Sparsemap is a sparse, compressed bitmap library written in C.  It is
+optimized for workloads that contain long runs of consecutive set or
+unset bits.
+.SH ARCHITECTURE
+Three-tier hierarchy:
+.TP
+.B Tier 0 \(em bit vectors
+Individual bits packed into 64-bit words
+.RB ( __sm_bitvec_t ).
+.TP
+.B Tier 1 \(em chunks
+Each chunk encodes up to 2048 bits.  Two encodings:
+.IP \(bu 2
+.B Sparse:
+a 64-bit descriptor with 32 \(times 2-bit flags identifying which
+sub-vectors are all-zero, all-one, mixed, or unused.  Only mixed
+sub-vectors store an explicit 64-bit payload.  All-zero and all-one
+sub-vectors take zero payload.
+.IP \(bu 2
+.B RLE:
+a single 64-bit descriptor representing a run of N set bits
+starting at index 0 of the chunk.  An RLE chunk takes 8 bytes
+regardless of run length, up to about 2 billion bits.
+.TP
+.B Tier 2 \(em map
+The top-level
+.B sparsemap_t
+manages an ordered sequence of chunks plus a 4-byte chunk count.
+The map grows and shrinks the underlying byte buffer as chunks are
+added or removed.
+.SH WHEN TO USE
+.IP \(bu 2
+PostgreSQL extensions tracking TID sets, bitmap heap scans,
+posting lists.
+.IP \(bu 2
+Trigram or n-gram indexes where document identifiers cluster.
+.IP \(bu 2
+Allocation bitmaps for storage engines.
+.IP \(bu 2
+Anywhere you'd reach for CRoaring but want a smaller, simpler
+library and don't need 32-bit integer support out of the box.
+.SH WHEN NOT TO USE
+.IP \(bu 2
+Multi-threaded workloads.  Sparsemap is not thread-safe.  A
+lock-free / wait-free variant is in design (see the
+.B experiment/thread-safe
+branch).
+.IP \(bu 2
+Strict-alignment cpus (ARMv5, some embedded RISC-V).  v1.1 has
+documented misaligned 8-byte loads inside the chunk codec.
+.SH PORTABILITY
+Tested on:
+.IP \(bu 2
+x86_64 Linux (gcc, clang)
+.IP \(bu 2
+RISC-V 64 Linux (Ubuntu 24.04, gcc 13)
+.PP
+Should work on any 64-bit POSIX cpu where misaligned 8-byte loads
+are permitted (so x86_64, aarch64, standard RISC-V profiles).  The
+4-byte chunk-count and chunk-start-offset loads use
+.IR memcpy -based
+helpers and are portable to strict-alignment cpus.
 .SH SEE ALSO
 .BR sparsemap (3)
 .SH AUTHOR
-Gregory Burd <greg@burd.me>
+Gregory Burd <greg@burd.me>.
