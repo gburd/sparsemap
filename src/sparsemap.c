@@ -3333,9 +3333,19 @@ sm_maximum(const sparsemap_t *map)
 double
 sm_fill_factor(sparsemap_t *map)
 {
+  __sm_check_invariants(map);
   const size_t rank = sm_rank(map, 0, SM_IDX_MAX, true);
-  const uint64_t end = sm_maximum(map);
-  return (double)rank / (double)end * 100.0;
+  if (rank == 0) {
+    return 0.0;
+  }
+  const uint64_t lo = sm_minimum(map);
+  const uint64_t hi = sm_maximum(map);
+  /* range = hi - lo + 1 (the inclusive span containing all set bits). */
+  const uint64_t range = hi - lo + 1;
+  if (range == 0) {
+    return 0.0;
+  }
+  return (double)rank / (double)range;
 }
 
 /**
