@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT */
 /*
  * sparsemap is MIT-licensed, but for this file:
  *

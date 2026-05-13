@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT */
 #if defined(__GNUC__) && (__GNUC__ >= 4)
 
 // Default to using the GCC builtin popcount.  On architectures with

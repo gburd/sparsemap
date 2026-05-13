@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT */
 #include <assert.h>
 #include <common.h>
 #include <sparsemap.h>

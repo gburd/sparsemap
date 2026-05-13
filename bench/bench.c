@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT */
 /*
  * bench.c -- Comparative benchmark: sparsemap vs CRoaring vs PostgreSQL bitmapset
  *

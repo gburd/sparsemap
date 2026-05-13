@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT */
 /*
  * Standalone test for RLE implementation
  * Compile: cc -Wall -Wextra -g -I. -o test_rle test_rle_standalone.c sparsemap.c

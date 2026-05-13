@@ -1,0 +1,105 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Codeberg's hosted Forgejo Actions runners advertise three label
+# tiers: codeberg-tiny (1 CPU / 2G / 2 min), codeberg-small (2 / 4G /
+# 5 min), codeberg-medium (4 / 8G / 10 min).
+#
+# We don't pin a `container:` -- Codeberg's runner uses
+# ghcr.io/catthehacker/ubuntu:act-latest by default, which is
+# GitHub-Actions-compatible and already has most build tools
+# preinstalled.
+
+jobs:
+  build:
+    runs-on: codeberg-medium
+    strategy:
+      matrix:
+        compiler: [gcc, clang]
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ matrix.compiler }} meson ninja-build \
+                                  pkg-config valgrind
+
+      - name: Checkout
+        uses: https://code.forgejo.org/actions/checkout@v4
+
+      - name: Setup meson
+        env:
+          CC: ${{ matrix.compiler }}
+        run: meson setup builddir
+
+      - name: Build
+        run: ninja -C builddir
+
+      - name: Test
+        run: meson test -C builddir --print-errorlogs
+
+  sanitizers:
+    runs-on: codeberg-medium
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [address, undefined]
+        # Skip 'thread' until experiment/thread-safe lands; the
+        # current single-threaded library is TSan-clean by
+        # construction but the test harness uses pthreads only in
+        # soak (which is build_by_default=false).
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc meson ninja-build pkg-config
+
+      - name: Checkout
+        uses: https://code.forgejo.org/actions/checkout@v4
+
+      - name: Setup meson with ${{ matrix.sanitizer }} sanitizer
+        run: |
+          meson setup builddir-${{ matrix.sanitizer }} \
+            -Db_sanitize=${{ matrix.sanitizer }} \
+            -Ddiagnostic=true
+
+      - name: Build
+        run: ninja -C builddir-${{ matrix.sanitizer }}
+
+      - name: Test
+        run: meson test -C builddir-${{ matrix.sanitizer }} --print-errorlogs
+
+  valgrind:
+    runs-on: codeberg-medium
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc meson ninja-build pkg-config valgrind
+
+      - name: Checkout
+        uses: https://code.forgejo.org/actions/checkout@v4
+
+      - name: Build
+        run: |
+          meson setup builddir -Ddiagnostic=true
+          ninja -C builddir
+
+      - name: Valgrind check
+        run: scripts/check_memory.sh builddir
+
+  # Keep the version string aligned across meson.build,
+  # include/sparsemap.h, and CHANGELOG.md.  Fails loudly if a bump
+  # forgets one of them.
+  version-consistency:
+    runs-on: codeberg-medium
+    steps:
+      - name: Checkout
+        uses: https://code.forgejo.org/actions/checkout@v4
+
+      - name: Check all version sources agree
+        run: scripts/check_version_consistency.sh

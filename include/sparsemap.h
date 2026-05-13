@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT */
 /*
  * Copyright (c) 2024 Gregory Burd <greg@burd.me>.  All rights reserved.
  *
@@ -137,6 +138,12 @@
 #if defined(__cplusplus)
 extern "C" {
 #endif
+
+/** Library version (kept in sync with meson.build's project(version: ...)). */
+#define SPARSEMAP_VERSION_STRING "1.0.0"
+#define SPARSEMAP_VERSION_MAJOR  1
+#define SPARSEMAP_VERSION_MINOR  0
+#define SPARSEMAP_VERSION_PATCH  0
 
 /** Opaque handle to a sparsemap instance. */
 typedef struct sparsemap sparsemap_t;

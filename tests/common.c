@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT */
 #define _POSIX_C_SOURCE 200112L
 #define X86_INTRIN
 
