@@ -458,6 +458,36 @@ enum sm_alloc_kind {
   SM_OWNED_SPLIT      = 2,
 };
 
+/*
+ * Internal-invariant check.  No-op in production builds; under
+ * SPARSEMAP_TESTING / SPARSEMAP_DIAGNOSTIC it asserts:
+ *
+ *   - map is non-NULL
+ *   - m_data is non-NULL when m_capacity > 0
+ *   - m_data_used <= m_capacity (no buffer overrun)
+ *   - m_data is 8-byte aligned (the chunk codec assumes this)
+ *   - m_alloc_kind is one of the three known values
+ *
+ * The intent is to fail at the moment a corrupted map is touched,
+ * rather than three operations later when the libc heap finally
+ * notices.  Called at the top of every public mutating or query
+ * function in the heisenbug-fix series.
+ */
+static inline void
+__sm_check_invariants(const struct sparsemap *map)
+{
+  __sm_when_diag({
+    __sm_assert(map != NULL);
+    if (map == NULL) return;
+    __sm_assert(map->m_capacity == 0 || map->m_data != NULL);
+    __sm_assert(map->m_data_used <= map->m_capacity);
+    __sm_assert(IS_8_BYTE_ALIGNED(map->m_data));
+    __sm_assert(map->m_alloc_kind == SM_OWNED_CONTIGUOUS
+             || map->m_alloc_kind == SM_WRAPPED
+             || map->m_alloc_kind == SM_OWNED_SPLIT);
+  });
+}
+
 /**
  * @brief Calculates the vector size for a given byte value.
  *
@@ -3029,6 +3059,7 @@ sparsemap_add(sparsemap_t *map, const uint64_t idx)
 uint64_t
 sparsemap_assign(sparsemap_t *map, const uint64_t idx, const bool value)
 {
+  __sm_check_invariants(map);
   return value ? sparsemap_add(map, idx) : sparsemap_remove(map, idx);
 }
 
@@ -3046,6 +3077,7 @@ sparsemap_assign(sparsemap_t *map, const uint64_t idx, const bool value)
 uint64_t
 sparsemap_minimum(const sparsemap_t *map)
 {
+  __sm_check_invariants(map);
   uint64_t offset = 0;
   const size_t count = __sm_get_chunk_count(map);
   if (count == 0) {
@@ -3100,6 +3132,7 @@ done:;
 uint64_t
 sparsemap_maximum(const sparsemap_t *map)
 {
+  __sm_check_invariants(map);
   const size_t count = __sm_get_chunk_count(map);
 
   /* the ending offset of a map containing zero chunks is zero */
@@ -3747,6 +3780,7 @@ __sm_flush_carry(sparsemap_t **resultp, __sm_bitvec_t carry_words[32],
 sparsemap_t *
 sparsemap_offset(const sparsemap_t *map, ssize_t offset)
 {
+  __sm_check_invariants(map);
   if (map == NULL) {
     return NULL;
   }
@@ -4127,6 +4161,8 @@ __sm_copy_chunk_to_result(sparsemap_t **resultp, const uint8_t *chunk_ptr)
 sparsemap_t *
 sparsemap_intersection(const sparsemap_t *a, const sparsemap_t *b)
 {
+  __sm_check_invariants(a);
+  __sm_check_invariants(b);
   if (a == NULL || b == NULL) {
     return NULL;
   }
@@ -4391,6 +4427,8 @@ __sm_emit_chunk_bits(sparsemap_t **resultp, const __sm_chunk_t *chunk,
 sparsemap_t *
 sparsemap_difference(const sparsemap_t *a, const sparsemap_t *b)
 {
+  __sm_check_invariants(a);
+  __sm_check_invariants(b);
   if (a == NULL) {
     return NULL;
   }
@@ -4622,6 +4660,8 @@ sparsemap_difference(const sparsemap_t *a, const sparsemap_t *b)
 sparsemap_t *
 sparsemap_union(const sparsemap_t *a, const sparsemap_t *b)
 {
+  __sm_check_invariants(a);
+  __sm_check_invariants(b);
   if (a == NULL && b == NULL) {
     return NULL;
   }
@@ -4930,6 +4970,8 @@ fail:
 uint64_t
 sparsemap_split(sparsemap_t *map, uint64_t idx, sparsemap_t *other)
 {
+  __sm_check_invariants(map);
+  __sm_check_invariants(other);
   size_t i;
   const size_t count = __sm_get_chunk_count(map);
   bool in_middle = false;
@@ -5117,6 +5159,7 @@ sparsemap_split(sparsemap_t *map, uint64_t idx, sparsemap_t *other)
 uint64_t
 sparsemap_select(sparsemap_t *map, uint64_t n, bool value)
 {
+  __sm_check_invariants(map);
   __sm_assert(sparsemap_get_size(map) >= SM_SIZEOF_OVERHEAD);
   const size_t count = __sm_get_chunk_count(map);
 
@@ -5262,6 +5305,7 @@ __sm_rank_vec(sparsemap_t *map, uint64_t begin, uint64_t end, bool value, __sm_b
 size_t
 sparsemap_rank(sparsemap_t *map, uint64_t begin, uint64_t end, bool value)
 {
+  __sm_check_invariants(map);
   __sm_bitvec_t vec;
   return __sm_rank_vec(map, begin, end, value, &vec);
 }
@@ -5269,6 +5313,7 @@ sparsemap_rank(sparsemap_t *map, uint64_t begin, uint64_t end, bool value)
 uint64_t
 sparsemap_span(sparsemap_t *map, uint64_t idx, size_t len, bool value)
 {
+  __sm_check_invariants(map);
   __sm_bitvec_t vec = 0;
 
   /* When skipping forward to `idx` offset in the map we can determine how
