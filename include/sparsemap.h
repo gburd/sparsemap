@@ -237,6 +237,13 @@ sparsemap_t *sparsemap_owned_copy(const sparsemap_t *map);
  * the caller.  Dispose with sparsemap_free() (which frees the struct only)
  * or with libc free() (equivalent).
  *
+ * **Alignment requirement:** \a data must be aligned to at least 8 bytes
+ * (the alignment of `uint64_t`).  Stack arrays should declare
+ * `_Alignas(uint64_t) uint8_t buf[N];`; heap allocations from `malloc()`
+ * are always sufficiently aligned.  On x86_64 / aarch64 / standard RISC-V
+ * a misaligned buffer will work but with a perf penalty; on strict-
+ * alignment cpus (ARMv5, some embedded) it will trap.
+ *
  * Resizing via sparsemap_set_data_size(map, NULL, larger) on a wrapped map
  * is supported: the library transparently allocates a fresh internal
  * buffer, copies the in-use prefix into it, and transitions the map's
@@ -244,7 +251,7 @@ sparsemap_t *sparsemap_owned_copy(const sparsemap_t *map);
  * and remains theirs to free.  The resulting map MUST be disposed with
  * sparsemap_free() (libc free() will leak the new buffer).
  *
- * @param[in] data  Buffer for bitmap storage (stack or heap).
+ * @param[in] data  Buffer for bitmap storage (stack or heap), 8-byte aligned.
  * @param[in] size  Size of \a data in bytes.
  * @returns A new sparsemap, or NULL on allocation failure.
  */

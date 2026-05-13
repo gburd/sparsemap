@@ -76,7 +76,7 @@ static int g_total = 0;
  */
 CASE(test_max_on_zero_used_with_dirty_buffer)
 {
-    uint8_t buf[256];
+    _Alignas(uint64_t) uint8_t buf[256];
     memset(buf, 0xFF, sizeof(buf)); /* every byte non-zero */
     sparsemap_t *map = sparsemap_wrap(buf, sizeof(buf));
     EXPECT(map != NULL, "wrap succeeds");
@@ -95,7 +95,7 @@ CASE(test_max_on_zero_used_with_dirty_buffer)
 
 CASE(test_rank_on_zero_used_with_dirty_buffer)
 {
-    uint8_t buf[256];
+    _Alignas(uint64_t) uint8_t buf[256];
     memset(buf, 0xAB, sizeof(buf));
     sparsemap_t *map = sparsemap_wrap(buf, sizeof(buf));
     EXPECT(map != NULL, "wrap succeeds");
@@ -110,7 +110,7 @@ CASE(test_rank_on_zero_used_with_dirty_buffer)
 
 CASE(test_union_with_zero_used_input)
 {
-    uint8_t bad[256];
+    _Alignas(uint64_t) uint8_t bad[256];
     memset(bad, 0x55, sizeof(bad));
     sparsemap_t *a = sparsemap_wrap(bad, sizeof(bad));
 
@@ -137,7 +137,7 @@ CASE(test_union_with_zero_used_input)
 
 CASE(test_intersection_with_zero_used_input)
 {
-    uint8_t bad[256];
+    _Alignas(uint64_t) uint8_t bad[256];
     memset(bad, 0x77, sizeof(bad));
     sparsemap_t *a = sparsemap_wrap(bad, sizeof(bad));
 

@@ -19,12 +19,6 @@ munit = static_library('sparsemap_munit',
 
 # Main exhaustive test binary.  Compiles its own copy of sparsemap.c
 # with -DSPARSEMAP_TESTING so QCC_genChunk, _tst_*, etc. are visible.
-#
-# Note: -U_FORTIFY_SOURCE -fno-stack-protector matches the autotools
-# default and works around a pre-existing memmove length underflow in
-# __sm_separate_rle_chunk that's tracked in
-# .agent/notes/phase1-deferred-bugs.md (#3).  When that's fixed we
-# can drop the workaround.
 test_main = executable('test_main',
   'test.c',
   'common.c',

@@ -91,7 +91,7 @@ static int g_total = 0;
  */
 CASE(test_wrap_then_grow_via_set_data_size_null)
 {
-    uint8_t small[256];
+    _Alignas(uint64_t) uint8_t small[256];
     memset(small, 0, sizeof(small));
     sparsemap_t *map = sparsemap_wrap(small, sizeof(small));
     EXPECT(map != NULL, "wrap allocates handle");
@@ -172,7 +172,7 @@ CASE(test_wrap_then_grow_via_set_data_size_null)
  */
 CASE(test_wrap_then_swap_buffer)
 {
-    uint8_t small[256];
+    _Alignas(uint64_t) uint8_t small[256];
     memset(small, 0, sizeof(small));
     sparsemap_t *map = sparsemap_wrap(small, sizeof(small));
     EXPECT(map != NULL, "wrap allocates handle");
@@ -180,7 +180,7 @@ CASE(test_wrap_then_swap_buffer)
     sparsemap_clear(map);
 
     /* Caller-managed grow: copy the bits into a larger buffer. */
-    uint8_t big[4096];
+    _Alignas(uint64_t) uint8_t big[4096];
     memset(big, 0, sizeof(big));
     memcpy(big, small, sizeof(small));
 
@@ -233,7 +233,7 @@ CASE(test_wrap_then_swap_buffer)
 CASE(test_owned_copy_normalizes_lineage)
 {
     /* Make a wrap'd input. */
-    uint8_t buf[1024];
+    _Alignas(uint64_t) uint8_t buf[1024];
     memset(buf, 0, sizeof(buf));
     sparsemap_t *wrapped = sparsemap_wrap(buf, sizeof(buf));
     sparsemap_clear(wrapped);
@@ -277,7 +277,7 @@ CASE(test_owned_copy_normalizes_lineage)
 CASE(test_union_with_wrapped_input_grows_result)
 {
     /* Input A: wrap'd, populated densely.  We'll drive the result. */
-    uint8_t a_buf[2048];
+    _Alignas(uint64_t) uint8_t a_buf[2048];
     memset(a_buf, 0, sizeof(a_buf));
     sparsemap_t *a = sparsemap_wrap(a_buf, sizeof(a_buf));
     sparsemap_clear(a);
@@ -324,8 +324,8 @@ CASE(test_union_with_wrapped_input_grows_result)
 
 CASE(test_intersection_difference_with_wrapped)
 {
-    uint8_t a_buf[2048];
-    uint8_t b_buf[2048];
+    _Alignas(uint64_t) uint8_t a_buf[2048];
+    _Alignas(uint64_t) uint8_t b_buf[2048];
     memset(a_buf, 0, sizeof(a_buf));
     memset(b_buf, 0, sizeof(b_buf));
     sparsemap_t *a = sparsemap_wrap(a_buf, sizeof(a_buf));
