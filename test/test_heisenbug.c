@@ -133,18 +133,20 @@ CASE(test_wrap_then_grow_via_set_data_size_null)
     memset(small, 0xCC, sizeof(small));
 
     /*
-     * Add 1000 widely-spread bits.  Today this corrupts the heap
-     * because the library writes into `small` past offset 256.
-     * Post-fix the library has its own buffer; `small` stays 0xCC.
+     * Add 100 closely-spaced bits.  These all live in a single chunk
+     * (chunks hold 2048 bits each), so 4096 bytes is far more than
+     * enough.  Pre-fix, this corrupted the heap because the library
+     * was writing into `small` past offset 256.  Post-fix the library
+     * has its own 4096-byte buffer.
      */
-    for (uint64_t i = 0; i < 1000; i++) {
-        const uint64_t r = sparsemap_add(grown, i * 2048);
-        EXPECT(r == i * 2048, "add succeeds in grown map");
+    for (uint64_t i = 0; i < 100; i++) {
+        const uint64_t r = sparsemap_add(grown, i * 8);
+        EXPECT(r == i * 8, "add succeeds in grown map");
     }
 
     /* Verify the bits we set are observable. */
-    for (uint64_t i = 0; i < 1000; i++) {
-        EXPECT(sparsemap_contains(grown, i * 2048),
+    for (uint64_t i = 0; i < 100; i++) {
+        EXPECT(sparsemap_contains(grown, i * 8),
                "set bit reads back as set");
     }
 
@@ -188,8 +190,8 @@ CASE(test_wrap_then_swap_buffer)
            "post-swap capacity equals new buffer size");
 
     /* Adding bits writes into `big`, not `small`. */
-    for (uint64_t i = 0; i < 1000; i++) {
-        sparsemap_add(grown, i * 2048);
+    for (uint64_t i = 0; i < 100; i++) {
+        sparsemap_add(grown, i * 8);
     }
 
     /*

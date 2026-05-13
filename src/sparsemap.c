@@ -412,6 +412,50 @@ struct __attribute__((aligned(8))) sparsemap {
   size_t m_capacity;  /* The total size of m_data */
   size_t m_data_used; /* The used size of m_data */
   uint8_t *m_data;    /* The serialized bitmap data */
+  /*
+   * m_alloc_kind tags how m_data was provisioned.  See enum
+   * sm_alloc_kind below.  Used by sparsemap_set_data_size and
+   * sparsemap_free to know whether the library may realloc / free
+   * the buffer.  Pre-v1 maps that predate this field would have
+   * m_alloc_kind == SM_OWNED_CONTIGUOUS == 0 by zero-initialization,
+   * which matches their actual lineage (everyone allocated via
+   * sparsemap()).
+   */
+  uint8_t m_alloc_kind;
+};
+
+/*
+ * Allocation lineage.  Tracked per sparsemap_t so the grow / dispose
+ * paths know what they may safely realloc or free.
+ *
+ * SM_OWNED_CONTIGUOUS  Single calloc(1, sizeof(sparsemap_t) + size).
+ *                      Both the struct and m_data live in one heap
+ *                      block; m_data sits immediately after the struct.
+ *                      Set by sparsemap() and sparsemap_copy().  May be
+ *                      grown via realloc, and disposed with free(map).
+ *                      Default for zero-initialized memory.
+ *
+ * SM_WRAPPED           m_data points to a buffer the caller owns.  Set
+ *                      by sparsemap_wrap(), sparsemap_init(), and
+ *                      sparsemap_open().  Cannot be realloc'd in place;
+ *                      sparsemap_set_data_size with data == NULL will
+ *                      transparently promote to SM_OWNED_SPLIT by
+ *                      allocating a fresh library-owned buffer and
+ *                      copying the m_data_used prefix into it.  The
+ *                      caller's original buffer is left untouched and
+ *                      remains theirs to free.
+ *
+ * SM_OWNED_SPLIT       The struct is heap-allocated; m_data is
+ *                      separately heap-allocated and owned by the
+ *                      library (typically the result of promoting an
+ *                      SM_WRAPPED map via grow).  Disposed with
+ *                      sparsemap_free, which does free(m_data) +
+ *                      free(map).
+ */
+enum sm_alloc_kind {
+  SM_OWNED_CONTIGUOUS = 0,
+  SM_WRAPPED          = 1,
+  SM_OWNED_SPLIT      = 2,
 };
 
 /**
@@ -2115,6 +2159,12 @@ sparsemap(size_t size)
   if (map) {
     uint8_t *data = (uint8_t *)(((uintptr_t)map + sizeof(sparsemap_t)) & ~(uintptr_t)7);
     sparsemap_init(map, data, size);
+    /*
+     * sparsemap_init tags the map as SM_WRAPPED (caller-supplied
+     * buffer); override here because the buffer is contiguous with the
+     * struct and we own both.
+     */
+    map->m_alloc_kind = SM_OWNED_CONTIGUOUS;
     __sm_when_diag({ __sm_assert(IS_8_BYTE_ALIGNED(map->m_data)); });
   }
   return map;
@@ -2138,6 +2188,7 @@ sparsemap_copy(const sparsemap_t *other)
   if (map) {
     map->m_capacity = other->m_capacity;
     map->m_data_used = other->m_data_used;
+    /* m_alloc_kind is already SM_OWNED_CONTIGUOUS from sparsemap(). */
     memcpy(map->m_data, other->m_data, cap);
   }
   return map;
@@ -2161,6 +2212,7 @@ sparsemap_wrap(uint8_t *data, const size_t size)
     map->m_data = data;
     map->m_data_used = 0;
     map->m_capacity = size;
+    map->m_alloc_kind = SM_WRAPPED;
   }
   return map;
 }
@@ -2181,6 +2233,14 @@ sparsemap_init(sparsemap_t *map, uint8_t *data, const size_t size)
   map->m_data = data;
   map->m_data_used = 0;
   map->m_capacity = size;
+  /*
+   * Caller-allocated struct + caller-allocated buffer.  The buffer is
+   * not owned by the library; sparsemap_set_data_size will treat any
+   * grow as a wrap-style promotion (allocate fresh, copy, transition
+   * to SM_OWNED_SPLIT).  sparsemap() overrides this to
+   * SM_OWNED_CONTIGUOUS after calling us.
+   */
+  map->m_alloc_kind = SM_WRAPPED;
   sparsemap_clear(map);
 }
 
@@ -2200,57 +2260,173 @@ sparsemap_open(sparsemap_t *map, uint8_t *data, const size_t size)
   map->m_data = data;
   map->m_data_used = __sm_get_size_impl(map);
   map->m_capacity = size;
+  /*
+   * sparsemap_open is for deserializing into a caller-supplied
+   * struct + buffer; lineage matches sparsemap_init.
+   */
+  map->m_alloc_kind = SM_WRAPPED;
 }
 
 /**
- * @brief Sets the data size of the given sparsemap.
+ * @brief Resizes the data buffer of the sparsemap.
  *
- * This function adjusts the data size of the provided sparsemap. If the `data`
- * parameter is `NULL`, and the sparsemap was allocated using the `sparsemap()`
- * API, the sparsemap will be resized accordingly. If new data is provided, it
- * updates the sparsemap with the new data buffer. The function ensures that
- * the data is properly aligned to 8 bytes.
+ * Behaviour depends on the calling form and the map's allocation
+ * lineage:
  *
- * @param[in,out] map The sparsemap to modify.
- * @param[in] data The new data buffer. If NULL, the sparsemap's internal data
- *                 will be resized.
- * @param[in] size The new size for the data buffer.
- * @return The updated sparsemap pointer if successful, or NULL if resizing fails.
+ *   sparsemap_set_data_size(map, NULL, size)
+ *     Library-managed grow / shrink.  Always succeeds (returning a
+ *     possibly-relocated map pointer) or returns NULL on allocation
+ *     failure.  Never silently no-ops the resize.
+ *
+ *       SM_OWNED_CONTIGUOUS — realloc the single struct+buffer block.
+ *                             Caller must update all map references to
+ *                             the returned pointer.
+ *       SM_OWNED_SPLIT      — realloc m_data; map struct stays put.
+ *       SM_WRAPPED          — if size <= m_capacity, simply update
+ *                             m_capacity (caller's buffer is still
+ *                             theirs).  If size > m_capacity, allocate
+ *                             a fresh library-owned buffer of the
+ *                             requested size, memcpy the m_data_used
+ *                             prefix into it, redirect m_data, and
+ *                             transition lineage to SM_OWNED_SPLIT.
+ *                             The caller's original buffer is left
+ *                             untouched and remains theirs.
+ *
+ *   sparsemap_set_data_size(map, data, size)  [data != NULL]
+ *     Re-point the map at a caller-supplied buffer.  m_capacity is
+ *     updated; copying any existing bits is the caller's
+ *     responsibility.  Lineage transitions to SM_WRAPPED — the library
+ *     does not own the new buffer and will not realloc/free it on the
+ *     caller's behalf.
+ *
+ * @param[in,out] map   The sparsemap to resize.  Must be non-NULL.
+ * @param[in]     data  Optional caller-supplied buffer; NULL means
+ *                      "library decides".
+ * @param[in]     size  New buffer size in bytes.
+ * @return The (possibly relocated) sparsemap pointer on success,
+ *         or NULL on allocation failure.
  */
 sparsemap_t *
 sparsemap_set_data_size(sparsemap_t *map, uint8_t *data, const size_t size)
 {
-  const size_t data_size = size * sizeof(uint8_t);
+  if (map == NULL) {
+    return NULL;
+  }
 
-  /*
-   * If this sparsemap was allocated by the sparsemap() API and we're not handed
-   * a new data, it's up to us to resize it.
-   */
-  if (data == NULL && (uintptr_t)map->m_data == (uintptr_t)map + sizeof(sparsemap_t) && size > map->m_capacity) {
+  /* Caller-driven re-point: trust them, transition to SM_WRAPPED. */
+  if (data != NULL) {
+    if (data != map->m_data) {
+      map->m_data = data;
+    }
+    map->m_capacity = size;
+    map->m_alloc_kind = SM_WRAPPED;
+    return map;
+  }
 
-    /* Ensure that m_data is 8-byte aligned. */
-    size_t total_size = sizeof(sparsemap_t) + data_size;
+  /* Library-managed resize.  Branch on lineage and direction. */
+  switch (map->m_alloc_kind) {
+  case SM_OWNED_CONTIGUOUS: {
+    if (size == map->m_capacity) {
+      return map;
+    }
+    /*
+     * Realloc the single block.  Allocate room for the struct + the
+     * new data buffer + alignment padding so m_data lands on an 8-byte
+     * boundary.
+     */
+    size_t total_size = sizeof(sparsemap_t) + size;
     const size_t padding = total_size % 8 == 0 ? 0 : 8 - (total_size % 8);
     total_size += padding;
 
+    const size_t old_capacity = map->m_capacity;
     sparsemap_t *m = realloc(map, total_size);
     if (!m) {
+      /* Original block still valid; leave map untouched. */
       return NULL;
     }
-    memset((uint8_t *)m + sizeof(sparsemap_t) + (m->m_capacity * sizeof(uint8_t)), 0, size - m->m_capacity + padding);
-    m->m_capacity = data_size;
     m->m_data = (uint8_t *)(((uintptr_t)m + sizeof(sparsemap_t)) & ~(uintptr_t)7);
-    __sm_when_diag({ __sm_assert(IS_8_BYTE_ALIGNED(m->m_data)); }) return m;
+    if (size > old_capacity) {
+      /* Zero the newly-acquired tail so chunk metadata stays clean. */
+      memset(m->m_data + old_capacity, 0, size - old_capacity);
+    }
+    m->m_capacity = size;
+    /*
+     * m_data_used does not change on grow; on shrink the caller is
+     * responsible for ensuring m_data_used <= size before calling.
+     */
+    if (m->m_data_used > size) {
+      m->m_data_used = size;
+    }
+    __sm_when_diag({ __sm_assert(IS_8_BYTE_ALIGNED(m->m_data)); });
+    return m;
   }
-  /*
-   * NOTE: It is up to the caller to realloc their buffer and provide it here
-   * for reassignment.
-   */
-  if (data != NULL && data != map->m_data) {
-    map->m_data = data;
+
+  case SM_OWNED_SPLIT: {
+    if (size == map->m_capacity) {
+      return map;
+    }
+    uint8_t *new_data = realloc(map->m_data, size);
+    if (!new_data) {
+      return NULL;
+    }
+    if (size > map->m_capacity) {
+      memset(new_data + map->m_capacity, 0, size - map->m_capacity);
+    }
+    map->m_data = new_data;
+    map->m_capacity = size;
+    if (map->m_data_used > size) {
+      map->m_data_used = size;
+    }
+    return map;
   }
-  map->m_capacity = size;
-  return map;
+
+  case SM_WRAPPED: {
+    /*
+     * Caller owns m_data.  Two cases:
+     *
+     *   size <= m_capacity (shrink or same):
+     *     We do not own the buffer, so we cannot realloc/free it.  Just
+     *     update m_capacity to record "use no more than `size` bytes
+     *     of the caller's buffer".  The caller's buffer is unchanged
+     *     and remains theirs to free.
+     *
+     *   size > m_capacity (grow):
+     *     Allocate a fresh library-owned buffer of the requested size,
+     *     copy the in-use prefix (m_data_used bytes), redirect m_data,
+     *     transition lineage to SM_OWNED_SPLIT.  The caller's original
+     *     buffer is untouched and remains theirs.
+     *
+     *     This is the path that fixes the heisenbug from
+     *     HEISENBUG_REPORT.md: pre-fix, the function silently set
+     *     m_capacity = size without allocating storage, and the next
+     *     sparsemap_add corrupted the heap.
+     */
+    if (size <= map->m_capacity) {
+      map->m_capacity = size;
+      if (map->m_data_used > size) {
+        map->m_data_used = size;
+      }
+      return map;
+    }
+
+    uint8_t *new_data = calloc(1, size);
+    if (!new_data) {
+      return NULL;
+    }
+    const size_t copy_bytes = map->m_data_used <= map->m_capacity ? map->m_data_used : map->m_capacity;
+    if (copy_bytes > 0 && map->m_data != NULL) {
+      memcpy(new_data, map->m_data, copy_bytes);
+    }
+    map->m_data = new_data;
+    map->m_capacity = size;
+    map->m_alloc_kind = SM_OWNED_SPLIT;
+    return map;
+  }
+  }
+
+  /* Unreachable. */
+  __sm_when_diag({ __sm_assert(0 && "unknown sparsemap allocation lineage"); });
+  return NULL;
 }
 
 /**
