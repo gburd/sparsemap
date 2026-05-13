@@ -249,6 +249,51 @@ CASE(test_set_data_size_null_input)
     return 0;
 }
 
+CASE(test_set_data_size_split_grow)
+{
+    /* Promote wrap to split, then grow the split. */
+    _Alignas(uint64_t) uint8_t buf[256];
+    memset(buf, 0, sizeof(buf));
+    sparsemap_t *m = sm_wrap(buf, sizeof(buf));
+    sm_clear(m);
+    sparsemap_t *split = sm_set_data_size(m, NULL, 1024); /* WRAP -> SPLIT */
+    EXPECT(split != NULL, "wrap-to-split promotion");
+    sparsemap_t *grown = sm_set_data_size(split, NULL, 4096); /* SPLIT -> SPLIT (grown) */
+    EXPECT(grown != NULL, "split grow");
+    EXPECT(sm_get_capacity(grown) == 4096, "split capacity grew");
+    sm_free(grown);
+    return 0;
+}
+
+CASE(test_set_data_size_split_shrink)
+{
+    /* Promote wrap to split, then shrink the split. */
+    _Alignas(uint64_t) uint8_t buf[256];
+    memset(buf, 0, sizeof(buf));
+    sparsemap_t *m = sm_wrap(buf, sizeof(buf));
+    sm_clear(m);
+    sparsemap_t *split = sm_set_data_size(m, NULL, 4096);
+    EXPECT(split != NULL, "wrap-to-split");
+    sparsemap_t *shrunk = sm_set_data_size(split, NULL, 1024);
+    EXPECT(shrunk != NULL, "split shrink");
+    EXPECT(sm_get_capacity(shrunk) == 1024, "split capacity shrank");
+    sm_free(shrunk);
+    return 0;
+}
+
+CASE(test_set_data_size_split_same_size)
+{
+    _Alignas(uint64_t) uint8_t buf[256];
+    memset(buf, 0, sizeof(buf));
+    sparsemap_t *m = sm_wrap(buf, sizeof(buf));
+    sm_clear(m);
+    sparsemap_t *split = sm_set_data_size(m, NULL, 2048);
+    sparsemap_t *same = sm_set_data_size(split, NULL, 2048);
+    EXPECT(same == split, "split same-size is no-op");
+    sm_free(same);
+    return 0;
+}
+
 /* ------------------------------------------------------------------ */
 /*  sm_union / sm_intersection / sm_difference                        */
 /*  (matrix of sparse and RLE inputs)                                 */
@@ -1035,6 +1080,9 @@ int main(void)
     RUN(test_set_data_size_wrap_shrink_in_place);
     RUN(test_set_data_size_explicit_buffer);
     RUN(test_set_data_size_null_input);
+    RUN(test_set_data_size_split_grow);
+    RUN(test_set_data_size_split_shrink);
+    RUN(test_set_data_size_split_same_size);
 
     /* set ops matrix */
     RUN(test_setops_sparse_x_sparse);

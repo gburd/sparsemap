@@ -5507,6 +5507,15 @@ sm_span(sparsemap_t *map, uint64_t idx, size_t len, bool value)
 }
 
 #ifdef SPARSEMAP_TESTING
+/* LCOV_EXCL_START
+ *
+ * Everything from here to the matching #endif is QCC-style property-
+ * test scaffolding compiled in only when SPARSEMAP_TESTING is
+ * defined.  These functions are reachable only from the test harness
+ * (and only when QCC chooses to format a counterexample) so their
+ * coverage is incidental to the library's correctness.  Excluded from
+ * the coverage metric so the percentage reflects production code only.
+ */
 
 #include <qc.h>
 
@@ -6148,4 +6157,5 @@ _tst_rle_scan_completeness(QCC_GenValue **vals, int len, QCC_Stamp **stamp)
   return QCC_OK;
 }
 
+/* LCOV_EXCL_STOP */
 #endif
