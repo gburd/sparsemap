@@ -1240,6 +1240,26 @@ __sm_chunk_scan(const __sm_chunk_t *chunk, const __sm_idx_t start, void (*scanne
 static size_t
 __sm_get_chunk_count(const sparsemap_t *map)
 {
+  /*
+   * The chunk-count slot lives in the first SM_SIZEOF_OVERHEAD bytes of
+   * m_data.  When m_data_used == 0 the slot has not been initialized
+   * (e.g. a freshly sparsemap_wrap'd buffer that has not yet been
+   * sparsemap_clear'd or sparsemap_open'd), so reading it would return
+   * whatever happened to be in the caller's buffer.
+   *
+   * Pre-fix, downstream loops in sparsemap_intersection / _union /
+   * _maximum / __sm_rank_vec walked off the end of the buffer when
+   * the slot held garbage; pg_tre carried four "BUG FIX: m_data_used
+   * = 0 but garbage chunk count" patches at every call site.  The
+   * canonical fix is here: an uninitialized chunk-count slot
+   * means "no chunks", full stop.
+   *
+   * See pg_tre/doc/sparsemap-bugfix-m_data_used-0.md and
+   * .agent/notes/sparsemap-cleanup-plan.md (Phase 1, step 8).
+   */
+  if (map->m_data_used < SM_SIZEOF_OVERHEAD) {
+    return 0;
+  }
   return *(uint32_t *)&map->m_data[0];
 }
 
