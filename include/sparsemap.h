@@ -119,21 +119,49 @@ typedef struct sparsemap sparsemap_t;
 /** @brief Allocate a heap-managed sparsemap with an internal buffer.
  *
  * Both the sparsemap_t struct and its data buffer are allocated in a single
- * heap block; a single call to free() releases everything.  The buffer can
- * later be grown via sparsemap_set_data_size(NULL, new_size).
+ * heap block.  Dispose with sparsemap_free() (or libc free() for backward
+ * compatibility, which is equivalent for this lineage).  The buffer can
+ * later be grown via sparsemap_set_data_size(map, NULL, new_size).
  *
  * @param[in] size  Buffer size in bytes (0 selects a 1024-byte default).
  * @returns A new sparsemap, or NULL on allocation failure.
  *
  * Example:
  * @code
- *   sparsemap_t *map = sparsemap(4096);
+ *   sparsemap_t *map = sparsemap_create(4096);
  *   sparsemap_add(map, 42);
  *   assert(sparsemap_contains(map, 42));
- *   free(map);
+ *   sparsemap_free(map);
  * @endcode
  */
+sparsemap_t *sparsemap_create(size_t size);
+
+/** @brief Deprecated alias for sparsemap_create().
+ *
+ * Older callers used the noun-named sparsemap() constructor.  New code
+ * should prefer the verb-named sparsemap_create().  This alias will be
+ * removed in v2.
+ */
 sparsemap_t *sparsemap(size_t size);
+
+/** @brief Dispose of a sparsemap, regardless of allocation lineage.
+ *
+ * Frees both the struct and any library-owned data buffer.  For maps
+ * created via sparsemap_wrap(), sparsemap_init(), or sparsemap_open(),
+ * the caller's data buffer is left untouched (the library does not own
+ * it and never frees it).
+ *
+ * Calling sparsemap_free(NULL) is a no-op.
+ *
+ * Note: maps allocated via sparsemap_create() / sparsemap() are
+ * historically disposable with libc free() because the struct and buffer
+ * occupy a single allocation.  sparsemap_free() works in that case too
+ * and is the recommended call going forward because it also handles the
+ * SM_OWNED_SPLIT lineage (used after a wrap-and-grow sequence).
+ *
+ * @param[in,out] map  The sparsemap to dispose, or NULL.
+ */
+void sparsemap_free(sparsemap_t *map);
 
 /** @brief Create a deep copy of \a other.
  *
@@ -141,6 +169,22 @@ sparsemap_t *sparsemap(size_t size);
  * @returns A new sparsemap with the same contents, or NULL on failure.
  */
 sparsemap_t *sparsemap_copy(const sparsemap_t *other);
+
+/** @brief Return a guaranteed-owned, guaranteed-growable copy of any sparsemap.
+ *
+ * Regardless of \a map's allocation lineage, the result is allocated as
+ * SM_OWNED_CONTIGUOUS (single calloc, struct + buffer in one block).  The
+ * result can be safely grown via sparsemap_set_data_size(NULL, ...) and
+ * disposed with sparsemap_free() or libc free().
+ *
+ * Use this when you have a sparsemap from somewhere (a library that hands
+ * you a wrap'd map, a deserialized buffer, an aggregate of mixed lineages)
+ * and you need a self-contained, modifiable copy.
+ *
+ * @param[in] map  The sparsemap to copy.  Must not be NULL.
+ * @returns A new owned-contiguous sparsemap, or NULL on allocation failure.
+ */
+sparsemap_t *sparsemap_owned_copy(const sparsemap_t *map);
 
 /** @brief Allocate a sparsemap_t that wraps a caller-provided buffer.
  *

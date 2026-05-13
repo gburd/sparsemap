@@ -156,7 +156,7 @@ CASE(test_wrap_then_grow_via_set_data_size_null)
                "caller's wrap buffer untouched after grow");
     }
 
-    free(grown);
+    sparsemap_free(grown);
     return 0;
 }
 
@@ -212,7 +212,55 @@ CASE(test_wrap_then_swap_buffer)
     EXPECT(small_unchanged_past_overhead,
            "caller's old buffer untouched after swap");
 
-    free(grown);
+    /*
+     * Post-swap, lineage is SM_WRAPPED again (we handed the library a
+     * caller-owned buffer).  Disposing with sparsemap_free leaves
+     * `big` for the caller.
+     */
+    sparsemap_free(grown);
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/*  sparsemap_owned_copy() normalizes lineage                          */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Whatever the lineage of the input, sparsemap_owned_copy() returns an
+ * SM_OWNED_CONTIGUOUS map: a single allocation that's safe to grow and
+ * dispose with sparsemap_free or libc free.
+ */
+CASE(test_owned_copy_normalizes_lineage)
+{
+    /* Make a wrap'd input. */
+    uint8_t buf[1024];
+    memset(buf, 0, sizeof(buf));
+    sparsemap_t *wrapped = sparsemap_wrap(buf, sizeof(buf));
+    sparsemap_clear(wrapped);
+    for (uint64_t i = 0; i < 50; i++) {
+        sparsemap_add(wrapped, i * 16);
+    }
+
+    /* Copy with normalized lineage. */
+    sparsemap_t *owned = sparsemap_owned_copy(wrapped);
+    EXPECT(owned != NULL, "owned_copy succeeds");
+
+    /* Same observable state. */
+    EXPECT(sparsemap_cardinality(owned) == 50,
+           "copy has same cardinality");
+    for (uint64_t i = 0; i < 50; i++) {
+        EXPECT(sparsemap_contains(owned, i * 16),
+               "copy contains same bits");
+    }
+
+    /* The copy can be grown. */
+    sparsemap_t *grown = sparsemap_set_data_size(owned, NULL, 4096);
+    EXPECT(grown != NULL, "owned_copy result is growable");
+    EXPECT(sparsemap_get_capacity(grown) >= 4096,
+           "grown capacity reflects requested size");
+
+    sparsemap_free(grown);
+    sparsemap_free(wrapped);
     return 0;
 }
 
@@ -302,10 +350,10 @@ CASE(test_intersection_difference_with_wrapped)
     EXPECT(!sparsemap_contains(diff, 0), "even index NOT in difference");
     EXPECT(sparsemap_contains(diff, 100), "odd index in difference");
 
-    free(intr);
-    free(diff);
-    free(a);
-    free(b);
+    sparsemap_free(intr);
+    sparsemap_free(diff);
+    sparsemap_free(a);
+    sparsemap_free(b);
     return 0;
 }
 
@@ -313,11 +361,13 @@ CASE(test_intersection_difference_with_wrapped)
 /*  Driver                                                            */
 /* ------------------------------------------------------------------ */
 
+/* Driver — registers all tests including owned_copy normalization. */
 int main(void)
 {
     fprintf(stderr, "test_heisenbug:\n");
     RUN(test_wrap_then_grow_via_set_data_size_null);
     RUN(test_wrap_then_swap_buffer);
+    RUN(test_owned_copy_normalizes_lineage);
     RUN(test_union_with_wrapped_input_grows_result);
     RUN(test_intersection_difference_with_wrapped);
     fprintf(stderr, "  %d/%d expectations passed, %d failures\n",

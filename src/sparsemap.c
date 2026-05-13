@@ -2144,6 +2144,23 @@ sparsemap_clear(sparsemap_t *map)
 sparsemap_t *
 sparsemap(size_t size)
 {
+  return sparsemap_create(size);
+}
+
+/**
+ * @brief Allocates and initializes a sparsemap of the given size.
+ *
+ * This function creates a new sparsemap structure with allocated memory.
+ * If the specified size is zero, a default size of 1024 is used. The function
+ * ensures that the internal data array is 8-byte aligned and initializes the sparsemap
+ * structure.
+ *
+ * @param[in] size The size of the sparsemap to allocate.
+ * @return A pointer to the allocated sparsemap structure, or NULL if allocation fails.
+ */
+sparsemap_t *
+sparsemap_create(size_t size)
+{
   if (size == 0) {
     size = 1024;
   }
@@ -2168,6 +2185,61 @@ sparsemap(size_t size)
     __sm_when_diag({ __sm_assert(IS_8_BYTE_ALIGNED(map->m_data)); });
   }
   return map;
+}
+
+/**
+ * @brief Disposes of a sparsemap, regardless of allocation lineage.
+ *
+ * SM_OWNED_CONTIGUOUS  free(map) — the struct and buffer share one block.
+ * SM_OWNED_SPLIT       free(map->m_data) + free(map).
+ * SM_WRAPPED           free(map) only — the data buffer is the caller's
+ *                      and is left untouched.
+ *
+ * Calling with NULL is a no-op.
+ */
+void
+sparsemap_free(sparsemap_t *map)
+{
+  if (map == NULL) {
+    return;
+  }
+  switch (map->m_alloc_kind) {
+  case SM_OWNED_SPLIT:
+    free(map->m_data);
+    /* fallthrough */
+  case SM_OWNED_CONTIGUOUS:
+  case SM_WRAPPED:
+  default:
+    free(map);
+    break;
+  }
+}
+
+/**
+ * @brief Returns a guaranteed-owned, guaranteed-growable copy of \a map.
+ *
+ * The result is always SM_OWNED_CONTIGUOUS (single calloc, struct +
+ * buffer in one heap block).  Use this when you have a sparsemap whose
+ * lineage you don't trust and need a self-contained copy that's safe to
+ * grow and dispose with sparsemap_free() or libc free().
+ */
+sparsemap_t *
+sparsemap_owned_copy(const sparsemap_t *map)
+{
+  if (map == NULL) {
+    return NULL;
+  }
+  const size_t cap = sparsemap_get_capacity(map);
+  sparsemap_t *out = sparsemap_create(cap);
+  if (out == NULL) {
+    return NULL;
+  }
+  out->m_data_used = map->m_data_used;
+  /* m_capacity is already cap; m_alloc_kind is SM_OWNED_CONTIGUOUS. */
+  if (cap > 0 && map->m_data != NULL) {
+    memcpy(out->m_data, map->m_data, cap);
+  }
+  return out;
 }
 
 /**
