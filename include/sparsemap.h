@@ -83,8 +83,46 @@
  * `ENOSPC` when the backing buffer is full.  The caller can grow the buffer
  * with sparsemap_set_data_size() and retry.
  *
- * Allocation functions (sparsemap(), sparsemap_copy(), sparsemap_wrap())
- * return `NULL` on allocation failure.
+ * Allocation functions (sparsemap_create(), sparsemap_copy(),
+ * sparsemap_owned_copy(), sparsemap_wrap()) return `NULL` on allocation
+ * failure.
+ *
+ * ## Allocation lineage and disposal
+ *
+ * Every sparsemap_t has an internal allocation lineage tag that determines
+ * which functions may safely realloc its data buffer and how it must be
+ * disposed.  The lineage is set by the constructor:
+ *
+ * | Constructor              | Lineage              | Disposal                              |
+ * |--------------------------|----------------------|----------------------------------------|
+ * | sparsemap()              | owned-contiguous     | sparsemap_free() *or* libc free()      |
+ * | sparsemap_create()       | owned-contiguous     | sparsemap_free() *or* libc free()      |
+ * | sparsemap_copy()         | owned-contiguous     | sparsemap_free() *or* libc free()      |
+ * | sparsemap_owned_copy()   | owned-contiguous     | sparsemap_free() *or* libc free()      |
+ * | sparsemap_wrap()         | wrapped              | sparsemap_free() (caller frees buffer) |
+ * | sparsemap_init()         | wrapped              | (caller-allocated; free both manually) |
+ * | sparsemap_open()         | wrapped              | (caller-allocated; free both manually) |
+ *
+ * ### The wrap-and-grow case
+ *
+ * Calling sparsemap_set_data_size(map, NULL, new_size) on a wrapped map with
+ * `new_size > capacity` transparently promotes the map: a new library-owned
+ * buffer is allocated, the in-use prefix is copied into it, m_data is
+ * redirected, and the lineage transitions to owned-split.  The caller's
+ * original buffer is left untouched and remains theirs.  The promoted map
+ * **must** be disposed with sparsemap_free() because libc free() can no
+ * longer dispose both the struct and the separately-allocated buffer.
+ *
+ * Shrinking a wrapped map (size <= capacity) does not promote: m_capacity
+ * is updated in place, and the caller's buffer remains theirs.
+ *
+ * ### When in doubt, normalize
+ *
+ * sparsemap_owned_copy() returns a guaranteed owned-contiguous copy of any
+ * sparsemap.  Use it when you have a map whose lineage you don't trust or
+ * whose lifetime is intertwined with someone else's: the result is
+ * self-contained, growable, and disposable with sparsemap_free() or libc
+ * free().
  */
 #ifndef SPARSEMAP_H
 #define SPARSEMAP_H
@@ -189,10 +227,15 @@ sparsemap_t *sparsemap_owned_copy(const sparsemap_t *map);
 /** @brief Allocate a sparsemap_t that wraps a caller-provided buffer.
  *
  * The sparsemap_t struct is heap-allocated, but the data buffer is owned by
- * the caller.  The caller must free both the returned handle (free()) and the
- * buffer independently.  Resizing via sparsemap_set_data_size() is only
- * supported when the buffer was allocated together with the struct (see
- * sparsemap()).
+ * the caller.  Dispose with sparsemap_free() (which frees the struct only)
+ * or with libc free() (equivalent).
+ *
+ * Resizing via sparsemap_set_data_size(map, NULL, larger) on a wrapped map
+ * is supported: the library transparently allocates a fresh internal
+ * buffer, copies the in-use prefix into it, and transitions the map's
+ * lineage to owned-split.  The caller's original buffer is left untouched
+ * and remains theirs to free.  The resulting map MUST be disposed with
+ * sparsemap_free() (libc free() will leak the new buffer).
  *
  * @param[in] data  Buffer for bitmap storage (stack or heap).
  * @param[in] size  Size of \a data in bytes.
@@ -241,18 +284,40 @@ void sparsemap_clear(sparsemap_t *map);
 
 /** @brief Resize the data buffer.
  *
- * When \a data is NULL and the map was created with sparsemap(), the internal
- * buffer is reallocated.  The returned pointer may differ from \a map; the
- * caller must update all references.
+ * Behaviour depends on \a data and the map's allocation lineage:
  *
- * When \a data is non-NULL the map is re-pointed to the new buffer and
- * \a size becomes the new capacity.  The caller is responsible for copying
- * data if the buffer address changed.
+ *   sparsemap_set_data_size(map, NULL, new_size) — library-managed
+ *     resize.  Always succeeds (returning a possibly-relocated map
+ *     pointer) or returns NULL on allocation failure.  Never silently
+ *     no-ops.
  *
- * @param[in,out] map   The sparsemap to resize.
- * @param[in]     data  New buffer, or NULL to reallocate internally.
+ *     For owned-contiguous maps the call may relocate the entire
+ *     struct+buffer block; the caller MUST update all references to
+ *     the returned pointer.
+ *
+ *     For owned-split maps only the data buffer is realloc'd; the
+ *     struct address is stable.
+ *
+ *     For wrapped maps the result depends on direction:
+ *       - new_size <= current capacity: m_capacity is updated in place,
+ *         the caller's buffer is unchanged.
+ *       - new_size >  current capacity: a new library-owned buffer is
+ *         allocated and the in-use prefix copied into it.  Lineage
+ *         transitions to owned-split, and the result MUST be disposed
+ *         with sparsemap_free().  The caller's original buffer is
+ *         untouched.
+ *
+ *   sparsemap_set_data_size(map, data, new_size) — caller-supplied
+ *     buffer.  The map is re-pointed to \a data.  The caller is
+ *     responsible for copying any existing bits before the call.
+ *     Lineage transitions to wrapped: the library will not realloc or
+ *     free \a data on the caller's behalf.
+ *
+ * @param[in,out] map   The sparsemap to resize.  Must not be NULL.
+ * @param[in]     data  New buffer, or NULL to let the library decide.
  * @param[in]     size  New buffer size in bytes.
- * @returns The (possibly relocated) sparsemap pointer, or NULL on failure.
+ * @returns The (possibly relocated) sparsemap pointer on success,
+ *          or NULL on allocation failure.
  */
 sparsemap_t *sparsemap_set_data_size(sparsemap_t *map, uint8_t *data, size_t size);
 
