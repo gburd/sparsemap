@@ -1,0 +1,15 @@
+.\" SPDX-License-Identifier: MIT
+.TH sparsemap 7 "2026-05-13" "sparsemap 1.0.0" "Sparsemap Concepts"
+.SH NAME
+sparsemap \- conceptual overview of the sparsemap compressed bitmap
+.SH DESCRIPTION
+Sparsemap is a sparse, compressed bitmap library.  Best case stores
+2048 bits in 8 bytes via run-length encoding; worst case is
+uncompressed (2048 bits + 8 bytes overhead).  Three-tier hierarchy:
+bit vectors, chunks (sparse or RLE), and a top-level map of chunks.
+See \fIdocs/ARCHITECTURE.md\fR in the source distribution for the
+full design.
+.SH SEE ALSO
+.BR sparsemap (3)
+.SH AUTHOR
+Gregory Burd <greg@burd.me>

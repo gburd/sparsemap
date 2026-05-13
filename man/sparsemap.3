@@ -1,0 +1,22 @@
+.\" SPDX-License-Identifier: MIT
+.TH sparsemap 3 "2026-05-13" "sparsemap 1.0.0" "Sparsemap Library"
+.SH NAME
+sparsemap \- sparse, compressed bitmap with run-length encoding
+.SH SYNOPSIS
+.nf
+.B #include <sparsemap/sparsemap.h>
+.PP
+.BI "sparsemap_t *sparsemap_create(size_t " size );
+.BI "void sparsemap_free(sparsemap_t *" map );
+.BI "uint64_t sparsemap_add(sparsemap_t *" map ", uint64_t " idx );
+.BI "bool sparsemap_contains(sparsemap_t *" map ", uint64_t " idx );
+.fi
+.SH DESCRIPTION
+Sparsemap is a mutable, resizable, compressed bitmap optimized for
+workloads with long runs of consecutive set or unset bits.  See
+\fBsparsemap\fR(7) for the conceptual overview and the project's
+\fIdocs/API.md\fR for the full API reference.
+.SH SEE ALSO
+.BR sparsemap (7)
+.SH AUTHOR
+Gregory Burd <greg@burd.me>
