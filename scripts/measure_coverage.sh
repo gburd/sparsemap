@@ -32,17 +32,19 @@ ninja -C "$BUILDDIR"
 # pass/fail gate.
 meson test -C "$BUILDDIR" --print-errorlogs || true
 
-# Capture coverage data and produce HTML.
+# Capture coverage data and produce HTML.  Use geninfo directly (lcov
+# --capture's filter handling silently dropped sparsemap.c when the
+# .gcda lived under tests/test_main.p/.._src_sparsemap.c.gcda due to
+# a path-resolution quirk).
 mkdir -p coverage
-lcov --capture --directory "$BUILDDIR" \
-     --output-file coverage/coverage.info \
-     --rc lcov_branch_coverage=1 \
-     --ignore-errors source,unused 2>/dev/null
+geninfo -o coverage/coverage.info \
+        --rc lcov_branch_coverage=1 \
+        --ignore-errors source \
+        "$BUILDDIR" 2>/dev/null
 
-# Strip system / test / generated paths from the report.
-lcov --remove coverage/coverage.info \
-     '/usr/*' '*/munit.c' '*/roaring.c' '*/tdigest.c' '*/qc.c' '*/midl.c' \
-     '*/tests/*' \
+# Strip system / test / generated paths from the report — we only
+# care about the library implementation.
+lcov --extract coverage/coverage.info '*src/sparsemap.c' \
      --output-file coverage/coverage.info \
      --rc lcov_branch_coverage=1 2>/dev/null
 
