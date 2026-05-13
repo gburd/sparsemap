@@ -19,6 +19,8 @@ munit = static_library('sparsemap_munit',
 
 # Main exhaustive test binary.  Compiles its own copy of sparsemap.c
 # with -DSPARSEMAP_TESTING so QCC_genChunk, _tst_*, etc. are visible.
+# Main exhaustive test binary.  Compiles its own copy of sparsemap.c
+# with -DSPARSEMAP_TESTING so QCC_genChunk, _tst_*, etc. are visible.
 test_main = executable('test_main',
   'test.c',
   'common.c',
@@ -27,12 +29,9 @@ test_main = executable('test_main',
   '../src/sparsemap.c',
   c_args : [
     '-DSPARSEMAP_TESTING',
-    '-U_FORTIFY_SOURCE',
-    '-fno-stack-protector',
     '-Wno-unused-parameter',
     '-Wno-unused-function',
   ],
-  link_args : ['-fno-stack-protector'],
   link_with : [support, munit],
   dependencies : [
     cc.find_library('m', required : false),

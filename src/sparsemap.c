@@ -1631,6 +1631,7 @@ void
 __sm_insert_data(sparsemap_t *map, const size_t offset, const uint8_t *buffer, const size_t buffer_size)
 {
   __sm_assert(map->m_data_used + buffer_size <= map->m_capacity);
+  __sm_assert(offset <= map->m_data_used);
 
   uint8_t *p = __sm_get_chunk_data(map, offset);
   memmove(p + buffer_size, p, map->m_data_used - offset);
@@ -2444,8 +2445,21 @@ void
 sm_open(sparsemap_t *map, uint8_t *data, const size_t size)
 {
   map->m_data = data;
-  map->m_data_used = __sm_get_size_impl(map);
+  /*
+   * Set m_capacity and a temporary m_data_used = m_capacity *before*
+   * calling __sm_get_size_impl.  __sm_get_size_impl walks chunks via
+   * __sm_get_chunk_count, which since v1.0.0 short-circuits to 0
+   * when m_data_used < SM_SIZEOF_OVERHEAD (the empty-map guard for
+   * the heisenbug-related fix).  Without the temporary, sm_open of
+   * a fully-populated buffer reads its chunk count as 0 and produces
+   * a stunt-map with m_data_used = 4 — which then trips a size_t
+   * underflow downstream when something tries to insert at the
+   * supposed-end of the chunks region.  This was the deferred bug
+   * #3 from .agent/notes/phase1-deferred-bugs.md.
+   */
   map->m_capacity = size;
+  map->m_data_used = size;
+  map->m_data_used = __sm_get_size_impl(map);
   /*
    * sm_open is for deserializing into a caller-supplied
    * struct + buffer; lineage matches sm_init.
@@ -5580,7 +5594,7 @@ QCC_genChunk()
     // ... and set the RLE chunk's length of 1s to len.
     __sm_chunk_rle_set_length(chunk, len);
     // Now, test what we've generated to ensure it's correct.
-    __sm_assert(__sm_store_idx((uint8_t *)p, = len));
+    __sm_assert(__sm_load_idx(p) == len);
     __sm_assert(__sm_chunk_is_rle(chunk));
     __sm_assert(__sm_chunk_rle_get_capacity(chunk) == SM_CHUNK_RLE_MAX_CAPACITY);
     __sm_assert(__sm_chunk_rle_get_length(chunk) == len);
