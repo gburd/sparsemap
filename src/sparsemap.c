@@ -2691,6 +2691,7 @@ __sm_map_unset(sparsemap_t *map, uint64_t idx, const bool coalesce)
   case SM_OK:
     break;
   case SM_NEEDS_TO_GROW:
+    SM_ENOUGH_SPACE(sizeof(__sm_bitvec_t));
     offset += SM_SIZEOF_OVERHEAD + pos * sizeof(__sm_bitvec_t);
     __sm_insert_data(map, offset, (uint8_t *)&vec, sizeof(__sm_bitvec_t));
     __sm_chunk_clr_bit(&chunk, idx - start, &pos);
@@ -2775,6 +2776,7 @@ __sparsemap_add(sparsemap_t *map, const uint64_t idx, uint8_t *p, size_t offset,
   case SM_NEEDS_TO_GROW:
     if (!v) {
       __sm_bitvec_t vec = 0;
+      SM_ENOUGH_SPACE(sizeof(__sm_bitvec_t));
       offset += SM_SIZEOF_OVERHEAD + pos * sizeof(__sm_bitvec_t);
       __sm_insert_data(map, offset, (uint8_t *)&vec, sizeof(__sm_bitvec_t));
       pos = -1;
@@ -2870,6 +2872,7 @@ __sm_map_set(sparsemap_t *map, uint64_t idx, const bool coalesce)
      * contain this index.
      */
     const uint8_t buf[SM_SIZEOF_OVERHEAD + (sizeof(__sm_bitvec_t) * 2)] = { 0 };
+    SM_ENOUGH_SPACE(sizeof(buf));
     __sm_insert_data(map, offset, &buf[0], sizeof(buf));
     __sm_set_chunk_count(map, __sm_get_chunk_count(map) + 1);
 
@@ -2967,6 +2970,7 @@ __sm_map_set(sparsemap_t *map, uint64_t idx, const bool coalesce)
      */
     const uint8_t buf[SM_SIZEOF_OVERHEAD + (sizeof(__sm_bitvec_t) * 2)] = { 0 };
     const size_t size = __sm_chunk_get_size(&chunk);
+    SM_ENOUGH_SPACE(sizeof(buf));
     offset += SM_SIZEOF_OVERHEAD + size;
     p += SM_SIZEOF_OVERHEAD + size;
     __sm_insert_data(map, offset, &buf[0], sizeof(buf));
