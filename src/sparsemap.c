@@ -66,6 +66,14 @@ void __attribute__((format(printf, 4, 5))) __sm_diag_(const char *file, const in
 
 #define IS_8_BYTE_ALIGNED(addr) (((uintptr_t)(addr)&0x7) == 0)
 
+/*
+ * Branch-prediction hints.  These are no-ops on compilers that don't
+ * understand __builtin_expect; on gcc/clang they let the optimizer
+ * lay out the hot path inline and push the cold path off the icache.
+ */
+#define SM_LIKELY(cond)   __builtin_expect(!!(cond), 1)
+#define SM_UNLIKELY(cond) __builtin_expect(!!(cond), 0)
+
 typedef uint64_t __sm_bitvec_t;
 typedef uint32_t __sm_idx_t;
 
@@ -684,7 +692,7 @@ static inline __attribute__((always_inline)) size_t
 __sm_chunk_get_capacity(const __sm_chunk_t *chunk)
 {
   /* Handle RLE which encodes the capacity in the vector. */
-  if (__builtin_expect(__sm_chunk_is_rle(chunk), 0)) {
+  if (SM_UNLIKELY(__sm_chunk_is_rle(chunk))) {
     return __sm_chunk_rle_get_capacity(chunk);
   }
 
@@ -796,7 +804,7 @@ __sm_chunk_get_size(const __sm_chunk_t *chunk)
 {
   /* At least one __sm_bitvec_t is required for the flags (m_data[0]) */
   size_t size = sizeof(__sm_bitvec_t);
-  if (__builtin_expect(!__sm_chunk_is_rle(chunk), 1)) {
+  if (SM_LIKELY(!__sm_chunk_is_rle(chunk))) {
     /* Use a lookup table for each byte of the flags */
     register uint8_t *p = (uint8_t *)chunk->m_data;
     for (size_t i = 0; i < sizeof(__sm_bitvec_t); i++, p++) {
@@ -819,7 +827,7 @@ __sm_chunk_get_size(const __sm_chunk_t *chunk)
 static inline __attribute__((always_inline)) bool
 __sm_chunk_is_set(const __sm_chunk_t *chunk, const size_t idx)
 {
-  if (__builtin_expect(__sm_chunk_is_rle(chunk), 0)) {
+  if (SM_UNLIKELY(__sm_chunk_is_rle(chunk))) {
     if (idx < __sm_chunk_rle_get_length(chunk)) {
       return true;
     }
@@ -996,7 +1004,7 @@ static size_t
 __sm_chunk_select(const __sm_chunk_t *chunk, ssize_t n, ssize_t *offset, const bool value)
 {
   /* RLE fast path */
-  if (__builtin_expect(__sm_chunk_is_rle(chunk), 0)) {
+  if (SM_UNLIKELY(__sm_chunk_is_rle(chunk))) {
     const size_t length = __sm_chunk_rle_get_length(chunk);
     const size_t capacity = __sm_chunk_rle_get_capacity(chunk);
 
@@ -1135,7 +1143,7 @@ __sm_chunk_rank(__sm_chunk_rank_t *rank, const bool value, const __sm_chunk_t *c
     return amt;
   }
 
-  if (__builtin_expect(SM_IS_CHUNK_RLE(chunk), 0)) {
+  if (SM_UNLIKELY(SM_IS_CHUNK_RLE(chunk))) {
     /* This is a run-length (RLE) encoded chunk. */
     const size_t length = __sm_chunk_rle_get_length(chunk);
     const size_t end = length - 1;
@@ -1290,7 +1298,7 @@ static size_t
 __sm_chunk_scan(const __sm_chunk_t *chunk, const __sm_idx_t start, void (*scanner)(uint32_t[], size_t, void *aux), size_t skip, void *aux)
 {
   /* RLE fast path */
-  if (__builtin_expect(__sm_chunk_is_rle(chunk), 0)) {
+  if (SM_UNLIKELY(__sm_chunk_is_rle(chunk))) {
     const size_t length = __sm_chunk_rle_get_length(chunk);
 
     /* RLE chunks only contain set bits from 0 to length-1 */
@@ -2705,7 +2713,7 @@ sm_get_capacity(const sparsemap_t *map)
  * @param[in] idx The index of the bit to check.
  * @return True if the bit is set, false otherwise.
  */
-bool
+__attribute__((hot)) bool
 sm_contains(sparsemap_t *map, uint64_t idx)
 {
   __sm_assert(sm_get_size(map) >= SM_SIZEOF_OVERHEAD);
@@ -2887,7 +2895,7 @@ done:;
  * @param[in] idx The index at which the value will be unset.
  * @return The index that was unset.
  */
-uint64_t
+__attribute__((hot)) uint64_t
 sm_remove(sparsemap_t *map, const uint64_t idx)
 {
   return __sm_map_unset(map, idx, true);
@@ -3163,7 +3171,7 @@ done:;
  * @param[in] idx The index to set in the sparsemap.
  * @return The index that was set in the sparsemap.
  */
-uint64_t
+__attribute__((hot)) uint64_t
 sm_add(sparsemap_t *map, const uint64_t idx)
 {
   return __sm_map_set(map, idx, true);
