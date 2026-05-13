@@ -858,6 +858,35 @@ CASE(test_select_empty_map)
     return 0;
 }
 
+CASE(test_select_unset_in_rle)
+{
+    /* RLE chunk fully set within the chunk; the chunk's range is
+     * [0, 4096), all set, no unset bits within range.  sm_select(false)
+     * cannot find unset bits past the last chunk — returns IDX_MAX. */
+    sparsemap_t *m = sm_create(8192);
+    populate_run(m, 0, 4096);
+    EXPECT(sm_select(m, 0, false) == SM_IDX_MAX,
+           "no unset bit selectable past last chunk");
+    sm_free(m);
+    return 0;
+}
+
+CASE(test_select_unset_in_partial_rle)
+{
+    /* RLE chunk with run shorter than capacity: unset bits exist
+     * within the chunk's covered range. */
+    sparsemap_t *m = sm_create(8192);
+    /* A run that fills part of the chunk; the rest of the chunk is
+     * unset bits within the chunk's range. */
+    populate_run(m, 0, 1500);
+    /* The first unset bit is at 1500. */
+    EXPECT(sm_select(m, 0, false) == 1500, "first unset bit at run-end");
+    /* The 10th unset is at 1510. */
+    EXPECT(sm_select(m, 10, false) == 1510, "10th unset bit");
+    sm_free(m);
+    return 0;
+}
+
 /* ------------------------------------------------------------------ */
 /*  sm_scan callback                                                  */
 /* ------------------------------------------------------------------ */
@@ -1009,6 +1038,80 @@ CASE(test_setops_many_chunks)
     return 0;
 }
 
+/*
+ * Two-pointer merge in sm_union/intersection/difference: exercise
+ * both "a runs out first" and "b runs out first" termination paths.
+ */
+CASE(test_setops_a_runs_out_first)
+{
+    sparsemap_t *a = sm_create(8192);
+    sparsemap_t *b = sm_create(32768);
+    /* a has chunks at offsets 0, 2048; b has chunks at 0, 2048, 4096, 6144, 8192. */
+    populate_sparse(a, 0, 16, 20);
+    populate_sparse(a, 2048, 16, 20);
+    populate_sparse(b, 0, 16, 20);
+    populate_sparse(b, 2048, 16, 20);
+    populate_sparse(b, 4096, 16, 20);
+    populate_sparse(b, 6144, 16, 20);
+    populate_sparse(b, 8192, 16, 20);
+
+    sparsemap_t *u = sm_union(a, b);
+    EXPECT(u != NULL, "union: a shorter");
+    EXPECT(sm_cardinality(u) == sm_cardinality(b), "union covers b");
+
+    sparsemap_t *d = sm_difference(b, a);
+    EXPECT(d != NULL && sm_cardinality(d) == 60, "b - a leaves 3 chunks");
+
+    sm_free(u); sm_free(d);
+    sm_free(a); sm_free(b);
+    return 0;
+}
+
+CASE(test_setops_b_runs_out_first)
+{
+    /* Mirror: b is shorter than a. */
+    sparsemap_t *a = sm_create(32768);
+    sparsemap_t *b = sm_create(8192);
+    populate_sparse(a, 0, 16, 20);
+    populate_sparse(a, 2048, 16, 20);
+    populate_sparse(a, 4096, 16, 20);
+    populate_sparse(a, 6144, 16, 20);
+    populate_sparse(a, 8192, 16, 20);
+    populate_sparse(b, 0, 16, 20);
+    populate_sparse(b, 2048, 16, 20);
+
+    sparsemap_t *u = sm_union(a, b);
+    EXPECT(u != NULL, "union: b shorter");
+    EXPECT(sm_cardinality(u) == sm_cardinality(a), "union covers a");
+
+    sparsemap_t *d = sm_difference(a, b);
+    EXPECT(d != NULL && sm_cardinality(d) == 60, "a - b leaves 3 chunks");
+
+    sm_free(u); sm_free(d);
+    sm_free(a); sm_free(b);
+    return 0;
+}
+
+CASE(test_setops_a_chunk_b_chunk_far_apart)
+{
+    /* a has chunk at 0; b has chunk at 10*2048.  No overlap. */
+    sparsemap_t *a = sm_create(2048);
+    sparsemap_t *b = sm_create(32768);
+    populate_sparse(a, 0, 16, 20);
+    populate_sparse(b, 20480, 16, 20);
+
+    sparsemap_t *u = sm_union(a, b);
+    EXPECT(u != NULL && sm_cardinality(u) == 40, "far apart union");
+
+    sparsemap_t *intr = sm_intersection(a, b);
+    EXPECT(intr == NULL || sm_cardinality(intr) == 0, "far apart intersection empty");
+
+    sm_free(u);
+    if (intr) sm_free(intr);
+    sm_free(a); sm_free(b);
+    return 0;
+}
+
 /* ------------------------------------------------------------------ */
 /*  More sm_offset patterns                                           */
 /* ------------------------------------------------------------------ */
@@ -1129,6 +1232,9 @@ int main(void)
     RUN(test_setops_first_chunks_disjoint);
     RUN(test_setops_long_runs);
     RUN(test_setops_many_chunks);
+    RUN(test_setops_a_runs_out_first);
+    RUN(test_setops_b_runs_out_first);
+    RUN(test_setops_a_chunk_b_chunk_far_apart);
 
     /* min/max edges */
     RUN(test_min_max_empty);
@@ -1142,6 +1248,8 @@ int main(void)
     /* select edges */
     RUN(test_select_far_index);
     RUN(test_select_empty_map);
+    RUN(test_select_unset_in_rle);
+    RUN(test_select_unset_in_partial_rle);
 
     /* scan */
     RUN(test_scan_basic);
