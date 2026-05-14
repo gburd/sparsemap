@@ -4,11 +4,13 @@
 # 8bit offset into that table encodes the required additional space for what is
 # described.
 
-# The 2 bit patters are:
+# 2 bit patterns:
 #  00 -> 0 additional sm_bitvec_t (ZEROS)
 #  11 -> 0 additional sm_bitvec_t (ONES)
 #  10 -> 1 additional sm_bitvec_t (MIXED)
 #  01 -> 0 additional sm_bitvec_t (NONE)
+#
+# A byte has FOUR such pairs.  Loop iterates 0..3 (range(4)).
 
 # The goal is to output this:
 
@@ -43,11 +45,21 @@
 # }
 
 def create_lookup_table_c_format():
-  """Creates a lookup table in C-style format."""
+  """Creates a lookup table in C-style format.
+
+  For each byte b in 0..255, count the number of two-bit pairs whose
+  pattern is exactly '10' (SM_PAYLOAD_MIXED) — that's how many extra
+  __sm_bitvec_t words a chunk with that flag byte needs.
+
+  A byte has FOUR two-bit pairs (positions 0-1, 2-3, 4-5, 6-7).  An
+  earlier version of this script used range(3) and undercounted the
+  high pair; the inlined table in src/sparsemap.c is the correct
+  one.  scripts/check_chunk_vector_size_table.sh enforces the match.
+  """
   lookup_table = []
   for byte in range(256):
     count = 0
-    for i in range(3):
+    for i in range(4):
       if (byte >> (i * 2)) & 3 == 2:
         count += 1
     lookup_table.append(count)

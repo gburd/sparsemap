@@ -102,3 +102,6 @@ jobs:
 
       - name: Check all version sources agree
         run: scripts/check_version_consistency.sh
+
+      - name: Check chunk_vector_size_table in sync with generator
+        run: scripts/check_chunk_vector_size_table.sh

@@ -685,7 +685,7 @@ __sm_check_invariants(const struct sparsemap *map)
  *
  * @param[in] b The byte value for which the vector size needs to be calculated.
  * @return The vector size associated with the given byte value.
- * @see bin/gen_chunk_vector_size_table.py
+ * @see scripts/gen_chunk_vector_size_table.py
  */
 static size_t
 __sm_chunk_calc_vector_size(const uint8_t b)
