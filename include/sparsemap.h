@@ -938,6 +938,38 @@ sm_subset_relation_t sm_subset_compare(const sparsemap_t *a, const sparsemap_t *
  */
 uint64_t sm_pop_first(sparsemap_t *map);
 
+/* -------------------------------------------------------------------
+ * In-place set operations
+ *
+ * These mutate `dst` instead of allocating a new result.  The return
+ * value is `dst` itself when no growth was needed, or a new pointer
+ * if `dst` had to be relocated (the wrap-and-grow promotion case).
+ * Caller idiom:
+ *
+ *     dst = sm_union_inplace(dst, src);
+ *
+ * Mirrors PostgreSQL's `bms_add_members` / `bms_int_members` /
+ * `bms_del_members` and CRoaring's `_inplace` variants.
+ * ------------------------------------------------------------------- */
+
+/** @brief In-place union: `dst := dst U src`.
+ *
+ * @returns The (possibly relocated) dst.  NULL on alloc failure.
+ */
+sparsemap_t *sm_union_inplace(sparsemap_t *dst, const sparsemap_t *src);
+
+/** @brief In-place intersection: `dst := dst INT src`.
+ *
+ * Result always shrinks or stays same; never reallocates.
+ */
+sparsemap_t *sm_intersection_inplace(sparsemap_t *dst, const sparsemap_t *src);
+
+/** @brief In-place difference: `dst := dst \ src`.
+ *
+ * Result always shrinks or stays same; never reallocates.
+ */
+sparsemap_t *sm_difference_inplace(sparsemap_t *dst, const sparsemap_t *src);
+
 #if defined(__cplusplus)
 }
 #endif
@@ -1033,6 +1065,9 @@ uint64_t sm_pop_first(sparsemap_t *map);
 #define sparsemap_compare                    sm_compare
 #define sparsemap_subset_compare             sm_subset_compare
 #define sparsemap_pop_first                  sm_pop_first
+#define sparsemap_union_inplace              sm_union_inplace
+#define sparsemap_intersection_inplace       sm_intersection_inplace
+#define sparsemap_difference_inplace         sm_difference_inplace
 
 #endif /* !defined(SM_NO_LEGACY_ALIASES) */
 

@@ -1154,9 +1154,67 @@ CASE(test_offset_chunk_aligned_negative)
 }
 
 /* ------------------------------------------------------------------ */
-/*  Phase B continued: range ops, XOR, constructors, hash, compare,   */
-/*  destructive iteration                                             */
+/*  Phase B in-place set operations                                   */
 /* ------------------------------------------------------------------ */
+
+CASE(test_union_inplace)
+{
+    sparsemap_t *dst = sm_create(2048);
+    sparsemap_t *src = sm_create(2048);
+    for (int i = 0; i < 5; i++) sm_add(dst, i * 100);
+    for (int i = 0; i < 5; i++) sm_add(src, i * 100 + 50);
+
+    dst = sm_union_inplace(dst, src);
+    EXPECT(dst != NULL, "union_inplace returns dst");
+    EXPECT(sm_cardinality(dst) == 10, "union has 10 bits");
+    EXPECT(sm_contains(dst, 0) && sm_contains(dst, 50), "both sets present");
+
+    /* Adding duplicates: cardinality unchanged. */
+    dst = sm_union_inplace(dst, src);
+    EXPECT(sm_cardinality(dst) == 10, "duplicate union no-op");
+
+    sm_free(dst); sm_free(src);
+    return 0;
+}
+
+CASE(test_intersection_inplace)
+{
+    sparsemap_t *dst = sm_create(2048);
+    sparsemap_t *src = sm_create(2048);
+    for (int i = 0; i < 10; i++) sm_add(dst, i * 100);
+    sm_add(src, 100);
+    sm_add(src, 200);
+    sm_add(src, 300);
+
+    dst = sm_intersection_inplace(dst, src);
+    EXPECT(dst != NULL, "intersection_inplace returns dst");
+    EXPECT(sm_cardinality(dst) == 3, "3 bits intersect");
+    EXPECT(sm_contains(dst, 100) && sm_contains(dst, 200) && sm_contains(dst, 300),
+           "intersection bits");
+    EXPECT(!sm_contains(dst, 0), "non-intersecting bit gone");
+
+    sm_free(dst); sm_free(src);
+    return 0;
+}
+
+CASE(test_difference_inplace)
+{
+    sparsemap_t *dst = sm_create(2048);
+    sparsemap_t *src = sm_create(2048);
+    for (int i = 0; i < 10; i++) sm_add(dst, i * 100);
+    sm_add(src, 200);
+    sm_add(src, 500);
+    sm_add(src, 9999);  /* not in dst, should be ignored */
+
+    dst = sm_difference_inplace(dst, src);
+    EXPECT(dst != NULL, "difference_inplace returns dst");
+    EXPECT(sm_cardinality(dst) == 8, "two bits removed");
+    EXPECT(!sm_contains(dst, 200) && !sm_contains(dst, 500), "removed bits gone");
+    EXPECT(sm_contains(dst, 0) && sm_contains(dst, 100), "untouched bits stay");
+
+    sm_free(dst); sm_free(src);
+    return 0;
+}
 
 CASE(test_add_range)
 {
@@ -1816,6 +1874,11 @@ int main(void)
     RUN(test_compare);
     RUN(test_subset_compare);
     RUN(test_pop_first);
+
+    /* Phase B in-place set operations */
+    RUN(test_union_inplace);
+    RUN(test_intersection_inplace);
+    RUN(test_difference_inplace);
 
     /* scan */
     RUN(test_scan_basic);

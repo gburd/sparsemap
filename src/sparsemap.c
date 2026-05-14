@@ -4931,6 +4931,88 @@ sm_pop_first(sparsemap_t *map)
   return lowest;
 }
 
+/* -------------------------------------------------------------------
+ * In-place set operations.  These mutate `dst` and return it (or a
+ * possibly-relocated pointer if dst grew).
+ * ------------------------------------------------------------------- */
+
+sparsemap_t *
+sm_union_inplace(sparsemap_t *dst, const sparsemap_t *src)
+{
+  if (dst == NULL) return NULL;
+  if (sm_is_empty(src)) return dst;
+
+  /* Walk every set bit in src and add to dst.  sm_add handles
+   * capacity growth via SM_ENOUGH_SPACE, returning SPARSEMAP_IDX_MAX
+   * on ENOSPC — caller must grow dst first.  This naive impl is
+   * O(|src|) sm_add calls; a chunk-pair-walk would be faster but
+   * needs significant care to handle in-place mutation. */
+  uint64_t i = SM_IDX_MAX;
+  while ((i = sm_next_member(src, i)) != SM_IDX_MAX) {
+    if (sm_add(dst, i) == SM_IDX_MAX) {
+      /* Try to grow dst and retry. */
+      const size_t cap = sm_get_capacity(dst);
+      sparsemap_t *grown = sm_set_data_size(dst, NULL, cap * 2 + 256);
+      if (grown == NULL) {
+        return NULL;
+      }
+      dst = grown;
+      if (sm_add(dst, i) == SM_IDX_MAX) {
+        /* Still failing after growth — give up. */
+        return NULL;
+      }
+    }
+  }
+  return dst;
+}
+
+sparsemap_t *
+sm_intersection_inplace(sparsemap_t *dst, const sparsemap_t *src)
+{
+  if (dst == NULL) return NULL;
+  if (sm_is_empty(dst)) return dst;
+  if (sm_is_empty(src)) {
+    sm_clear(dst);
+    return dst;
+  }
+
+  /* Two-pass: collect bits of dst not in src, then remove them.
+   * Can't remove during iteration because sm_remove may invalidate
+   * the chunk-walk state. */
+  const size_t card = sm_cardinality(dst);
+  uint64_t *to_remove = malloc(card * sizeof(uint64_t));
+  if (to_remove == NULL && card > 0) return NULL;
+
+  size_t n = 0;
+  uint64_t i = SM_IDX_MAX;
+  while ((i = sm_next_member(dst, i)) != SM_IDX_MAX) {
+    if (!sm_contains((sparsemap_t *)src, i)) {
+      to_remove[n++] = i;
+    }
+  }
+  for (size_t k = 0; k < n; k++) {
+    sm_remove(dst, to_remove[k]);
+  }
+  free(to_remove);
+  return dst;
+}
+
+sparsemap_t *
+sm_difference_inplace(sparsemap_t *dst, const sparsemap_t *src)
+{
+  if (dst == NULL) return NULL;
+  if (sm_is_empty(dst) || sm_is_empty(src)) return dst;
+
+  /* For each bit in src, remove from dst.  sm_remove is idempotent
+   * for non-present bits (returns idx but doesn't fail), so the
+   * "bit not in dst" case is handled cheaply. */
+  uint64_t i = SM_IDX_MAX;
+  while ((i = sm_next_member(src, i)) != SM_IDX_MAX) {
+    sm_remove(dst, i);
+  }
+  return dst;
+}
+
 /**
  * @brief Copy a raw chunk (start offset + descriptor + vectors) into result.
  */
