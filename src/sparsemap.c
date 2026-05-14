@@ -5013,6 +5013,120 @@ sm_difference_inplace(sparsemap_t *dst, const sparsemap_t *src)
   return dst;
 }
 
+/* -------------------------------------------------------------------
+ * Range flip, validate, statistics, shrink_to_fit
+ * ------------------------------------------------------------------- */
+
+bool
+sm_flip_range(sparsemap_t *map, uint64_t lo, uint64_t hi)
+{
+  if (map == NULL || lo >= hi) return lo >= hi;
+  for (uint64_t i = lo; i < hi; i++) {
+    const bool was_set = sm_contains(map, i);
+    if (sm_assign(map, i, !was_set) == SM_IDX_MAX) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool
+sm_validate(const sparsemap_t *map)
+{
+  if (map == NULL) return true;
+  if (map->m_data == NULL && map->m_capacity > 0) return false;
+  if (map->m_data_used > map->m_capacity) return false;
+  if (map->m_data_used == 0) {
+    return true;
+  }
+  if (map->m_data_used < SM_SIZEOF_OVERHEAD) return false;
+
+  const size_t count = __sm_get_chunk_count(map);
+  if (count == 0) {
+    return map->m_data_used == SM_SIZEOF_OVERHEAD;
+  }
+
+  uint8_t *p = __sm_get_chunk_data(map, 0);
+  uint8_t *end = map->m_data + map->m_data_used;
+  __sm_idx_t prev_start = 0;
+  bool first = true;
+  for (size_t i = 0; i < count; i++) {
+    if (p + SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) > end) {
+      return false;
+    }
+    const __sm_idx_t start = __sm_load_idx((const uint8_t *)p);
+    if (!first && start <= prev_start) {
+      return false;
+    }
+    __sm_chunk_t chunk;
+    __sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
+    const size_t chunk_size = __sm_chunk_get_size(&chunk);
+    if (p + SM_SIZEOF_OVERHEAD + chunk_size > end) {
+      return false;
+    }
+    p += SM_SIZEOF_OVERHEAD + chunk_size;
+    prev_start = start;
+    first = false;
+  }
+  return p == end;
+}
+
+void
+sm_statistics(const sparsemap_t *map, sm_stats_t *stats)
+{
+  if (stats == NULL) return;
+  memset(stats, 0, sizeof(*stats));
+  if (map == NULL) return;
+
+  stats->bytes_used = sm_get_size((sparsemap_t *)map);
+  stats->bytes_capacity = sm_get_capacity(map);
+
+  const size_t count = __sm_get_chunk_count(map);
+  stats->chunks_total = count;
+  if (count == 0) return;
+
+  uint8_t *p = __sm_get_chunk_data(map, 0);
+  for (size_t i = 0; i < count; i++) {
+    __sm_chunk_t chunk;
+    __sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
+    const size_t chunk_size = __sm_chunk_get_size(&chunk);
+    if (__sm_chunk_is_rle(&chunk)) {
+      stats->chunks_rle++;
+      stats->bits_in_rle += __sm_chunk_rle_get_length(&chunk);
+    } else {
+      stats->chunks_sparse++;
+      const __sm_bitvec_t desc = chunk.m_data[0];
+      size_t pos = 1;
+      for (size_t v = 0; v < SM_FLAGS_PER_INDEX; v++) {
+        const size_t flags = SM_CHUNK_GET_FLAGS(desc, v);
+        if (flags == SM_PAYLOAD_ONES) {
+          stats->bits_in_sparse += SM_BITS_PER_VECTOR;
+        } else if (flags == SM_PAYLOAD_MIXED) {
+          stats->bits_in_sparse += (uint64_t)__builtin_popcountll(chunk.m_data[pos]);
+          pos++;
+        }
+      }
+    }
+    p += SM_SIZEOF_OVERHEAD + chunk_size;
+  }
+  stats->bits_set = stats->bits_in_rle + stats->bits_in_sparse;
+  stats->bytes_per_set_bit = stats->bits_set == 0
+    ? 0.0
+    : (double)stats->bytes_used / (double)stats->bits_set;
+}
+
+sparsemap_t *
+sm_shrink_to_fit(sparsemap_t *map)
+{
+  if (map == NULL) return NULL;
+  if (map->m_alloc_kind == SM_WRAPPED) return map;
+
+  const size_t target = map->m_data_used > 0 ? map->m_data_used : SM_SIZEOF_OVERHEAD;
+  if (target == map->m_capacity) return map;
+
+  return sm_set_data_size(map, NULL, target);
+}
+
 /**
  * @brief Copy a raw chunk (start offset + descriptor + vectors) into result.
  */

@@ -1154,8 +1154,99 @@ CASE(test_offset_chunk_aligned_negative)
 }
 
 /* ------------------------------------------------------------------ */
-/*  Phase B in-place set operations                                   */
+/*  flip_range, validate, statistics, shrink_to_fit                   */
 /* ------------------------------------------------------------------ */
+
+CASE(test_flip_range)
+{
+    sparsemap_t *m = sm_create(2048);
+    /* Empty map: flip [10, 20) sets bits 10-19. */
+    EXPECT(sm_flip_range(m, 10, 20), "flip empty");
+    EXPECT(sm_cardinality(m) == 10, "10 bits set after flip");
+    EXPECT(sm_contains(m, 10) && sm_contains(m, 19), "endpoints");
+    EXPECT(!sm_contains(m, 9) && !sm_contains(m, 20), "outside range");
+
+    /* Flipping the same range again clears them. */
+    EXPECT(sm_flip_range(m, 10, 20), "flip back");
+    EXPECT(sm_is_empty(m), "empty again");
+
+    /* Flip a partial overlap. */
+    sm_add(m, 50); sm_add(m, 51); sm_add(m, 52);
+    EXPECT(sm_flip_range(m, 51, 53), "partial flip");
+    /* 51 was set -> unset.  52 was set -> unset.  50 still set. */
+    EXPECT(sm_contains(m, 50) && !sm_contains(m, 51) && !sm_contains(m, 52),
+           "partial flip results");
+
+    sm_free(m);
+    return 0;
+}
+
+CASE(test_validate_ok)
+{
+    EXPECT(sm_validate(NULL), "NULL valid (treated as empty)");
+    sparsemap_t *m = sm_create(2048);
+    EXPECT(sm_validate(m), "fresh valid");
+    for (int i = 0; i < 100; i++) sm_add(m, i * 16);
+    EXPECT(sm_validate(m), "populated valid");
+    sm_free(m);
+    return 0;
+}
+
+CASE(test_statistics)
+{
+    sparsemap_t *m = sm_create(8192);
+    sm_stats_t s;
+
+    /* Empty. */
+    sm_statistics(m, &s);
+    EXPECT(s.chunks_total == 0, "empty: 0 chunks");
+    EXPECT(s.bits_set == 0, "empty: 0 bits");
+
+    /* Sparse. */
+    sm_add(m, 0);
+    sm_add(m, 1500);
+    sm_statistics(m, &s);
+    EXPECT(s.chunks_total == 1, "sparse: 1 chunk");
+    EXPECT(s.chunks_sparse == 1 && s.chunks_rle == 0, "all sparse");
+    EXPECT(s.bits_set == 2 && s.bits_in_sparse == 2, "2 bits sparse");
+
+    /* Dense run forces RLE. */
+    sm_clear(m);
+    for (uint64_t i = 0; i < 4096; i++) sm_add(m, i);
+    sm_statistics(m, &s);
+    EXPECT(s.bits_set == 4096, "4096 bits set");
+    /* RLE chunks store 2048 bits each in 8 bytes; very efficient. */
+    EXPECT(s.bytes_per_set_bit < 0.1, "RLE: low bytes per bit");
+
+    sm_free(m);
+    return 0;
+}
+
+CASE(test_shrink_to_fit)
+{
+    sparsemap_t *m = sm_create(8192);
+    /* Add then remove most bits; lots of unused capacity. */
+    for (int i = 0; i < 100; i++) sm_add(m, i);
+    for (int i = 0; i < 100; i++) sm_remove(m, i);
+    const size_t before = sm_get_capacity(m);
+    sparsemap_t *shrunk = sm_shrink_to_fit(m);
+    EXPECT(shrunk != NULL, "shrink succeeds");
+    EXPECT(sm_get_capacity(shrunk) <= before, "capacity at most before");
+    sm_free(shrunk);
+
+    /* NULL input. */
+    EXPECT(sm_shrink_to_fit(NULL) == NULL, "NULL input returns NULL");
+
+    /* Wrap'd: returns as-is, no shrink. */
+    _Alignas(uint64_t) uint8_t buf[1024];
+    memset(buf, 0, sizeof(buf));
+    sparsemap_t *w = sm_wrap(buf, sizeof(buf));
+    sm_clear(w);
+    sparsemap_t *w2 = sm_shrink_to_fit(w);
+    EXPECT(w2 == w, "wrap'd returns same pointer");
+    sm_free(w);
+    return 0;
+}
 
 CASE(test_union_inplace)
 {
@@ -1879,6 +1970,12 @@ int main(void)
     RUN(test_union_inplace);
     RUN(test_intersection_inplace);
     RUN(test_difference_inplace);
+
+    /* flip / validate / statistics / shrink_to_fit */
+    RUN(test_flip_range);
+    RUN(test_validate_ok);
+    RUN(test_statistics);
+    RUN(test_shrink_to_fit);
 
     /* scan */
     RUN(test_scan_basic);

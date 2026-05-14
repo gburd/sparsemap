@@ -970,6 +970,67 @@ sparsemap_t *sm_intersection_inplace(sparsemap_t *dst, const sparsemap_t *src);
  */
 sparsemap_t *sm_difference_inplace(sparsemap_t *dst, const sparsemap_t *src);
 
+/* -------------------------------------------------------------------
+ * Range complement
+ * ------------------------------------------------------------------- */
+
+/** @brief Complement every bit in `[lo, hi)`: set bits become unset and vice versa.
+ *
+ * In-place.  Naive implementation: O(hi-lo) sm_assign calls.
+ *
+ * @returns true on success, false if the buffer was too small to grow.
+ */
+bool sm_flip_range(sparsemap_t *map, uint64_t lo, uint64_t hi);
+
+/* -------------------------------------------------------------------
+ * Maintenance and introspection
+ * ------------------------------------------------------------------- */
+
+/** @brief Runtime self-check of a sparsemap's internal consistency.
+ *
+ * Verifies (without `SPARSEMAP_DIAGNOSTIC`):
+ *   - chunk count matches the actual number of chunks reachable
+ *     by walking the buffer
+ *   - each chunk's claimed size fits within m_data_used
+ *   - chunk start offsets are monotonically increasing
+ *   - sum of chunk sizes + SM_SIZEOF_OVERHEAD == m_data_used
+ *
+ * Useful as an after-deserialize sanity check.
+ *
+ * @returns true if the map is internally consistent.
+ */
+bool sm_validate(const sparsemap_t *map);
+
+/** @brief Statistics about a sparsemap's internal layout.
+ *
+ * Useful for understanding compression effectiveness or diagnosing
+ * unexpectedly-large maps.
+ */
+typedef struct sm_stats {
+    size_t   chunks_total;     /**< total chunks */
+    size_t   chunks_rle;       /**< chunks using RLE encoding */
+    size_t   chunks_sparse;    /**< chunks using sparse encoding */
+    size_t   bytes_used;       /**< sm_get_size(map) */
+    size_t   bytes_capacity;   /**< sm_get_capacity(map) */
+    uint64_t bits_set;         /**< sm_cardinality(map) */
+    uint64_t bits_in_rle;      /**< bits set within RLE chunks */
+    uint64_t bits_in_sparse;   /**< bits set within sparse chunks */
+    double   bytes_per_set_bit;/**< bytes_used / bits_set */
+} sm_stats_t;
+
+/** @brief Fill an sm_stats_t with introspection data. */
+void sm_statistics(const sparsemap_t *map, sm_stats_t *stats);
+
+/** @brief Realloc the data buffer down to exactly `m_data_used` bytes.
+ *
+ * Useful after a sequence of removals.  Owned-contiguous and
+ * owned-split lineages only; wrap'd maps are rejected (no library
+ * ownership of the buffer to shrink).
+ *
+ * @returns The (possibly relocated) map pointer, or NULL on alloc failure.
+ */
+sparsemap_t *sm_shrink_to_fit(sparsemap_t *map);
+
 #if defined(__cplusplus)
 }
 #endif
@@ -1068,6 +1129,10 @@ sparsemap_t *sm_difference_inplace(sparsemap_t *dst, const sparsemap_t *src);
 #define sparsemap_union_inplace              sm_union_inplace
 #define sparsemap_intersection_inplace       sm_intersection_inplace
 #define sparsemap_difference_inplace         sm_difference_inplace
+#define sparsemap_flip_range                 sm_flip_range
+#define sparsemap_validate                   sm_validate
+#define sparsemap_statistics                 sm_statistics
+#define sparsemap_shrink_to_fit              sm_shrink_to_fit
 
 #endif /* !defined(SM_NO_LEGACY_ALIASES) */
 
