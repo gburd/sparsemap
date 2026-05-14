@@ -6,6 +6,96 @@ follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.0.0] — 2026-05-13
+
+**Breaking change release.**  The `sparsemap_*` legacy macro aliases
+(introduced in v1.1 for backward compatibility with pre-rename callers)
+are gone.  Callers that still use them must switch to the `sm_*`
+names.  The opaque type `sparsemap_t` is unchanged.
+
+If you're a downstream consumer (pg_tre, postgres/undo) and are still
+on the `sparsemap_*` names: run a one-line sed across your tree.
+
+    sed -i 's/\bsparsemap_/sm_/g; s/\bSPARSEMAP_/SM_/g' your_files.c
+
+(Spare the type itself: it stays `sparsemap_t`.)
+
+### Added
+
+Bitwise-op synonyms for the existing set operations:
+
+  - `sm_or(a, b)`        synonym for `sm_union`
+  - `sm_and(a, b)`       synonym for `sm_intersection`
+  - `sm_andnot(a, b)`    synonym for `sm_difference`
+  - (`sm_xor` already shipped in v1.2)
+
+New predicates and operations:
+
+  - `sm_is_superset(a, b)`            `sm_is_subset(b, a)` named directly
+  - `sm_extract_range(map, lo, hi)`   new map containing only bits in `[lo, hi)`
+  - `sm_pop_last(map)`                pop the highest set bit
+
+### Optimized
+
+  - **`sm_union_inplace`, `sm_intersection_inplace`, `sm_difference_inplace`**
+    now delegate to the chunk-pair-walk in their out-of-place
+    counterparts, then memcpy the result back into `dst`'s buffer.
+    This replaces the previous bit-by-bit iteration and is genuinely
+    chunk-aware: O(chunks) instead of O(bits).  For the typical
+    pg_tre workload (TID set unions) this is a substantial speedup.
+
+  - `sm_add_range` and `sm_remove_range` remain O(range) loops.
+    A chunk-aware version requires direct manipulation of the
+    chunk-codec primitives (`__sm_append_rle_chunk`) plus partial-
+    chunk handling that's a non-trivial refactor.  Documented as a
+    future optimization; the current naive implementation is correct
+    but pays one `sm_add` per bit.
+
+### Removed
+
+All `sparsemap_*` macro aliases.  The full list (29 functions, 7
+macros) is gone from `include/sparsemap.h`:
+
+  sparsemap_create, sparsemap_copy, sparsemap_owned_copy,
+  sparsemap_wrap, sparsemap_init, sparsemap_open, sparsemap_clear,
+  sparsemap_free, sparsemap_set_data_size, sparsemap_capacity_remaining,
+  sparsemap_get_capacity, sparsemap_get_size, sparsemap_get_data,
+  sparsemap_contains, sparsemap_assign, sparsemap_add, sparsemap_remove,
+  sparsemap_cardinality, sparsemap_minimum, sparsemap_maximum,
+  sparsemap_fill_factor, sparsemap_rank, sparsemap_select,
+  sparsemap_span, sparsemap_scan, sparsemap_union, sparsemap_intersection,
+  sparsemap_difference, sparsemap_split, sparsemap_offset, plus all
+  Phase A/B v1.2 additions.
+
+  SPARSEMAP_IDX_MAX, SPARSEMAP_FOUND, SPARSEMAP_NOT_FOUND,
+  SPARSEMAP_VERSION_STRING, SPARSEMAP_VERSION_MAJOR,
+  SPARSEMAP_VERSION_MINOR, SPARSEMAP_VERSION_PATCH.
+
+  The `SM_NO_LEGACY_ALIASES` opt-out preprocessor symbol is gone
+  (the aliases it gated no longer exist).
+
+### Migration from v1.2
+
+For every call site:
+
+  | v1.x                       | v2.0                  |
+  |----------------------------|-----------------------|
+  | `sparsemap_FOO(...)`       | `sm_FOO(...)`         |
+  | `SPARSEMAP_FOO`            | `SM_FOO`              |
+  | `sparsemap_t`              | `sparsemap_t` (same)  |
+  | (compile-time switches:)   |                       |
+  | `SPARSEMAP_TESTING`        | unchanged             |
+  | `SPARSEMAP_DIAGNOSTIC`     | unchanged             |
+  | `SPARSEMAP_H` (header guard)| unchanged            |
+  | `SM_NO_LEGACY_ALIASES`     | gone                  |
+
+### Verified
+
+  Regular  (x86_64): 5/5 PASS
+  ASan     (x86_64): 5/5 PASS
+  UBSan    (x86_64): 5/5 PASS
+  RISC-V   (rv):     5/5 PASS
+
 ## [1.2.0] — 2026-05-13
 
 Major API expansion.  Adds 35 public functions covering the gap

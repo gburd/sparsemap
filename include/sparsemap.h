@@ -140,9 +140,9 @@ extern "C" {
 #endif
 
 /** Library version (kept in sync with meson.build's project(version: ...)). */
-#define SM_VERSION_STRING "1.2.0"
-#define SM_VERSION_MAJOR  1
-#define SM_VERSION_MINOR  2
+#define SM_VERSION_STRING "2.0.0"
+#define SM_VERSION_MAJOR  2
+#define SM_VERSION_MINOR  0
 #define SM_VERSION_PATCH  0
 
 /** Opaque handle to a sparsemap instance. */
@@ -682,6 +682,17 @@ bool sm_equals(const sparsemap_t *a, const sparsemap_t *b);
  */
 bool sm_is_subset(const sparsemap_t *a, const sparsemap_t *b);
 
+/** @brief Test whether \a a's bits are a superset of \a b's bits.
+ *
+ * Equivalent to `sm_is_subset(b, a)` — included as a named function
+ * for readability of `sm_is_superset(haystack, needle)` style calls.
+ *
+ * @param[in] a  Candidate superset (NULL is the empty set).
+ * @param[in] b  Candidate subset (NULL is the empty set, always a subset).
+ * @returns true if every bit set in \a b is also set in \a a.
+ */
+bool sm_is_superset(const sparsemap_t *a, const sparsemap_t *b);
+
 /** @brief Test whether two sparsemaps share at least one set bit.
  *
  * Short-circuits on first overlap; never allocates the intersection.
@@ -845,11 +856,39 @@ bool sm_add_range(sparsemap_t *map, uint64_t lo, uint64_t hi);
  */
 bool sm_remove_range(sparsemap_t *map, uint64_t lo, uint64_t hi);
 
+/** @brief Extract a range of bits as a new sparsemap.
+ *
+ * Returns a newly allocated owned-contiguous sparsemap containing
+ * exactly the bits set in \a map within `[lo, hi)`.  The bit indices
+ * are preserved (no shift); the result `r` satisfies
+ * `sm_contains(r, i) == sm_contains(map, i)` for `i in [lo, hi)` and
+ * `sm_contains(r, i) == false` for `i` outside that range.
+ *
+ * Equivalent in semantics to:
+ *
+ *     result = sm_intersection(map, sm_create_from_range(lo, hi));
+ *
+ * but avoids the second allocation by extracting directly.
+ *
+ * @returns A new sparsemap, or NULL if the result would be empty or
+ *          on allocation failure.
+ */
+sparsemap_t *sm_extract_range(const sparsemap_t *map, uint64_t lo, uint64_t hi);
+
 /** @brief Symmetric difference: bits set in exactly one of \a a, \a b.
  *
  * Returns a newly allocated owned-contiguous sparsemap.
  */
 sparsemap_t *sm_xor(const sparsemap_t *a, const sparsemap_t *b);
+
+/** @brief Synonym for sm_union (logical OR). */
+sparsemap_t *sm_or(const sparsemap_t *a, const sparsemap_t *b);
+
+/** @brief Synonym for sm_intersection (logical AND). */
+sparsemap_t *sm_and(const sparsemap_t *a, const sparsemap_t *b);
+
+/** @brief Synonym for sm_difference (logical AND-NOT: bits in a but not b). */
+sparsemap_t *sm_andnot(const sparsemap_t *a, const sparsemap_t *b);
 
 /** @brief XOR cardinality without allocation.
  *
@@ -937,6 +976,13 @@ sm_subset_relation_t sm_subset_compare(const sparsemap_t *a, const sparsemap_t *
  * @returns The lowest set bit's index, or SM_IDX_MAX if the map was empty.
  */
 uint64_t sm_pop_first(sparsemap_t *map);
+
+/** @brief Find the highest set bit, clear it, and return it.
+ *
+ * The reverse of sm_pop_first.  Useful for stack-style worklist
+ * algorithms.  Returns SM_IDX_MAX if the map is empty.
+ */
+uint64_t sm_pop_last(sparsemap_t *map);
 
 /* -------------------------------------------------------------------
  * In-place set operations
@@ -1078,108 +1124,5 @@ sparsemap_t *sm_deserialize(const uint8_t *in, size_t n);
 }
 #endif
 
-/* -------------------------------------------------------------------
- * Backward-compatibility aliases (deprecated, removed in v2.0.0)
- *
- * Pre-v1.1 callers used the `sparsemap_` prefix.  v1.1 adopted the
- * shorter `sm_` prefix as the canonical name; the long names below
- * keep existing callers (pg_tre, postgres/undo, downstream apps)
- * compiling without modification.  New code should use the `sm_`
- * names.
- *
- * To opt out of the legacy aliases (force-fail any code that hasn't
- * migrated), define SM_NO_LEGACY_ALIASES before including this
- * header.
- * ------------------------------------------------------------------- */
-#ifndef SM_NO_LEGACY_ALIASES
-
-#define SPARSEMAP_IDX_MAX            SM_IDX_MAX
-#define SPARSEMAP_FOUND(x)           SM_FOUND(x)
-#define SPARSEMAP_NOT_FOUND(x)       SM_NOT_FOUND(x)
-#define SPARSEMAP_VERSION_STRING     SM_VERSION_STRING
-#define SPARSEMAP_VERSION_MAJOR      SM_VERSION_MAJOR
-#define SPARSEMAP_VERSION_MINOR      SM_VERSION_MINOR
-#define SPARSEMAP_VERSION_PATCH      SM_VERSION_PATCH
-
-#define sparsemap_create             sm_create
-/* The bare `sparsemap()` noun-spelling alias is intentionally NOT
- * provided as a macro because the bare token would also rewrite
- * `struct sparsemap` and break callers who duplicate the struct
- * definition for testing.  Pre-v1 callers using `sparsemap(size)`
- * should switch to `sparsemap_create(size)` (which is still aliased
- * to `sm_create` for backward compatibility) or to `sm_create`
- * directly. */
-#define sparsemap_copy               sm_copy
-#define sparsemap_owned_copy         sm_owned_copy
-#define sparsemap_wrap               sm_wrap
-#define sparsemap_init               sm_init
-#define sparsemap_open               sm_open
-#define sparsemap_clear              sm_clear
-#define sparsemap_free               sm_free
-#define sparsemap_set_data_size      sm_set_data_size
-#define sparsemap_capacity_remaining sm_capacity_remaining
-#define sparsemap_get_capacity       sm_get_capacity
-#define sparsemap_get_size           sm_get_size
-#define sparsemap_get_data           sm_get_data
-#define sparsemap_contains           sm_contains
-#define sparsemap_assign             sm_assign
-#define sparsemap_add                sm_add
-#define sparsemap_remove             sm_remove
-#define sparsemap_cardinality        sm_cardinality
-#define sparsemap_minimum            sm_minimum
-#define sparsemap_maximum            sm_maximum
-#define sparsemap_fill_factor        sm_fill_factor
-#define sparsemap_rank               sm_rank
-#define sparsemap_select             sm_select
-#define sparsemap_span               sm_span
-#define sparsemap_scan               sm_scan
-#define sparsemap_union              sm_union
-#define sparsemap_intersection       sm_intersection
-#define sparsemap_difference         sm_difference
-#define sparsemap_split              sm_split
-#define sparsemap_offset             sm_offset
-
-/* Phase A predicate / iteration aliases (no pre-v1.1 equivalents,
- * but kept under the legacy-aliases umbrella for symmetry). */
-#define sparsemap_is_empty           sm_is_empty
-#define sparsemap_equals             sm_equals
-#define sparsemap_is_subset          sm_is_subset
-#define sparsemap_overlap            sm_overlap
-#define sparsemap_membership         sm_membership
-#define sparsemap_singleton_member   sm_singleton_member
-#define sparsemap_next_member        sm_next_member
-#define sparsemap_prev_member        sm_prev_member
-
-/* Phase B: cardinality-without-alloc, bulk ops */
-#define sparsemap_union_cardinality          sm_union_cardinality
-#define sparsemap_intersection_cardinality   sm_intersection_cardinality
-#define sparsemap_difference_cardinality     sm_difference_cardinality
-#define sparsemap_nonempty_difference        sm_nonempty_difference
-#define sparsemap_jaccard_index              sm_jaccard_index
-#define sparsemap_add_many                   sm_add_many
-#define sparsemap_to_array                   sm_to_array
-#define sparsemap_add_range                  sm_add_range
-#define sparsemap_remove_range               sm_remove_range
-#define sparsemap_xor                        sm_xor
-#define sparsemap_xor_cardinality            sm_xor_cardinality
-#define sparsemap_create_singleton           sm_create_singleton
-#define sparsemap_create_from_range          sm_create_from_range
-#define sparsemap_create_from_array          sm_create_from_array
-#define sparsemap_hash                       sm_hash
-#define sparsemap_compare                    sm_compare
-#define sparsemap_subset_compare             sm_subset_compare
-#define sparsemap_pop_first                  sm_pop_first
-#define sparsemap_union_inplace              sm_union_inplace
-#define sparsemap_intersection_inplace       sm_intersection_inplace
-#define sparsemap_difference_inplace         sm_difference_inplace
-#define sparsemap_flip_range                 sm_flip_range
-#define sparsemap_validate                   sm_validate
-#define sparsemap_statistics                 sm_statistics
-#define sparsemap_shrink_to_fit              sm_shrink_to_fit
-#define sparsemap_serialized_size            sm_serialized_size
-#define sparsemap_serialize                  sm_serialize
-#define sparsemap_deserialize                sm_deserialize
-
-#endif /* !defined(SM_NO_LEGACY_ALIASES) */
 
 #endif /* !defined(SPARSEMAP_H) */

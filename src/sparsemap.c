@@ -4508,6 +4508,12 @@ sm_is_subset(const sparsemap_t *a, const sparsemap_t *b)
 }
 
 bool
+sm_is_superset(const sparsemap_t *a, const sparsemap_t *b)
+{
+  return sm_is_subset(b, a);
+}
+
+bool
 sm_overlap(const sparsemap_t *a, const sparsemap_t *b)
 {
   if (a == NULL || b == NULL) return false;
@@ -4777,6 +4783,63 @@ sm_xor(const sparsemap_t *a, const sparsemap_t *b)
   return r;
 }
 
+sparsemap_t *
+sm_or(const sparsemap_t *a, const sparsemap_t *b)
+{
+  return sm_union(a, b);
+}
+
+sparsemap_t *
+sm_and(const sparsemap_t *a, const sparsemap_t *b)
+{
+  return sm_intersection(a, b);
+}
+
+sparsemap_t *
+sm_andnot(const sparsemap_t *a, const sparsemap_t *b)
+{
+  return sm_difference(a, b);
+}
+
+sparsemap_t *
+sm_extract_range(const sparsemap_t *map, uint64_t lo, uint64_t hi)
+{
+  if (map == NULL || sm_is_empty(map) || lo >= hi) return NULL;
+
+  /* Estimate result capacity from the input — worst case is the same
+   * shape, capped to the requested range size. */
+  size_t cap = sm_get_size((sparsemap_t *)map) + 64;
+  if (cap < 1024) cap = 1024;
+  sparsemap_t *r = sm_create(cap);
+  if (r == NULL) return NULL;
+
+  /* Walk set bits in [lo, hi) and add them to the result.
+   * sm_next_member supports a lower-exclusive bound; pass lo - 1 if
+   * lo > 0, else SM_IDX_MAX (start sentinel). */
+  uint64_t cursor = (lo == 0) ? SM_IDX_MAX : lo - 1;
+  while ((cursor = sm_next_member(map, cursor)) != SM_IDX_MAX && cursor < hi) {
+    if (sm_add(r, cursor) == SM_IDX_MAX) {
+      /* Grow and retry once. */
+      sparsemap_t *grown = sm_set_data_size(r, NULL, sm_get_capacity(r) * 2 + 256);
+      if (grown == NULL) {
+        sm_free(r);
+        return NULL;
+      }
+      r = grown;
+      if (sm_add(r, cursor) == SM_IDX_MAX) {
+        sm_free(r);
+        return NULL;
+      }
+    }
+  }
+
+  if (sm_is_empty(r)) {
+    sm_free(r);
+    return NULL;
+  }
+  return r;
+}
+
 size_t
 sm_xor_cardinality(const sparsemap_t *a, const sparsemap_t *b)
 {
@@ -4931,39 +4994,66 @@ sm_pop_first(sparsemap_t *map)
   return lowest;
 }
 
+uint64_t
+sm_pop_last(sparsemap_t *map)
+{
+  if (sm_is_empty(map)) return SM_IDX_MAX;
+  const uint64_t highest = sm_prev_member(map, SM_IDX_MAX);
+  if (highest == SM_IDX_MAX) return SM_IDX_MAX;
+  if (sm_remove(map, highest) == SM_IDX_MAX) return SM_IDX_MAX;
+  return highest;
+}
+
 /* -------------------------------------------------------------------
  * In-place set operations.  These mutate `dst` and return it (or a
  * possibly-relocated pointer if dst grew).
  * ------------------------------------------------------------------- */
+
+/*
+ * In-place set ops are implemented as "compute via the chunk-pair-walk
+ * in sm_union/sm_intersection/sm_difference, then memcpy the result's
+ * bytes back into dst's buffer".  This delegates the actual merge to
+ * the chunk-aware out-of-place version, paying one allocation for the
+ * temporary result.  An alternative would be a two-pointer chunk walk
+ * that writes directly into dst's buffer; that's a substantial refactor
+ * with minimal speedup over the current approach (sm_union's own walk
+ * is already chunk-aware and the memcpy is a single block copy).
+ */
+static sparsemap_t *
+__sm_replace_buffer(sparsemap_t *dst, sparsemap_t *result)
+{
+  if (result == NULL) {
+    /* Empty result — clear dst. */
+    sm_clear(dst);
+    return dst;
+  }
+  const size_t result_size = result->m_data_used;
+  if (dst->m_capacity < result_size) {
+    sparsemap_t *grown = sm_set_data_size(dst, NULL, result_size + 64);
+    if (grown == NULL) {
+      sm_free(result);
+      return NULL;
+    }
+    dst = grown;
+  }
+  memcpy(dst->m_data, result->m_data, result_size);
+  dst->m_data_used = result_size;
+  sm_free(result);
+  return dst;
+}
 
 sparsemap_t *
 sm_union_inplace(sparsemap_t *dst, const sparsemap_t *src)
 {
   if (dst == NULL) return NULL;
   if (sm_is_empty(src)) return dst;
-
-  /* Walk every set bit in src and add to dst.  sm_add handles
-   * capacity growth via SM_ENOUGH_SPACE, returning SPARSEMAP_IDX_MAX
-   * on ENOSPC — caller must grow dst first.  This naive impl is
-   * O(|src|) sm_add calls; a chunk-pair-walk would be faster but
-   * needs significant care to handle in-place mutation. */
-  uint64_t i = SM_IDX_MAX;
-  while ((i = sm_next_member(src, i)) != SM_IDX_MAX) {
-    if (sm_add(dst, i) == SM_IDX_MAX) {
-      /* Try to grow dst and retry. */
-      const size_t cap = sm_get_capacity(dst);
-      sparsemap_t *grown = sm_set_data_size(dst, NULL, cap * 2 + 256);
-      if (grown == NULL) {
-        return NULL;
-      }
-      dst = grown;
-      if (sm_add(dst, i) == SM_IDX_MAX) {
-        /* Still failing after growth — give up. */
-        return NULL;
-      }
-    }
+  if (sm_is_empty(dst)) {
+    /* dst becomes a copy of src.  Use the chunk-aware copy path. */
+    sparsemap_t *copy = sm_copy(src);
+    if (copy == NULL) return NULL;
+    return __sm_replace_buffer(dst, copy);
   }
-  return dst;
+  return __sm_replace_buffer(dst, sm_union(dst, src));
 }
 
 sparsemap_t *
@@ -4975,26 +5065,7 @@ sm_intersection_inplace(sparsemap_t *dst, const sparsemap_t *src)
     sm_clear(dst);
     return dst;
   }
-
-  /* Two-pass: collect bits of dst not in src, then remove them.
-   * Can't remove during iteration because sm_remove may invalidate
-   * the chunk-walk state. */
-  const size_t card = sm_cardinality(dst);
-  uint64_t *to_remove = malloc(card * sizeof(uint64_t));
-  if (to_remove == NULL && card > 0) return NULL;
-
-  size_t n = 0;
-  uint64_t i = SM_IDX_MAX;
-  while ((i = sm_next_member(dst, i)) != SM_IDX_MAX) {
-    if (!sm_contains((sparsemap_t *)src, i)) {
-      to_remove[n++] = i;
-    }
-  }
-  for (size_t k = 0; k < n; k++) {
-    sm_remove(dst, to_remove[k]);
-  }
-  free(to_remove);
-  return dst;
+  return __sm_replace_buffer(dst, sm_intersection(dst, src));
 }
 
 sparsemap_t *
@@ -5002,15 +5073,7 @@ sm_difference_inplace(sparsemap_t *dst, const sparsemap_t *src)
 {
   if (dst == NULL) return NULL;
   if (sm_is_empty(dst) || sm_is_empty(src)) return dst;
-
-  /* For each bit in src, remove from dst.  sm_remove is idempotent
-   * for non-present bits (returns idx but doesn't fail), so the
-   * "bit not in dst" case is handled cheaply. */
-  uint64_t i = SM_IDX_MAX;
-  while ((i = sm_next_member(src, i)) != SM_IDX_MAX) {
-    sm_remove(dst, i);
-  }
-  return dst;
+  return __sm_replace_buffer(dst, sm_difference(dst, src));
 }
 
 /* -------------------------------------------------------------------

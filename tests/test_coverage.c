@@ -1154,8 +1154,100 @@ CASE(test_offset_chunk_aligned_negative)
 }
 
 /* ------------------------------------------------------------------ */
-/*  serialize / deserialize                                           */
+/*  v2 additions: bitwise-op synonyms, is_superset, extract_range,    */
+/*  pop_last                                                          */
 /* ------------------------------------------------------------------ */
+
+CASE(test_or_and_andnot)
+{
+    sparsemap_t *a = sm_create(2048);
+    sparsemap_t *b = sm_create(2048);
+    for (int i = 0; i < 5; i++) sm_add(a, i * 100);     /* 0,100,200,300,400 */
+    for (int i = 2; i < 7; i++) sm_add(b, i * 100);     /* 200,300,400,500,600 */
+
+    /* sm_or = sm_union */
+    sparsemap_t *o = sm_or(a, b);
+    sparsemap_t *u = sm_union(a, b);
+    EXPECT(sm_equals(o, u), "sm_or == sm_union");
+    sm_free(o); sm_free(u);
+
+    /* sm_and = sm_intersection */
+    sparsemap_t *an = sm_and(a, b);
+    sparsemap_t *in = sm_intersection(a, b);
+    EXPECT(sm_equals(an, in), "sm_and == sm_intersection");
+    sm_free(an); sm_free(in);
+
+    /* sm_andnot = sm_difference */
+    sparsemap_t *anot = sm_andnot(a, b);
+    sparsemap_t *df = sm_difference(a, b);
+    EXPECT(sm_equals(anot, df), "sm_andnot == sm_difference");
+    sm_free(anot); sm_free(df);
+
+    sm_free(a); sm_free(b);
+    return 0;
+}
+
+CASE(test_is_superset)
+{
+    EXPECT(sm_is_superset(NULL, NULL), "empty superset of empty");
+    sparsemap_t *a = sm_create(2048);
+    sparsemap_t *b = sm_create(2048);
+    sm_add(a, 100); sm_add(a, 200); sm_add(a, 300);
+    sm_add(b, 200);
+
+    EXPECT(sm_is_superset(a, b), "a superset of b");
+    EXPECT(!sm_is_superset(b, a), "b not superset of a");
+    EXPECT(sm_is_superset(a, a), "a superset of itself");
+
+    /* Symmetry with sm_is_subset. */
+    EXPECT(sm_is_superset(a, b) == sm_is_subset(b, a), "superset(a,b) == subset(b,a)");
+
+    sm_free(a); sm_free(b);
+    return 0;
+}
+
+CASE(test_extract_range)
+{
+    sparsemap_t *m = sm_create(8192);
+    for (uint64_t i = 0; i < 1000; i += 10) sm_add(m, i);  /* 0,10,20,...,990 */
+
+    /* Extract [100, 200) — should contain 100,110,...,190. */
+    sparsemap_t *r = sm_extract_range(m, 100, 200);
+    EXPECT(r != NULL, "extract returns non-NULL");
+    EXPECT(sm_cardinality(r) == 10, "10 bits");
+    EXPECT(sm_contains(r, 100) && sm_contains(r, 190), "endpoints");
+    EXPECT(!sm_contains(r, 90) && !sm_contains(r, 200), "outside range");
+    sm_free(r);
+
+    /* Empty result: extract a range with no bits. */
+    /* m has bits at multiples of 10, no bits in [101, 109). */
+    sparsemap_t *empty = sm_extract_range(m, 101, 110);
+    EXPECT(empty == NULL, "empty range extracted as NULL");
+
+    /* Whole map. */
+    sparsemap_t *whole = sm_extract_range(m, 0, 1000);
+    EXPECT(whole != NULL && sm_equals(whole, m), "whole-range extract == original");
+    sm_free(whole);
+
+    sm_free(m);
+    return 0;
+}
+
+CASE(test_pop_last)
+{
+    sparsemap_t *m = sm_create(8192);
+    EXPECT(sm_pop_last(m) == SM_IDX_MAX, "empty: IDX_MAX");
+
+    sm_add(m, 50); sm_add(m, 100); sm_add(m, 200);
+    EXPECT(sm_pop_last(m) == 200, "highest popped");
+    EXPECT(!sm_contains(m, 200), "popped bit gone");
+    EXPECT(sm_pop_last(m) == 100, "next highest");
+    EXPECT(sm_pop_last(m) == 50, "lowest");
+    EXPECT(sm_pop_last(m) == SM_IDX_MAX, "empty after drain");
+
+    sm_free(m);
+    return 0;
+}
 
 CASE(test_serialize_roundtrip)
 {
@@ -2047,6 +2139,12 @@ int main(void)
     RUN(test_serialize_roundtrip);
     RUN(test_serialize_empty);
     RUN(test_deserialize_validation);
+
+    /* v2 additions */
+    RUN(test_or_and_andnot);
+    RUN(test_is_superset);
+    RUN(test_extract_range);
+    RUN(test_pop_last);
 
     /* scan */
     RUN(test_scan_basic);
