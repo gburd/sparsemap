@@ -139,6 +139,68 @@ Major breaking changes so far:
   by ~32 bytes; consumers that embed `struct sparsemap` directly
   (vendored test harnesses) must update the duplicate.
 
+## Future work: SIMD
+
+Sparsemap is scalar-only by design.  No `__builtin_popcount` chains,
+no AVX intrinsics, no NEON — nothing target-specific.  The same
+source compiles unchanged on x86_64, ARM, RISC-V, and anything else
+with a C99 compiler.  This is deliberate: single-file vendoring and
+cross-platform reproducibility outrank per-architecture peak
+performance for our consumer profile (PostgreSQL extensions,
+embedded indexers, undo logs).
+
+The `aligned_alloc` / `aligned_free` slots in `sm_allocator_t` exist
+so that adding SIMD later doesn't force another API break.  Two
+tiers of work are plausible if a real workload ever justifies it.
+Both are deferred until a downstream consumer profiles a hotspot in
+a sparsemap operation.
+
+### Tier 1 — vectorize the inner loops without changing the wire format
+
+  - **`sm_cardinality` over MIXED runs.**  Walk chunks scalar-style
+    to identify contiguous runs of MIXED bitvecs of length ≥ K
+    (~4), gather them into an aligned scratch buffer, run
+    AVX2/AVX-512 (or NEON) popcount, accumulate.  Falls back to the
+    current scalar loop for short runs and unsupported platforms.
+  - **Set ops on MIXED-MIXED chunk-pair runs.**  Same idea applied
+    to `sm_union` / `sm_intersection` / `sm_xor` / `sm_difference`:
+    when both inputs have aligned MIXED runs, dispatch to a
+    vectorized `vpand` / `vpor` / `vpxor` loop.
+  - Roughly 500 LOC of intrinsics, runtime CPU dispatch via
+    `__attribute__((target("avx2")))` plus a `cpuid` probe, and one
+    aligned scratch buffer per inner-loop call (uses
+    `sm_allocator_t::aligned_alloc`).
+  - Realistic gain: 1.5–3× on dense (mostly-MIXED) maps; near zero
+    on sparse maps because the gather overhead eats the win.
+
+### Tier 2 — wire-format extension for native SIMD layout
+
+  - Add a fifth chunk payload type (e.g. `SM_PAYLOAD_DENSE_RUN`)
+    that stores N contiguous bitvecs aligned on a 32-byte boundary,
+    with a length prefix.  The encoder switches to dense-run mode
+    when emitting a long MIXED run.
+  - The 2-bit flag space is full (00/01/10/11 all assigned), so
+    the new mode requires an escape encoding via the chunk header.
+  - Removes the gather step entirely; SIMD ops run directly on the
+    serialized bytes.
+  - Roughly 1500 LOC, codec rewrite, deserialize-backward-compat
+    work, consumer wire format changes.
+  - Realistic gain: 4–6× on dense maps.
+
+### Why neither is shipped today
+
+Sparsemap's value proposition is "small wire format, single-file
+vendoring, no SIMD assumptions".  Adding SIMD splits the code
+(scalar fallback + vector fast path), introduces runtime CPU
+dispatch, and forces every consumer's build system to handle
+target-feature flags.  We will not pay that cost speculatively.
+
+If and when a real workload pins `sm_cardinality` or set-op
+throughput as a measured bottleneck, **Tier 1 is the right answer**
+(small, contained, no wire-format change).  Tier 2 is a CRoaring-shaped
+rewrite and probably the wrong tool for sparsemap's niche.  Open an
+issue with profile data if you hit such a workload.
+
 ## License
 
 MIT.  See [LICENSE](LICENSE).
