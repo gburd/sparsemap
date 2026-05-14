@@ -129,6 +129,15 @@ Major breaking changes so far:
   Code that duplicates the struct definition (test harnesses,
   vendored copies that don't include `<sparsemap.h>`) must keep
   it in sync.  No source-level API breakage.
+- **v2.2.0** — the `sm_allocator_t` is now passed by value, not by
+  pointer.  `sm_set_allocator(hooks)` and
+  `sm_create_with_allocator(n, hooks)` instead of the v2.1 spellings.
+  Reset the global with `(sm_allocator_t){0}` instead of `NULL`.
+  Two new (optional) fields: `alloc_zero` (let your allocator deliver
+  pre-zeroed memory cheaply) and `aligned_alloc` / `aligned_free`
+  (reserved for future SIMD; ignored in 2.2.x).  Per-map struct grew
+  by ~32 bytes; consumers that embed `struct sparsemap` directly
+  (vendored test harnesses) must update the duplicate.
 
 ## License
 

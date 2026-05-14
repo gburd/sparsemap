@@ -38,7 +38,7 @@ struct sparsemap {
   size_t m_data_used;
   uint8_t *m_data;
   uint8_t m_alloc_kind;
-  const sm_allocator_t *m_allocator;
+  sm_allocator_t m_allocator;
 };
 
 struct user_data {

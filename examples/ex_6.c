@@ -86,14 +86,14 @@ main(void)
         .free_count = 0,
     };
 
-    static sm_allocator_t hooks;  /* static so its address outlives main */
+    static sm_allocator_t hooks;  /* zero-init; populate below */
     hooks.alloc   = arena_alloc;
     hooks.realloc = arena_realloc;
     hooks.free    = arena_free;
     hooks.aux     = &arena;
 
     printf("=== process-wide allocator ===\n");
-    sm_set_allocator(&hooks);
+    sm_set_allocator(hooks);
 
     sparsemap_t *m = sm_create(2048);
     sm_add(m, 42);
@@ -106,14 +106,14 @@ main(void)
            arena.used, arena.free_count);
 
     /* Reset the global allocator before the next demo. */
-    sm_set_allocator(NULL);
+    sm_set_allocator((sm_allocator_t){0});
     arena.used = 0;
     arena.alloc_count = 0;
     arena.free_count = 0;
 
     printf("\n=== per-map allocator ===\n");
     sparsemap_t *libc_map  = sm_create(2048);
-    sparsemap_t *arena_map = sm_create_with_allocator(2048, &hooks);
+    sparsemap_t *arena_map = sm_create_with_allocator(2048, hooks);
 
     sm_add(libc_map,  100);
     sm_add(arena_map, 200);

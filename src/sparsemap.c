@@ -517,20 +517,16 @@ struct __attribute__((aligned(8))) sparsemap {
    */
   uint8_t m_alloc_kind;
   /*
-   * Per-map allocator override.  When non-NULL, points at the
-   * sm_allocator_t that allocated this map's storage and that should
-   * be used for any future grow/free.  When NULL, the libc
-   * malloc/realloc/free family is used (this is also the case
-   * for any map created before sm_set_allocator was called).
+   * Per-map allocator (v2.2+).  Held by value: the map carries its
+   * own copy of the hooks so the caller's source struct can go out
+   * of scope without invalidating the map.
    *
-   * Memory ownership: the storage *behind* the pointer is the
-   * caller's; sparsemap stores a pointer, not a copy of the struct.
-   * Callers that pass a stack-allocated sm_allocator_t to
-   * sm_create_with_allocator() will have a dangling pointer the
-   * moment that frame returns.  Use a static/heap-allocated
-   * sm_allocator_t for the per-map override case.
+   * Sentinel: m_allocator.alloc == NULL means "use libc".  Other
+   * function pointers are checked individually at each call site,
+   * so an allocator can implement only a subset and let libc handle
+   * the rest.
    */
-  const sm_allocator_t *m_allocator;
+  sm_allocator_t m_allocator;
 };
 
 /*
@@ -568,35 +564,24 @@ enum sm_alloc_kind {
 };
 
 /* -------------------------------------------------------------------
- * Allocator hooks
+ * Allocator hooks (v2.2+ pass-by-value)
  *
  * Sparsemap routes every malloc/realloc/free through these helpers.
- * If a map has a per-map allocator (m_allocator != NULL), that one
- * is used.  Otherwise the global default __sm_g_allocator (set via
- * sm_set_allocator) is consulted; if it's NULL too, we fall back to
- * libc.
+ * Each helper takes a const sm_allocator_t * which points at either
+ * a per-map field (&map->m_allocator) or the global default.
  *
- * The helpers accept a non-NULL allocator parameter so callers can
- * pass either map->m_allocator or the global directly without
- * recomputing the precedence at every site.
+ * Within an allocator any individual function pointer may be NULL;
+ * the helper falls back to libc for that operation.  This means an
+ * all-zero sm_allocator_t means "use libc throughout", and a partial
+ * allocator (e.g. only `free` overridden) works as expected.
  * ------------------------------------------------------------------- */
 
-static const sm_allocator_t *__sm_g_allocator = NULL;
+static sm_allocator_t __sm_g_allocator = {0};
 
 void
-sm_set_allocator(const sm_allocator_t *a)
+sm_set_allocator(sm_allocator_t a)
 {
   __sm_g_allocator = a;
-}
-
-/* Resolve the effective allocator for a given map (or NULL if no map). */
-static inline const sm_allocator_t *
-__sm_resolve_allocator(const sparsemap_t *map)
-{
-  if (map != NULL && map->m_allocator != NULL) {
-    return map->m_allocator;
-  }
-  return __sm_g_allocator;
 }
 
 static inline void *
@@ -611,14 +596,17 @@ __sm_alloc(const sm_allocator_t *a, size_t n)
 static inline void *
 __sm_alloc_zero(const sm_allocator_t *a, size_t n)
 {
-  if (a != NULL && a->alloc != NULL) {
-    void *p = a->alloc(n, a->aux);
-    if (p != NULL) {
-      memset(p, 0, n);
-    }
-    return p;
+  if (a != NULL && a->alloc_zero != NULL) {
+    return a->alloc_zero(n, a->aux);
   }
-  return calloc(1, n);
+  /* Fall back to alloc + memset.  Use the same allocator's alloc()
+   * (so a per-map override stays in-family) and only fall through to
+   * libc if even that one is NULL. */
+  void *p = __sm_alloc(a, n);
+  if (p != NULL) {
+    memset(p, 0, n);
+  }
+  return p;
 }
 
 static inline void *
@@ -2400,11 +2388,11 @@ sparsemap(size_t size)
 sparsemap_t *
 sm_create(size_t size)
 {
-  return sm_create_with_allocator(size, NULL);
+  return sm_create_with_allocator(size, (sm_allocator_t){0});
 }
 
 sparsemap_t *
-sm_create_with_allocator(size_t size, const sm_allocator_t *a)
+sm_create_with_allocator(size_t size, sm_allocator_t a)
 {
   if (size == 0) {
     size = 1024;
@@ -2417,11 +2405,19 @@ sm_create_with_allocator(size_t size, const sm_allocator_t *a)
   const size_t padding = total_size % 8 == 0 ? 0 : 8 - (total_size % 8);
   total_size += padding;
 
-  /* Resolve the allocator: explicit override, then global default,
-   * then libc.  Whichever wins is recorded in m_allocator so subsequent
-   * grows / frees use the same path. */
-  const sm_allocator_t *eff = (a != NULL) ? a : __sm_g_allocator;
-  sparsemap_t *map = (sparsemap_t *)__sm_alloc_zero(eff, total_size);
+  /* Resolve the effective allocator for this map.  An all-zero `a`
+   * (caller passed nothing or used `(sm_allocator_t){0}`) means
+   * "snapshot the global at construction time".  After this point
+   * the resolved allocator is frozen into m_allocator and never
+   * consulted from the global again, so the map keeps using the
+   * same allocator across its lifetime even if the caller mutates
+   * the global later. */
+  if (a.alloc == NULL && a.alloc_zero == NULL
+      && a.realloc == NULL && a.free == NULL) {
+    a = __sm_g_allocator;
+  }
+
+  sparsemap_t *map = (sparsemap_t *)__sm_alloc_zero(&a, total_size);
   if (map) {
     uint8_t *data = (uint8_t *)(((uintptr_t)map + sizeof(sparsemap_t)) & ~(uintptr_t)7);
     sm_init(map, data, size);
@@ -2431,7 +2427,7 @@ sm_create_with_allocator(size_t size, const sm_allocator_t *a)
      * struct and we own both.
      */
     map->m_alloc_kind = SM_OWNED_CONTIGUOUS;
-    map->m_allocator = eff;
+    map->m_allocator = a;
     __sm_when_diag({ __sm_assert(IS_8_BYTE_ALIGNED(map->m_data)); });
   }
   return map;
@@ -2453,7 +2449,7 @@ sm_free(sparsemap_t *map)
   if (map == NULL) {
     return;
   }
-  const sm_allocator_t *a = __sm_resolve_allocator(map);
+  const sm_allocator_t *a = &map->m_allocator;
   switch (map->m_alloc_kind) {
   case SM_OWNED_SPLIT:
     __sm_free(a, map->m_data);
@@ -2532,7 +2528,7 @@ sm_wrap(uint8_t *data, const size_t size)
 {
   /* Wrap allocates only the struct (caller owns the data buffer);
    * route through the global allocator so sm_free works correctly. */
-  sparsemap_t *map = (sparsemap_t *)__sm_alloc_zero(__sm_g_allocator, sizeof(sparsemap_t));
+  sparsemap_t *map = (sparsemap_t *)__sm_alloc_zero(&__sm_g_allocator, sizeof(sparsemap_t));
   if (map) {
     map->m_data = data;
     map->m_data_used = 0;
@@ -2690,8 +2686,9 @@ sm_set_data_size(sparsemap_t *map, uint8_t *data, const size_t size)
   }
 
   /* Library-managed resize.  Branch on lineage and direction.
-   * Use the per-map allocator (or fall back) for every alloc. */
-  const sm_allocator_t *eff = __sm_resolve_allocator(map);
+   * Use the per-map allocator (held by value in m_allocator) for
+   * every alloc. */
+  const sm_allocator_t *eff = &map->m_allocator;
   switch (map->m_alloc_kind) {
   case SM_OWNED_CONTIGUOUS: {
     if (size == map->m_capacity) {

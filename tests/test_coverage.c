@@ -1204,10 +1204,11 @@ CASE(test_add_grow)
     return 0;
 }
 
-/* Allocator instrumentation: count alloc / realloc / free calls so we
- * can verify the hook is actually being called. */
+/* Allocator instrumentation: count alloc / alloc_zero / realloc / free
+ * calls so we can verify the hooks are actually being called. */
 static struct {
     size_t allocs;
+    size_t alloc_zeros;
     size_t reallocs;
     size_t frees;
 } g_alloc_stats;
@@ -1217,6 +1218,12 @@ static void *test_alloc(size_t n, void *aux)
     (void)aux;
     g_alloc_stats.allocs++;
     return malloc(n);
+}
+static void *test_alloc_zero(size_t n, void *aux)
+{
+    (void)aux;
+    g_alloc_stats.alloc_zeros++;
+    return calloc(1, n);
 }
 static void *test_realloc(void *p, size_t n, void *aux)
 {
@@ -1233,24 +1240,25 @@ static void test_free(void *p, void *aux)
 
 CASE(test_allocator_global)
 {
-    static const sm_allocator_t hooks = {
+    sm_allocator_t hooks = {
         .alloc = test_alloc,
         .realloc = test_realloc,
         .free = test_free,
-        .aux = NULL,
     };
     memset(&g_alloc_stats, 0, sizeof(g_alloc_stats));
-    sm_set_allocator(&hooks);
+    sm_set_allocator(hooks);
 
     sparsemap_t *m = sm_create(1024);
+    /* alloc_zero is NULL so the helper falls back to alloc + memset. */
     EXPECT(g_alloc_stats.allocs >= 1, "alloc hook invoked on create");
+    EXPECT(g_alloc_stats.alloc_zeros == 0, "no alloc_zero (not set)");
     sm_add(m, 42);
     EXPECT(sm_contains(m, 42), "basic add still works");
     sm_free(m);
     EXPECT(g_alloc_stats.frees >= 1, "free hook invoked");
 
     /* Reset to libc and verify subsequent maps don't touch hooks. */
-    sm_set_allocator(NULL);
+    sm_set_allocator((sm_allocator_t){0});
     const size_t allocs_before = g_alloc_stats.allocs;
     sparsemap_t *m2 = sm_create(1024);
     sm_add(m2, 100);
@@ -1261,18 +1269,17 @@ CASE(test_allocator_global)
 
 CASE(test_allocator_per_map)
 {
-    static const sm_allocator_t hooks = {
+    sm_allocator_t hooks = {
         .alloc = test_alloc,
         .realloc = test_realloc,
         .free = test_free,
-        .aux = NULL,
     };
     memset(&g_alloc_stats, 0, sizeof(g_alloc_stats));
     /* Default is libc. */
-    sm_set_allocator(NULL);
+    sm_set_allocator((sm_allocator_t){0});
 
     /* Create with per-map override. */
-    sparsemap_t *m = sm_create_with_allocator(1024, &hooks);
+    sparsemap_t *m = sm_create_with_allocator(1024, hooks);
     EXPECT(g_alloc_stats.allocs == 1, "per-map alloc hook invoked");
 
     /* Grow this map: should also use the hook (via realloc). */
@@ -1288,6 +1295,48 @@ CASE(test_allocator_per_map)
 
     sm_free(grown);
     EXPECT(g_alloc_stats.frees >= 1, "per-map free invoked on dispose");
+    return 0;
+}
+
+CASE(test_allocator_alloc_zero)
+{
+    /* When alloc_zero is provided, sparsemap routes its zeroed-memory
+     * needs through it instead of alloc + memset. */
+    sm_allocator_t hooks = {
+        .alloc = test_alloc,
+        .alloc_zero = test_alloc_zero,
+        .realloc = test_realloc,
+        .free = test_free,
+    };
+    memset(&g_alloc_stats, 0, sizeof(g_alloc_stats));
+
+    sparsemap_t *m = sm_create_with_allocator(1024, hooks);
+    /* sm_create allocates one zeroed block (struct + data); should
+     * have gone through alloc_zero, not alloc. */
+    EXPECT(g_alloc_stats.alloc_zeros == 1, "alloc_zero used for create");
+    EXPECT(g_alloc_stats.allocs == 0, "plain alloc not used");
+
+    sm_add(m, 7);
+    EXPECT(sm_contains(m, 7), "basic ops still work");
+    sm_free(m);
+    return 0;
+}
+
+CASE(test_allocator_partial_hooks)
+{
+    /* Implement only `free`; everything else falls back to libc.
+     * Verifies the per-slot NULL fallback contract. */
+    sm_allocator_t hooks = {0};
+    hooks.free = test_free;
+    memset(&g_alloc_stats, 0, sizeof(g_alloc_stats));
+
+    sparsemap_t *m = sm_create_with_allocator(1024, hooks);
+    EXPECT(m != NULL, "create ok with libc-fallback alloc");
+    EXPECT(g_alloc_stats.allocs == 0 && g_alloc_stats.alloc_zeros == 0,
+           "alloc/alloc_zero not invoked (libc fallback)");
+
+    sm_free(m);
+    EXPECT(g_alloc_stats.frees == 1, "custom free invoked exactly once");
     return 0;
 }
 
@@ -2284,6 +2333,10 @@ int main(void)
     RUN(test_add_grow);
     RUN(test_allocator_global);
     RUN(test_allocator_per_map);
+
+    /* v2.2 additions */
+    RUN(test_allocator_alloc_zero);
+    RUN(test_allocator_partial_hooks);
 
     /* scan */
     RUN(test_scan_basic);

@@ -1,5 +1,5 @@
 project('sparsemap', 'c',
-  version : '2.1.0',
+  version : '2.2.0',
   default_options : [
     'c_std=c11',
     'warning_level=2',

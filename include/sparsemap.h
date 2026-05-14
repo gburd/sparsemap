@@ -140,9 +140,9 @@ extern "C" {
 #endif
 
 /** Library version (kept in sync with meson.build's project(version: ...)). */
-#define SM_VERSION_STRING "2.1.0"
+#define SM_VERSION_STRING "2.2.0"
 #define SM_VERSION_MAJOR  2
-#define SM_VERSION_MINOR  1
+#define SM_VERSION_MINOR  2
 #define SM_VERSION_PATCH  0
 
 /** Opaque handle to a sparsemap instance. */
@@ -155,50 +155,72 @@ typedef struct sparsemap sparsemap_t;
  * time (sm_set_data_size, sm_*_inplace, sm_*_grow), and at free time.
  *
  * Embedders that need to route those allocations through a custom
- * allocator (e.g. PostgreSQL's palloc / pfree, mbedded allocators,
+ * allocator (e.g. PostgreSQL's palloc / pfree, embedded allocators,
  * arena allocators) can supply a sm_allocator_t.  Two scopes:
  *
- *   sm_set_allocator(&hooks)            process-wide default; affects
+ *   sm_set_allocator(hooks)             process-wide default; affects
  *                                       every sparsemap created without
- *                                       an explicit override.  Pass NULL
- *                                       to revert to libc malloc/free.
+ *                                       an explicit override.  Pass an
+ *                                       all-zero struct to revert to
+ *                                       libc malloc/free.
  *
- *   sm_create_with_allocator(n, &hooks) per-map override; the supplied
- *                                       hooks (or a copy of the struct)
- *                                       are used for every allocation
- *                                       on this map and are inherited
- *                                       by maps derived from it (sm_copy,
- *                                       sm_union, etc.).
+ *   sm_create_with_allocator(n, hooks)  per-map override; the supplied
+ *                                       hooks are copied into the map
+ *                                       and used for every allocation
+ *                                       on this map.  Maps derived from
+ *                                       it (sm_copy, sm_union, etc.)
+ *                                       inherit the same allocator.
  *
  * Contract for the hook implementations:
  *
  *   - alloc(n, aux): return a pointer to at least `n` bytes of
  *     uninitialized memory, or NULL on failure.
+ *   - alloc_zero(n, aux): return at least `n` bytes of *zero-filled*
+ *     memory, or NULL on failure.  Optional: if NULL, sparsemap
+ *     falls back to alloc() + memset(0).  Implement separately when
+ *     your allocator can deliver zeroed memory cheaply (e.g.
+ *     mmap(MAP_ANONYMOUS), kernel page allocator, calloc).
  *   - realloc(p, n, aux): grow or shrink an existing allocation; return
  *     the (possibly relocated) pointer or NULL on failure.  p == NULL
  *     is equivalent to alloc(n, aux).
  *   - free(p, aux): release an allocation made by alloc/realloc.  Must
  *     accept p == NULL as a no-op.
+ *   - aligned_alloc / aligned_free: reserved for future SIMD work.
+ *     Not invoked by any 2.2.x code path.
  *
- * In environments where the allocator may abort (PostgreSQL's palloc
- * ereport(ERROR)s instead of returning NULL), the longjmp out of the
- * call frame is the embedder's responsibility; sparsemap's own state
- * is consistent at every alloc call site.
+ * Any individual function pointer may be NULL; sparsemap falls back
+ * to the libc equivalent for that operation.  An all-zero struct
+ * therefore means "use libc throughout".
  */
 typedef struct sm_allocator {
-    void *(*alloc)  (size_t n, void *aux);
-    void *(*realloc)(void *p, size_t n, void *aux);
-    void  (*free)   (void *p, void *aux);
+    void *(*alloc)        (size_t n, void *aux);
+    void *(*alloc_zero)   (size_t n, void *aux);
+    void *(*realloc)      (void *p, size_t n, void *aux);
+    void  (*free)         (void *p, void *aux);
+    /* Aligned-allocation slots, reserved for future SIMD work.  Not
+     * exercised by any 2.2.x code path — the regular alloc/realloc
+     * already hand back 8-byte-aligned blocks, which is what every
+     * current sparsemap operation needs.  Provide them now so the
+     * struct shape is stable when SIMD lands; the scalar paths
+     * ignore them.  When implemented, semantics will match C11
+     * aligned_alloc(): `alignment` is a power of two, `n` must be a
+     * multiple of `alignment`. */
+    void *(*aligned_alloc)(size_t alignment, size_t n, void *aux);
+    void  (*aligned_free) (void *p, void *aux);
     void  *aux;
 } sm_allocator_t;
 
 /** @brief Set the process-wide default allocator hooks.
  *
  * Affects every sparsemap created subsequently without an explicit
- * override.  Pass NULL to reset to libc malloc/realloc/free.  Not
- * thread-safe; intended for one-shot library initialization.
+ * override.  Pass an all-zero struct (e.g. `(sm_allocator_t){0}`) to
+ * reset to libc malloc/realloc/free.  Not thread-safe; intended for
+ * one-shot library initialization.
+ *
+ * The struct is taken by value and copied into a static.  The
+ * caller's copy can go out of scope safely.
  */
-void sm_set_allocator(const sm_allocator_t *a);
+void sm_set_allocator(sm_allocator_t a);
 
 /** Sentinel value returned when a lookup finds no matching bit. */
 #define SM_IDX_MAX UINT64_MAX
@@ -236,17 +258,18 @@ sparsemap_t *sm_create(size_t size);
 /** @brief Allocate a sparsemap with a per-map allocator override.
  *
  * Use this when you want a specific allocator for one or a few maps
- * and the rest of the process can keep using the default.  Pass NULL
- * for `a` to fall back to the global default (set via
- * sm_set_allocator) — in that case the map records the global
- * allocator at creation time and uses it for the lifetime of the map
- * regardless of subsequent sm_set_allocator calls.
+ * and the rest of the process can keep using the default.  Pass an
+ * all-zero struct (e.g. `(sm_allocator_t){0}`) to fall back to the
+ * global default (set via sm_set_allocator) — in that case the map
+ * snapshots the global allocator at creation time and uses it for
+ * the lifetime of the map regardless of subsequent sm_set_allocator
+ * calls.
  *
- * The hook struct is copied into the map (its address need not
- * outlive the call).  Maps derived from this one (sm_copy, sm_union,
- * sm_xor, etc.) inherit the same allocator.
+ * The hook struct is taken by value and copied into the map.  The
+ * caller's copy can go out of scope safely.  Maps derived from this
+ * one (sm_copy, sm_union, sm_xor, etc.) inherit the same allocator.
  */
-sparsemap_t *sm_create_with_allocator(size_t size, const sm_allocator_t *a);
+sparsemap_t *sm_create_with_allocator(size_t size, sm_allocator_t a);
 
 /** @brief Deprecated alias for sm_create().
  *
