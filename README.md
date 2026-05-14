@@ -119,6 +119,32 @@ major versions are summarized in the tag annotation messages
 
 Major breaking changes so far:
 
+### API stability vs ABI stability
+
+Sparsemap promises **source-level API stability** within a major
+version: function signatures, macro names, and behavior of public
+`sm_*` symbols do not change in a way that breaks compiling
+consumer code.
+
+Sparsemap **does not** promise ABI stability of the
+`struct sparsemap` layout.  `sizeof(struct sparsemap)` and the
+offsets of its fields may change in any minor release.  Consumers
+must:
+
+- Always allocate `sparsemap_t` via `sm_create()`,
+  `sm_create_with_allocator()`, or `sm_wrap()` — never embed it
+  inline in another struct, never `sizeof(sparsemap_t)` for an
+  on-disk format, never `memcpy(struct, ...)` it.
+- Treat the type as opaque: access only via `sm_*` accessors.
+- Recompile (not just relink) after upgrading sparsemap.
+
+The **wire format** produced by `sm_serialize` and consumed by
+`sm_open`/`sm_deserialize` *is* stable.  Bytes serialized by v1.0
+deserialize correctly under v2.x.  This is the contract that
+matters for on-disk consumers.
+
+### Breaking changes by version
+
 - **v1.1.0** — public API prefix renamed `sparsemap_*` → `sm_*`.
   Macro aliases for the old names were kept under
   `SM_NO_LEGACY_ALIASES`.

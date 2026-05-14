@@ -69,3 +69,24 @@ executable('sparsemap_soak',
   c_args : ['-Wno-unused-parameter', '-Wno-unused-function'],
   build_by_default : false,
 )
+
+# libFuzzer harness for the deserialization path.  Requires clang
+# with -fsanitize=fuzzer support.  Disabled by default; enable with
+#   meson setup builddir-fuzz -Dfuzz=enabled
+fuzz_opt = get_option('fuzz')
+if fuzz_opt.allowed()
+  if cc.get_id() != 'clang'
+    if fuzz_opt.enabled()
+      error('fuzz requires clang (-fsanitize=fuzzer is clang-only)')
+    endif
+  else
+    fuzz_args = ['-fsanitize=fuzzer,address,undefined', '-g', '-O1']
+    executable('fuzz_deserialize',
+      'fuzz_deserialize.c',
+      dependencies : libsparsemap_dep,
+      c_args : fuzz_args,
+      link_args : fuzz_args,
+      build_by_default : true,
+    )
+  endif
+endif
