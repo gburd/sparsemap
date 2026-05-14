@@ -32,11 +32,13 @@ char *QCC_showSparsemap(void *value, int len);
 char *QCC_showChunk(void *value, int len);
 
 /* !!! Duplicated here for testing purposes. Keep in sync, or suffer. !!! */
+/* !!! Duplicated here for testing purposes. Keep in sync, or suffer. !!! */
 struct sparsemap {
   size_t m_capacity;
   size_t m_data_used;
   uint8_t *m_data;
   uint8_t m_alloc_kind;
+  const sm_allocator_t *m_allocator;
 };
 
 struct user_data {

@@ -516,6 +516,21 @@ struct __attribute__((aligned(8))) sparsemap {
    * sparsemap()).
    */
   uint8_t m_alloc_kind;
+  /*
+   * Per-map allocator override.  When non-NULL, points at the
+   * sm_allocator_t that allocated this map's storage and that should
+   * be used for any future grow/free.  When NULL, the libc
+   * malloc/realloc/free family is used (this is also the case
+   * for any map created before sm_set_allocator was called).
+   *
+   * Memory ownership: the storage *behind* the pointer is the
+   * caller's; sparsemap stores a pointer, not a copy of the struct.
+   * Callers that pass a stack-allocated sm_allocator_t to
+   * sm_create_with_allocator() will have a dangling pointer the
+   * moment that frame returns.  Use a static/heap-allocated
+   * sm_allocator_t for the per-map override case.
+   */
+  const sm_allocator_t *m_allocator;
 };
 
 /*
@@ -551,6 +566,80 @@ enum sm_alloc_kind {
   SM_WRAPPED          = 1,
   SM_OWNED_SPLIT      = 2,
 };
+
+/* -------------------------------------------------------------------
+ * Allocator hooks
+ *
+ * Sparsemap routes every malloc/realloc/free through these helpers.
+ * If a map has a per-map allocator (m_allocator != NULL), that one
+ * is used.  Otherwise the global default __sm_g_allocator (set via
+ * sm_set_allocator) is consulted; if it's NULL too, we fall back to
+ * libc.
+ *
+ * The helpers accept a non-NULL allocator parameter so callers can
+ * pass either map->m_allocator or the global directly without
+ * recomputing the precedence at every site.
+ * ------------------------------------------------------------------- */
+
+static const sm_allocator_t *__sm_g_allocator = NULL;
+
+void
+sm_set_allocator(const sm_allocator_t *a)
+{
+  __sm_g_allocator = a;
+}
+
+/* Resolve the effective allocator for a given map (or NULL if no map). */
+static inline const sm_allocator_t *
+__sm_resolve_allocator(const sparsemap_t *map)
+{
+  if (map != NULL && map->m_allocator != NULL) {
+    return map->m_allocator;
+  }
+  return __sm_g_allocator;
+}
+
+static inline void *
+__sm_alloc(const sm_allocator_t *a, size_t n)
+{
+  if (a != NULL && a->alloc != NULL) {
+    return a->alloc(n, a->aux);
+  }
+  return malloc(n);
+}
+
+static inline void *
+__sm_alloc_zero(const sm_allocator_t *a, size_t n)
+{
+  if (a != NULL && a->alloc != NULL) {
+    void *p = a->alloc(n, a->aux);
+    if (p != NULL) {
+      memset(p, 0, n);
+    }
+    return p;
+  }
+  return calloc(1, n);
+}
+
+static inline void *
+__sm_realloc(const sm_allocator_t *a, void *p, size_t n)
+{
+  if (a != NULL && a->realloc != NULL) {
+    return a->realloc(p, n, a->aux);
+  }
+  return realloc(p, n);
+}
+
+static inline void
+__sm_free(const sm_allocator_t *a, void *p)
+{
+  if (a != NULL && a->free != NULL) {
+    a->free(p, a->aux);
+    return;
+  }
+  free(p);
+}
+
 
 /*
  * Internal-invariant check.  No-op in production builds; under
@@ -2311,6 +2400,12 @@ sparsemap(size_t size)
 sparsemap_t *
 sm_create(size_t size)
 {
+  return sm_create_with_allocator(size, NULL);
+}
+
+sparsemap_t *
+sm_create_with_allocator(size_t size, const sm_allocator_t *a)
+{
   if (size == 0) {
     size = 1024;
   }
@@ -2322,7 +2417,11 @@ sm_create(size_t size)
   const size_t padding = total_size % 8 == 0 ? 0 : 8 - (total_size % 8);
   total_size += padding;
 
-  sparsemap_t *map = calloc(1, total_size);
+  /* Resolve the allocator: explicit override, then global default,
+   * then libc.  Whichever wins is recorded in m_allocator so subsequent
+   * grows / frees use the same path. */
+  const sm_allocator_t *eff = (a != NULL) ? a : __sm_g_allocator;
+  sparsemap_t *map = (sparsemap_t *)__sm_alloc_zero(eff, total_size);
   if (map) {
     uint8_t *data = (uint8_t *)(((uintptr_t)map + sizeof(sparsemap_t)) & ~(uintptr_t)7);
     sm_init(map, data, size);
@@ -2332,6 +2431,7 @@ sm_create(size_t size)
      * struct and we own both.
      */
     map->m_alloc_kind = SM_OWNED_CONTIGUOUS;
+    map->m_allocator = eff;
     __sm_when_diag({ __sm_assert(IS_8_BYTE_ALIGNED(map->m_data)); });
   }
   return map;
@@ -2353,14 +2453,15 @@ sm_free(sparsemap_t *map)
   if (map == NULL) {
     return;
   }
+  const sm_allocator_t *a = __sm_resolve_allocator(map);
   switch (map->m_alloc_kind) {
   case SM_OWNED_SPLIT:
-    free(map->m_data);
+    __sm_free(a, map->m_data);
     /* fallthrough */
   case SM_OWNED_CONTIGUOUS:
   case SM_WRAPPED:
   default:
-    free(map);
+    __sm_free(a, map);
     break;
   }
 }
@@ -2429,12 +2530,15 @@ sm_copy(const sparsemap_t *other)
 sparsemap_t *
 sm_wrap(uint8_t *data, const size_t size)
 {
-  sparsemap_t *map = calloc(1, sizeof(sparsemap_t));
+  /* Wrap allocates only the struct (caller owns the data buffer);
+   * route through the global allocator so sm_free works correctly. */
+  sparsemap_t *map = (sparsemap_t *)__sm_alloc_zero(__sm_g_allocator, sizeof(sparsemap_t));
   if (map) {
     map->m_data = data;
     map->m_data_used = 0;
     map->m_capacity = size;
     map->m_alloc_kind = SM_WRAPPED;
+    map->m_allocator = __sm_g_allocator;
   }
   return map;
 }
@@ -2502,6 +2606,33 @@ sm_open(sparsemap_t *map, uint8_t *data, const size_t size)
   map->m_alloc_kind = SM_WRAPPED;
 }
 
+sparsemap_t *
+sm_open_copy(const uint8_t *data, size_t n, size_t slack)
+{
+  if (data == NULL && n > 0) return NULL;
+  /* sm_create needs at least SM_SIZEOF_OVERHEAD bytes; bump up if the
+   * caller asked for less. */
+  size_t cap = n + slack;
+  if (cap < SM_SIZEOF_OVERHEAD) cap = SM_SIZEOF_OVERHEAD;
+  sparsemap_t *m = sm_create(cap);
+  if (m == NULL) return NULL;
+  if (n > 0) {
+    memcpy(sm_get_data(m), data, n);
+    /* sm_open re-derives m_data_used from the chunk count + walk;
+     * temporarily set m_data_used = m_capacity so the empty-map guard
+     * in __sm_get_chunk_count doesn't short-circuit during the walk. */
+    m->m_data_used = cap;
+    m->m_data_used = __sm_get_size_impl(m);
+  }
+  /* sm_open's regular implementation transitions the lineage to
+   * SM_WRAPPED — but here the buffer is contiguous with the struct
+   * because we got it from sm_create.  Restore the correct lineage so
+   * sm_free does the right thing and so subsequent grows can use the
+   * single-block realloc path. */
+  m->m_alloc_kind = SM_OWNED_CONTIGUOUS;
+  return m;
+}
+
 /**
  * @brief Resizes the data buffer of the sparsemap.
  *
@@ -2558,7 +2689,9 @@ sm_set_data_size(sparsemap_t *map, uint8_t *data, const size_t size)
     return map;
   }
 
-  /* Library-managed resize.  Branch on lineage and direction. */
+  /* Library-managed resize.  Branch on lineage and direction.
+   * Use the per-map allocator (or fall back) for every alloc. */
+  const sm_allocator_t *eff = __sm_resolve_allocator(map);
   switch (map->m_alloc_kind) {
   case SM_OWNED_CONTIGUOUS: {
     if (size == map->m_capacity) {
@@ -2574,7 +2707,7 @@ sm_set_data_size(sparsemap_t *map, uint8_t *data, const size_t size)
     total_size += padding;
 
     const size_t old_capacity = map->m_capacity;
-    sparsemap_t *m = realloc(map, total_size);
+    sparsemap_t *m = (sparsemap_t *)__sm_realloc(eff, map, total_size);
     if (!m) {
       /* Original block still valid; leave map untouched. */
       return NULL;
@@ -2600,7 +2733,7 @@ sm_set_data_size(sparsemap_t *map, uint8_t *data, const size_t size)
     if (size == map->m_capacity) {
       return map;
     }
-    uint8_t *new_data = realloc(map->m_data, size);
+    uint8_t *new_data = (uint8_t *)__sm_realloc(eff, map->m_data, size);
     if (!new_data) {
       return NULL;
     }
@@ -2644,7 +2777,7 @@ sm_set_data_size(sparsemap_t *map, uint8_t *data, const size_t size)
       return map;
     }
 
-    uint8_t *new_data = calloc(1, size);
+    uint8_t *new_data = (uint8_t *)__sm_alloc_zero(eff, size);
     if (!new_data) {
       return NULL;
     }
@@ -3175,6 +3308,23 @@ __attribute__((hot)) uint64_t
 sm_add(sparsemap_t *map, const uint64_t idx)
 {
   return __sm_map_set(map, idx, true);
+}
+
+uint64_t
+sm_add_grow(sparsemap_t **mapp, uint64_t idx)
+{
+  if (mapp == NULL || *mapp == NULL) return SM_IDX_MAX;
+  sparsemap_t *m = *mapp;
+  uint64_t rc = sm_add(m, idx);
+  if (rc != SM_IDX_MAX) return rc;
+
+  /* ENOSPC: grow geometrically with a 4 KiB floor. */
+  size_t new_cap = sm_get_capacity(m) * 2;
+  if (new_cap < 4096) new_cap = 4096;
+  sparsemap_t *grown = sm_set_data_size(m, NULL, new_cap);
+  if (grown == NULL) return SM_IDX_MAX;
+  *mapp = grown;
+  return sm_add(grown, idx);
 }
 
 /**
@@ -4002,7 +4152,7 @@ sm_offset(const sparsemap_t *map, ssize_t offset)
       /* Flush carry before emitting RLE chunk(s) */
       if (have_carry) {
         if (!__sm_flush_carry(&result, carry_words, carry_cap, carry_start)) {
-          free(result);
+          sm_free(result);
           return NULL;
         }
         memset(carry_words, 0, sizeof(carry_words));
@@ -4021,7 +4171,7 @@ sm_offset(const sparsemap_t *map, ssize_t offset)
           new_cap = new_len;
         }
         if (!__sm_append_rle_chunk(&result, aligned_start, new_cap, new_len)) {
-          free(result);
+          sm_free(result);
           return NULL;
         }
       } else {
@@ -4061,7 +4211,7 @@ sm_offset(const sparsemap_t *map, ssize_t offset)
         int fnv;
         if (__sm_encode_sparse_chunk(fw, fc, &fd, fv, &fnv)) {
           if (!__sm_append_sparse_chunk(&result, aligned_start, fd, fv, fnv)) {
-            free(result);
+            sm_free(result);
             return NULL;
           }
         }
@@ -4073,7 +4223,7 @@ sm_offset(const sparsemap_t *map, ssize_t offset)
         if (remaining >= SM_CHUNK_MAX_CAPACITY) {
           size_t rle_mid = (remaining / SM_CHUNK_MAX_CAPACITY) * SM_CHUNK_MAX_CAPACITY;
           if (!__sm_append_rle_chunk(&result, cur_start, rle_mid, rle_mid)) {
-            free(result);
+            sm_free(result);
             return NULL;
           }
           cur_start += (__sm_idx_t)rle_mid;
@@ -4103,7 +4253,7 @@ sm_offset(const sparsemap_t *map, ssize_t offset)
           int lnv;
           if (__sm_encode_sparse_chunk(lw, lc, &ld, lv, &lnv)) {
             if (!__sm_append_sparse_chunk(&result, cur_start, ld, lv, lnv)) {
-              free(result);
+              sm_free(result);
               return NULL;
             }
           }
@@ -4220,7 +4370,7 @@ sm_offset(const sparsemap_t *map, ssize_t offset)
       } else if (have_carry) {
         /* Carry targets a different chunk, flush it first */
         if (!__sm_flush_carry(&result, carry_words, carry_cap, carry_start)) {
-          free(result);
+          sm_free(result);
           return NULL;
         }
         memset(carry_words, 0, sizeof(carry_words));
@@ -4234,7 +4384,7 @@ sm_offset(const sparsemap_t *map, ssize_t offset)
       int nvecs;
       if (__sm_encode_sparse_chunk(main_words, main_cap, &desc, vecs, &nvecs)) {
         if (!__sm_append_sparse_chunk(&result, (__sm_idx_t)out_aligned, desc, vecs, nvecs)) {
-          free(result);
+          sm_free(result);
           return NULL;
         }
       }
@@ -4262,14 +4412,14 @@ next_chunk:
   /* Flush any remaining carry */
   if (have_carry) {
     if (!__sm_flush_carry(&result, carry_words, carry_cap, carry_start)) {
-      free(result);
+      sm_free(result);
       return NULL;
     }
   }
 
   /* If no chunks were added, return NULL */
   if (__sm_get_chunk_count(result) == 0) {
-    free(result);
+    sm_free(result);
     return NULL;
   }
 
@@ -5402,7 +5552,7 @@ sm_intersection(const sparsemap_t *a, const sparsemap_t *b)
       int nvecs;
       if (__sm_encode_sparse_chunk(rw, rc, &desc, vecs, &nvecs)) {
         if (!__sm_append_sparse_chunk(&result, a_start, desc, vecs, nvecs)) {
-          free(result);
+          sm_free(result);
           return NULL;
         }
       }
@@ -5419,7 +5569,7 @@ sm_intersection(const sparsemap_t *a, const sparsemap_t *b)
         const size_t run_len = overlap_end - overlap_start;
         const size_t run_cap = run_len; /* tight capacity */
         if (!__sm_append_rle_chunk(&result, (__sm_idx_t)overlap_start, run_cap, run_len)) {
-          free(result);
+          sm_free(result);
           return NULL;
         }
       }
@@ -5467,7 +5617,7 @@ sm_intersection(const sparsemap_t *a, const sparsemap_t *b)
       int nvecs;
       if (__sm_encode_sparse_chunk(rw, rc, &desc, vecs, &nvecs)) {
         if (!__sm_append_sparse_chunk(&result, result_start, desc, vecs, nvecs)) {
-          free(result);
+          sm_free(result);
           return NULL;
         }
       }
@@ -5485,7 +5635,7 @@ sm_intersection(const sparsemap_t *a, const sparsemap_t *b)
   }
 
   if (__sm_get_chunk_count(result) == 0) {
-    free(result);
+    sm_free(result);
     return NULL;
   }
 
@@ -5625,7 +5775,7 @@ sm_difference(const sparsemap_t *a, const sparsemap_t *b)
     /* If b is exhausted, copy remaining a chunks */
     if (bi >= b_count) {
       if (!__sm_copy_chunk_to_result(&result, ap)) {
-        free(result);
+        sm_free(result);
         return NULL;
       }
       ap += SM_SIZEOF_OVERHEAD + a_size;
@@ -5666,7 +5816,7 @@ sm_difference(const sparsemap_t *a, const sparsemap_t *b)
 
       /* Emit a's surviving bits in the gap [a_cursor, ov_start) */
       if (!__sm_emit_chunk_bits(&result, &a_chunk, a_rle, a_start, a_cursor, ov_start)) {
-        free(result);
+        sm_free(result);
         return NULL;
       }
 
@@ -5695,7 +5845,7 @@ sm_difference(const sparsemap_t *a, const sparsemap_t *b)
         int nvecs;
         if (__sm_encode_sparse_chunk(rw, rc, &desc, vecs, &nvecs)) {
           if (!__sm_append_sparse_chunk(&result, a_start, desc, vecs, nvecs)) {
-            free(result);
+            sm_free(result);
             return NULL;
           }
         }
@@ -5748,7 +5898,7 @@ sm_difference(const sparsemap_t *a, const sparsemap_t *b)
         int nvecs2;
         if (__sm_encode_sparse_chunk(rw2, rc2, &desc2, vecs2, &nvecs2)) {
           if (!__sm_append_sparse_chunk(&result, result_start, desc2, vecs2, nvecs2)) {
-            free(result);
+            sm_free(result);
             return NULL;
           }
         }
@@ -5767,7 +5917,7 @@ sm_difference(const sparsemap_t *a, const sparsemap_t *b)
     /* Emit remaining a bits [a_cursor, a_end) that had no b overlap */
     if (a_cursor < a_end) {
       if (!__sm_emit_chunk_bits(&result, &a_chunk, a_rle, a_start, a_cursor, a_end)) {
-        free(result);
+        sm_free(result);
         return NULL;
       }
     }
@@ -5783,7 +5933,7 @@ sm_difference(const sparsemap_t *a, const sparsemap_t *b)
   }
 
   if (__sm_get_chunk_count(result) == 0) {
-    free(result);
+    sm_free(result);
     return NULL;
   }
 
@@ -6106,14 +6256,14 @@ sm_union(const sparsemap_t *a, const sparsemap_t *b)
   }
 
   if (__sm_get_chunk_count(result) == 0) {
-    free(result);
+    sm_free(result);
     return NULL;
   }
 
   return result;
 
 fail:
-  free(result);
+  sm_free(result);
   return NULL;
 }
 

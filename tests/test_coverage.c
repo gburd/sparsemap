@@ -1154,9 +1154,142 @@ CASE(test_offset_chunk_aligned_negative)
 }
 
 /* ------------------------------------------------------------------ */
-/*  v2 additions: bitwise-op synonyms, is_superset, extract_range,    */
-/*  pop_last                                                          */
+/*  v2.1 additions: open_copy, add_grow, allocator hooks              */
 /* ------------------------------------------------------------------ */
+
+CASE(test_open_copy)
+{
+    /* Build a serialized payload with sm_create + sm_get_data. */
+    sparsemap_t *src = sm_create(2048);
+    sm_add(src, 5); sm_add(src, 100); sm_add(src, 1500);
+    const size_t n = sm_get_size(src);
+    uint8_t *bytes = malloc(n);
+    memcpy(bytes, sm_get_data(src), n);
+
+    /* Round-trip via sm_open_copy. */
+    sparsemap_t *r = sm_open_copy(bytes, n, 256);
+    EXPECT(r != NULL, "open_copy returns non-NULL");
+    EXPECT(sm_get_capacity(r) == n + 256, "capacity = n + slack");
+    EXPECT(sm_equals(r, src), "contents match");
+
+    /* Slack must permit further additions without realloc. */
+    EXPECT(sm_add(r, 9999) == 9999, "add succeeds in slack");
+
+    /* Empty payload. */
+    sparsemap_t *e = sm_open_copy(NULL, 0, 1024);
+    EXPECT(e != NULL && sm_is_empty(e), "empty payload yields empty map");
+    sm_free(e);
+
+    free(bytes);
+    sm_free(src);
+    sm_free(r);
+    return 0;
+}
+
+CASE(test_add_grow)
+{
+    sparsemap_t *m = sm_create(64);   /* tiny: will need to grow */
+    /* Add lots of bits; verify add_grow handles the relocation. */
+    for (uint64_t i = 0; i < 200; i++) {
+        EXPECT(sm_add_grow(&m, i * 100) == i * 100, "add_grow ok");
+    }
+    EXPECT(sm_cardinality(m) == 200, "all 200 added");
+    EXPECT(sm_contains(m, 100) && sm_contains(m, 19900), "first and last present");
+    sm_free(m);
+
+    /* NULL or NULL-pointer-pointee returns SM_IDX_MAX. */
+    EXPECT(sm_add_grow(NULL, 0) == SM_IDX_MAX, "NULL mapp");
+    sparsemap_t *null_map = NULL;
+    EXPECT(sm_add_grow(&null_map, 0) == SM_IDX_MAX, "NULL *mapp");
+    return 0;
+}
+
+/* Allocator instrumentation: count alloc / realloc / free calls so we
+ * can verify the hook is actually being called. */
+static struct {
+    size_t allocs;
+    size_t reallocs;
+    size_t frees;
+} g_alloc_stats;
+
+static void *test_alloc(size_t n, void *aux)
+{
+    (void)aux;
+    g_alloc_stats.allocs++;
+    return malloc(n);
+}
+static void *test_realloc(void *p, size_t n, void *aux)
+{
+    (void)aux;
+    g_alloc_stats.reallocs++;
+    return realloc(p, n);
+}
+static void test_free(void *p, void *aux)
+{
+    (void)aux;
+    if (p) g_alloc_stats.frees++;
+    free(p);
+}
+
+CASE(test_allocator_global)
+{
+    static const sm_allocator_t hooks = {
+        .alloc = test_alloc,
+        .realloc = test_realloc,
+        .free = test_free,
+        .aux = NULL,
+    };
+    memset(&g_alloc_stats, 0, sizeof(g_alloc_stats));
+    sm_set_allocator(&hooks);
+
+    sparsemap_t *m = sm_create(1024);
+    EXPECT(g_alloc_stats.allocs >= 1, "alloc hook invoked on create");
+    sm_add(m, 42);
+    EXPECT(sm_contains(m, 42), "basic add still works");
+    sm_free(m);
+    EXPECT(g_alloc_stats.frees >= 1, "free hook invoked");
+
+    /* Reset to libc and verify subsequent maps don't touch hooks. */
+    sm_set_allocator(NULL);
+    const size_t allocs_before = g_alloc_stats.allocs;
+    sparsemap_t *m2 = sm_create(1024);
+    sm_add(m2, 100);
+    sm_free(m2);
+    EXPECT(g_alloc_stats.allocs == allocs_before, "libc bypasses hooks");
+    return 0;
+}
+
+CASE(test_allocator_per_map)
+{
+    static const sm_allocator_t hooks = {
+        .alloc = test_alloc,
+        .realloc = test_realloc,
+        .free = test_free,
+        .aux = NULL,
+    };
+    memset(&g_alloc_stats, 0, sizeof(g_alloc_stats));
+    /* Default is libc. */
+    sm_set_allocator(NULL);
+
+    /* Create with per-map override. */
+    sparsemap_t *m = sm_create_with_allocator(1024, &hooks);
+    EXPECT(g_alloc_stats.allocs == 1, "per-map alloc hook invoked");
+
+    /* Grow this map: should also use the hook (via realloc). */
+    sparsemap_t *grown = sm_set_data_size(m, NULL, 4096);
+    EXPECT(grown != NULL, "grow ok");
+    EXPECT(g_alloc_stats.reallocs == 1, "per-map realloc hook invoked");
+
+    /* Concurrent libc map should not touch the hook. */
+    const size_t allocs_at_check = g_alloc_stats.allocs;
+    sparsemap_t *libc_map = sm_create(1024);
+    EXPECT(g_alloc_stats.allocs == allocs_at_check, "libc map untouched");
+    sm_free(libc_map);
+
+    sm_free(grown);
+    EXPECT(g_alloc_stats.frees >= 1, "per-map free invoked on dispose");
+    return 0;
+}
 
 CASE(test_or_and_andnot)
 {
@@ -2145,6 +2278,12 @@ int main(void)
     RUN(test_is_superset);
     RUN(test_extract_range);
     RUN(test_pop_last);
+
+    /* v2.1 additions */
+    RUN(test_open_copy);
+    RUN(test_add_grow);
+    RUN(test_allocator_global);
+    RUN(test_allocator_per_map);
 
     /* scan */
     RUN(test_scan_basic);

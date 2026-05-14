@@ -92,9 +92,8 @@ jobs:
       - name: Valgrind check
         run: scripts/check_memory.sh builddir
 
-  # Keep the version string aligned across meson.build,
-  # include/sparsemap.h, and CHANGELOG.md.  Fails loudly if a bump
-  # forgets one of them.
+  # Keep the version string aligned across meson.build and
+  # include/sparsemap.h.  Fails loudly if a bump forgets one of them.
   version-consistency:
     runs-on: codeberg-medium
     steps:

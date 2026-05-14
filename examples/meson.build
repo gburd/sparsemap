@@ -1,7 +1,7 @@
 # Examples 3 and 4 use the test-side common.{c,h} helpers; they need
 # to see <common.h> via the tests/ include path, and the compiled
 # common.c needs to be in their link.
-foreach n : ['ex_1', 'ex_2', 'ex_5']
+foreach n : ['ex_1', 'ex_2', 'ex_5', 'ex_6']
   executable(n,
     n + '.c',
     dependencies : libsparsemap_dep,

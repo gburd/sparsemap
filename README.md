@@ -109,6 +109,27 @@ Sparsemap is vendored by:
 `contrib/pg_tre_sync.sh` and `contrib/postgres_undo_sync.sh` keep the
 vendored copies in sync with upstream.
 
+## Versioning and history
+
+Releases follow [SemVer](https://semver.org).  See `git log` for the
+full commit-by-commit history; tags `v1.0.0` through the current
+release list every shipping point.  Breaking changes between
+major versions are summarized in the tag annotation messages
+(`git show v2.0.0`).
+
+Major breaking changes so far:
+
+- **v1.1.0** — public API prefix renamed `sparsemap_*` → `sm_*`.
+  Macro aliases for the old names were kept under
+  `SM_NO_LEGACY_ALIASES`.
+- **v2.0.0** — macro aliases removed.  Migrate with
+  `sed -i 's/\bsparsemap_/sm_/g; s/\bSPARSEMAP_/SM_/g' your_files.c`
+  (the type itself stays `sparsemap_t`).
+- **v2.1.0** — added per-map `m_allocator` field to `sparsemap_t`.
+  Code that duplicates the struct definition (test harnesses,
+  vendored copies that don't include `<sparsemap.h>`) must keep
+  it in sync.  No source-level API breakage.
+
 ## License
 
 MIT.  See [LICENSE](LICENSE).

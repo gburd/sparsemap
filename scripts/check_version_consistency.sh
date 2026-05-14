@@ -2,11 +2,10 @@
 # SPDX-License-Identifier: MIT
 #
 # scripts/check_version_consistency.sh — fail if the sparsemap
-# version string disagrees across its three sources of truth:
+# version string disagrees between its two sources of truth:
 #
 #   meson.build               (project(version: '...'))
 #   include/sparsemap.h       (SM_VERSION_STRING define)
-#   CHANGELOG.md              (most recent ## section header)
 #
 # CI runs this on every push so a version bump that forgets one
 # source surfaces immediately.
@@ -25,18 +24,8 @@ HEADER=$(grep -E '^#define[[:space:]]+SM_VERSION_STRING' \
          | head -1 \
          | sed -E 's/.*"([^"]+)".*/\1/')
 
-# 3. CHANGELOG.md — first non-Unreleased version header.
-if [ -f CHANGELOG.md ]; then
-    CHANGELOG=$(grep -E '^## (\[)?[0-9]+\.[0-9]+\.[0-9]+' CHANGELOG.md \
-                | head -1 \
-                | sed -E 's/^## \[?([0-9]+\.[0-9]+\.[0-9]+).*/\1/')
-else
-    CHANGELOG=''
-fi
-
 printf 'meson.build:               %s\n' "${MESON:-MISSING}"
 printf 'include/sparsemap.h:       %s\n' "${HEADER:-MISSING}"
-printf 'CHANGELOG.md:              %s\n' "${CHANGELOG:-MISSING}"
 
 fail=0
 
@@ -48,12 +37,6 @@ fi
 if [ -n "$HEADER" ] && [ "$HEADER" != "$MESON" ]; then
     printf 'check_version: include/sparsemap.h SM_VERSION_STRING %s != meson %s\n' \
            "$HEADER" "$MESON" >&2
-    fail=1
-fi
-
-if [ -n "$CHANGELOG" ] && [ "$CHANGELOG" != "$MESON" ]; then
-    printf 'check_version: CHANGELOG.md %s != meson %s\n' \
-           "$CHANGELOG" "$MESON" >&2
     fail=1
 fi
 
