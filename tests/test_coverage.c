@@ -1154,8 +1154,74 @@ CASE(test_offset_chunk_aligned_negative)
 }
 
 /* ------------------------------------------------------------------ */
-/*  flip_range, validate, statistics, shrink_to_fit                   */
+/*  serialize / deserialize                                           */
 /* ------------------------------------------------------------------ */
+
+CASE(test_serialize_roundtrip)
+{
+    sparsemap_t *m = sm_create(2048);
+    sm_add(m, 0); sm_add(m, 100); sm_add(m, 1000); sm_add(m, 1500);
+    for (uint64_t i = 0; i < 4096; i++) sm_add(m, 100000 + i);  /* RLE chunk */
+
+    const size_t need = sm_serialized_size(m);
+    EXPECT(need > 0, "size > 0");
+    uint8_t *buf = malloc(need);
+    EXPECT(buf != NULL, "buffer allocated");
+    EXPECT(sm_serialize(m, buf, need) == need, "serialize fills buffer");
+
+    sparsemap_t *r = sm_deserialize(buf, need);
+    EXPECT(r != NULL, "deserialize succeeds");
+    EXPECT(sm_equals(m, r), "round-trip preserves bits");
+    EXPECT(sm_cardinality(r) == sm_cardinality(m), "same cardinality");
+
+    free(buf);
+    sm_free(m); sm_free(r);
+    return 0;
+}
+
+CASE(test_serialize_empty)
+{
+    sparsemap_t *m = sm_create(1024);
+    const size_t need = sm_serialized_size(m);
+    uint8_t *buf = malloc(need);
+    sm_serialize(m, buf, need);
+
+    sparsemap_t *r = sm_deserialize(buf, need);
+    EXPECT(r != NULL, "empty deserialize ok");
+    EXPECT(sm_is_empty(r), "deserialized is empty");
+
+    free(buf);
+    sm_free(m); sm_free(r);
+    return 0;
+}
+
+CASE(test_deserialize_validation)
+{
+    /* Too short. */
+    EXPECT(sm_deserialize((const uint8_t *)"x", 1) == NULL, "too short rejected");
+
+    /* Bad magic. */
+    uint8_t buf[64] = { 0 };
+    memset(buf, 0xAB, sizeof(buf));
+    EXPECT(sm_deserialize(buf, sizeof(buf)) == NULL, "bad magic rejected");
+
+    /* Right magic, wrong version. */
+    uint32_t magic = 0x30316d73;  /* sm10 LE */
+    memcpy(buf, &magic, 4);
+    buf[4] = 99;  /* version 99 */
+    buf[5] = 0x01;
+    memset(buf + 6, 0, 10);
+    EXPECT(sm_deserialize(buf, sizeof(buf)) == NULL, "bad version rejected");
+
+    /* Right header, malformed body. */
+    buf[4] = 1;
+    buf[5] = 0x01;
+    /* Body claims 99 chunks but only 4 bytes follow. */
+    memset(buf + 16, 0xff, 4);
+    EXPECT(sm_deserialize(buf, 20) == NULL, "malformed body rejected");
+
+    return 0;
+}
 
 CASE(test_flip_range)
 {
@@ -1976,6 +2042,11 @@ int main(void)
     RUN(test_validate_ok);
     RUN(test_statistics);
     RUN(test_shrink_to_fit);
+
+    /* serialize / deserialize */
+    RUN(test_serialize_roundtrip);
+    RUN(test_serialize_empty);
+    RUN(test_deserialize_validation);
 
     /* scan */
     RUN(test_scan_basic);

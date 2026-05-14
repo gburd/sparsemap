@@ -5127,6 +5127,102 @@ sm_shrink_to_fit(sparsemap_t *map)
   return sm_set_data_size(map, NULL, target);
 }
 
+/* -------------------------------------------------------------------
+ * Portable serialization
+ * ------------------------------------------------------------------- */
+
+#define SM_WIRE_MAGIC      0x30316d73u  /* "sm10" little-endian */
+#define SM_WIRE_VERSION    1u
+#define SM_WIRE_HEADER_LEN 16u
+#define SM_WIRE_FLAG_LE    0x01u
+
+static bool
+__sm_host_is_little_endian(void)
+{
+  const uint16_t one = 1;
+  return ((const uint8_t *)&one)[0] == 1;
+}
+
+size_t
+sm_serialized_size(const sparsemap_t *map)
+{
+  if (map == NULL) return SM_WIRE_HEADER_LEN + SM_SIZEOF_OVERHEAD;
+  return SM_WIRE_HEADER_LEN + sm_get_size((sparsemap_t *)map);
+}
+
+size_t
+sm_serialize(const sparsemap_t *map, uint8_t *out, size_t out_size)
+{
+  if (out == NULL) return 0;
+  const size_t needed = sm_serialized_size(map);
+  if (out_size < needed) return 0;
+
+  const uint64_t cardinality = (map == NULL || sm_is_empty(map))
+    ? 0
+    : sm_cardinality((sparsemap_t *)map);
+  const uint8_t flags = __sm_host_is_little_endian() ? SM_WIRE_FLAG_LE : 0;
+
+  /* Header: writes via memcpy so it works on strict-alignment cpus. */
+  const uint32_t magic = SM_WIRE_MAGIC;
+  memcpy(out + 0, &magic, 4);
+  out[4] = SM_WIRE_VERSION;
+  out[5] = flags;
+  out[6] = 0; out[7] = 0;
+  memcpy(out + 8, &cardinality, 8);
+
+  /* Body: existing internal format (or just an SM_SIZEOF_OVERHEAD
+   * zeroed header for NULL/empty maps). */
+  if (map == NULL || sm_is_empty(map)) {
+    memset(out + SM_WIRE_HEADER_LEN, 0, SM_SIZEOF_OVERHEAD);
+  } else {
+    memcpy(out + SM_WIRE_HEADER_LEN, sm_get_data((sparsemap_t *)map),
+           sm_get_size((sparsemap_t *)map));
+  }
+  return needed;
+}
+
+sparsemap_t *
+sm_deserialize(const uint8_t *in, size_t n)
+{
+  if (in == NULL || n < SM_WIRE_HEADER_LEN + SM_SIZEOF_OVERHEAD) {
+    return NULL;
+  }
+  uint32_t magic;
+  memcpy(&magic, in + 0, 4);
+  if (magic != SM_WIRE_MAGIC) return NULL;
+
+  const uint8_t version = in[4];
+  const uint8_t flags   = in[5];
+  if (version != SM_WIRE_VERSION) return NULL;
+
+  const bool wire_is_le = (flags & SM_WIRE_FLAG_LE) != 0;
+  const bool host_is_le = __sm_host_is_little_endian();
+  if (wire_is_le != host_is_le) {
+    /* Cross-endian read not yet supported. */
+    return NULL;
+  }
+
+  /* Body: starts at offset SM_WIRE_HEADER_LEN. */
+  const size_t body_len = n - SM_WIRE_HEADER_LEN;
+  sparsemap_t *map = sm_create(body_len + 64);
+  if (map == NULL) return NULL;
+
+  /* Copy the body into the map's data buffer.  The first SM_SIZEOF_OVERHEAD
+   * bytes are the chunk count; the rest is chunks. */
+  memcpy(map->m_data, in + SM_WIRE_HEADER_LEN, body_len);
+  /* Force m_data_used to its expected value: the first 4 bytes contain
+   * chunk_count, then we need to walk to compute total size.
+   * sm_open's pattern handles this. */
+  map->m_data_used = body_len;
+
+  /* Validate the result; reject malformed input. */
+  if (!sm_validate(map)) {
+    sm_free(map);
+    return NULL;
+  }
+  return map;
+}
+
 /**
  * @brief Copy a raw chunk (start offset + descriptor + vectors) into result.
  */

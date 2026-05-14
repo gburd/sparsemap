@@ -6,6 +6,94 @@ follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.2.0] — 2026-05-13
+
+Major API expansion.  Adds 35 public functions covering the gap
+between v1.1.1's surface and what CRoaring + PostgreSQL bitmapset
+provide.  See `.agent/notes/api-gaps-and-tasks.md` for the original
+gap analysis.
+
+### Added
+
+Predicates and comparisons:
+  - `sm_is_empty(map)`
+  - `sm_equals(a, b)`
+  - `sm_is_subset(a, b)`
+  - `sm_overlap(a, b)`
+  - `sm_membership(map)` -> `SM_EMPTY` / `SM_SINGLETON` / `SM_MULTIPLE`
+  - `sm_singleton_member(map)`
+  - `sm_compare(a, b)` (three-way)
+  - `sm_subset_compare(a, b)` -> `SM_REL_*` (four-way)
+
+Member-by-member iteration:
+  - `sm_next_member(map, prev)`
+  - `sm_prev_member(map, prev)`
+  - `sm_pop_first(map)` (destructive)
+
+Cardinality without allocation:
+  - `sm_union_cardinality`, `sm_intersection_cardinality`,
+    `sm_difference_cardinality`, `sm_xor_cardinality`
+  - `sm_nonempty_difference(a, b)`
+  - `sm_jaccard_index(a, b)`
+
+Bulk operations:
+  - `sm_add_many(map, arr, n)`, `sm_to_array(map, out, *n)`
+  - `sm_add_range(map, lo, hi)`, `sm_remove_range(map, lo, hi)`,
+    `sm_flip_range(map, lo, hi)`
+
+XOR:
+  - `sm_xor(a, b)`
+
+In-place set operations:
+  - `sm_union_inplace(dst, src)`
+  - `sm_intersection_inplace(dst, src)`
+  - `sm_difference_inplace(dst, src)`
+
+Constructors:
+  - `sm_create_singleton(idx)`
+  - `sm_create_from_range(lo, hi)`
+  - `sm_create_from_array(arr, n)`
+
+Maintenance and introspection:
+  - `sm_validate(map)` (production-build self-check)
+  - `sm_statistics(map, *stats)` with `sm_stats_t`
+  - `sm_shrink_to_fit(map)`
+  - `sm_hash(map)` (FNV-1a, content-based)
+
+Portable serialization:
+  - `sm_serialized_size(map)`
+  - `sm_serialize(map, *out, n)`
+  - `sm_deserialize(in, n)` (bounded-safe; rejects malformed input)
+
+New enums and types:
+  - `sm_membership_t`
+  - `sm_subset_relation_t`
+  - `sm_stats_t`
+
+New example: `examples/ex_5.c` exercises every category.
+
+### Backward compatibility
+
+Legacy `sparsemap_*` macro aliases added for all 35 new functions.
+Pre-v1.2 callers who still use the long names compile unchanged.
+Set `SM_NO_LEGACY_ALIASES` to opt out.
+
+### Performance notes
+
+Most new functions are simple wrappers over the v1.1.1 primitives
+(particularly `sm_next_member`).  Future releases may specialize
+the hot paths (chunk-pair-walk for set-op cardinalities,
+chunk-aware `sm_add_range`) when profiling shows real consumers
+need it.  v1.2 prioritizes correctness and API completeness.
+
+### Verified
+
+  Regular  (x86_64): 5/5 PASS
+  ASan     (x86_64): 5/5 PASS
+  UBSan    (x86_64): 5/5 PASS
+  RISC-V   (rv):     5/5 PASS
+  Coverage:          76.0% lines / 61.7% branches / 93.2% functions
+
 ## [1.1.1] — 2026-05-13
 
 Deferred-bug closure release.

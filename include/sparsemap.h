@@ -140,10 +140,10 @@ extern "C" {
 #endif
 
 /** Library version (kept in sync with meson.build's project(version: ...)). */
-#define SM_VERSION_STRING "1.1.1"
+#define SM_VERSION_STRING "1.2.0"
 #define SM_VERSION_MAJOR  1
-#define SM_VERSION_MINOR  1
-#define SM_VERSION_PATCH  1
+#define SM_VERSION_MINOR  2
+#define SM_VERSION_PATCH  0
 
 /** Opaque handle to a sparsemap instance. */
 typedef struct sparsemap sparsemap_t;
@@ -1031,6 +1031,49 @@ void sm_statistics(const sparsemap_t *map, sm_stats_t *stats);
  */
 sparsemap_t *sm_shrink_to_fit(sparsemap_t *map);
 
+/* -------------------------------------------------------------------
+ * Portable serialization
+ *
+ * Format (16 bytes header + body):
+ *
+ *   uint32_t magic     = 0x736d3130 ("sm10")  -- versions <2
+ *   uint8_t  version   = 1
+ *   uint8_t  flags     = 0x01 if little-endian, 0x00 if big-endian
+ *   uint16_t reserved  = 0 (must be ignored on read)
+ *   uint64_t cardinality           -- size hint for callers
+ *   <body: existing internal m_data layout, in source endian>
+ *
+ * Cross-endian deserialization is not yet supported; sm_deserialize
+ * returns NULL if the source endian doesn't match the host.
+ * ------------------------------------------------------------------- */
+
+/** @brief Compute the buffer size needed to serialize \a map.
+ *
+ * @returns Number of bytes that sm_serialize will write.
+ */
+size_t sm_serialized_size(const sparsemap_t *map);
+
+/** @brief Serialize \a map into \a out (`sm_serialized_size` bytes).
+ *
+ * @param[in]  map       Source map.
+ * @param[out] out       Caller-allocated buffer of at least sm_serialized_size bytes.
+ * @param[in]  out_size  Capacity of \a out.
+ * @returns Number of bytes written, or 0 on error.
+ */
+size_t sm_serialize(const sparsemap_t *map, uint8_t *out, size_t out_size);
+
+/** @brief Deserialize a previously-serialized buffer into a fresh map.
+ *
+ * Bounded-safe: validates the header magic, version, endianness, and
+ * that each chunk's claimed size fits in the remaining buffer.
+ * Returns NULL on any malformed input rather than crashing.
+ *
+ * @param[in] in   Source buffer.
+ * @param[in] n    Source buffer size.
+ * @returns A new owned-contiguous sparsemap, or NULL on error.
+ */
+sparsemap_t *sm_deserialize(const uint8_t *in, size_t n);
+
 #if defined(__cplusplus)
 }
 #endif
@@ -1133,6 +1176,9 @@ sparsemap_t *sm_shrink_to_fit(sparsemap_t *map);
 #define sparsemap_validate                   sm_validate
 #define sparsemap_statistics                 sm_statistics
 #define sparsemap_shrink_to_fit              sm_shrink_to_fit
+#define sparsemap_serialized_size            sm_serialized_size
+#define sparsemap_serialize                  sm_serialize
+#define sparsemap_deserialize                sm_deserialize
 
 #endif /* !defined(SM_NO_LEGACY_ALIASES) */
 
