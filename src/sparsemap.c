@@ -4543,6 +4543,170 @@ sm_singleton_member(const sparsemap_t *map)
   return (second == SM_IDX_MAX) ? first : SM_IDX_MAX;
 }
 
+/* -------------------------------------------------------------------
+ * Phase B: cardinality without allocation, bulk add, to_array
+ * ------------------------------------------------------------------- */
+
+/*
+ * The cardinality functions walk both maps in lockstep using
+ * sm_next_member.  This is O(|a|+|b|) bit lookups, dominated by
+ * the cost of skipping past whole chunks (sm_next_member is O(1)
+ * per RLE chunk, O(vectors) per sparse chunk).  An optimized
+ * chunk-pair-walk would be faster but more complex; if profiling
+ * shows this matters in pg_tre's hot path, that's the next step.
+ */
+
+size_t
+sm_union_cardinality(const sparsemap_t *a, const sparsemap_t *b)
+{
+  if (sm_is_empty(a)) return b ? sm_cardinality((sparsemap_t *)b) : 0;
+  if (sm_is_empty(b)) return sm_cardinality((sparsemap_t *)a);
+
+  size_t count = 0;
+  uint64_t ia = sm_next_member(a, SM_IDX_MAX);
+  uint64_t ib = sm_next_member(b, SM_IDX_MAX);
+  while (ia != SM_IDX_MAX || ib != SM_IDX_MAX) {
+    if (ia == ib) {
+      count++;
+      ia = sm_next_member(a, ia);
+      ib = sm_next_member(b, ib);
+    } else if (ia != SM_IDX_MAX && (ib == SM_IDX_MAX || ia < ib)) {
+      count++;
+      ia = sm_next_member(a, ia);
+    } else {
+      count++;
+      ib = sm_next_member(b, ib);
+    }
+  }
+  return count;
+}
+
+size_t
+sm_intersection_cardinality(const sparsemap_t *a, const sparsemap_t *b)
+{
+  if (sm_is_empty(a) || sm_is_empty(b)) return 0;
+  size_t count = 0;
+  uint64_t ia = sm_next_member(a, SM_IDX_MAX);
+  uint64_t ib = sm_next_member(b, SM_IDX_MAX);
+  while (ia != SM_IDX_MAX && ib != SM_IDX_MAX) {
+    if (ia == ib) {
+      count++;
+      ia = sm_next_member(a, ia);
+      ib = sm_next_member(b, ib);
+    } else if (ia < ib) {
+      ia = sm_next_member(a, ia);
+    } else {
+      ib = sm_next_member(b, ib);
+    }
+  }
+  return count;
+}
+
+size_t
+sm_difference_cardinality(const sparsemap_t *a, const sparsemap_t *b)
+{
+  if (sm_is_empty(a)) return 0;
+  if (sm_is_empty(b)) return sm_cardinality((sparsemap_t *)a);
+
+  size_t count = 0;
+  uint64_t ia = sm_next_member(a, SM_IDX_MAX);
+  uint64_t ib = sm_next_member(b, SM_IDX_MAX);
+  while (ia != SM_IDX_MAX) {
+    /* Advance b past anything < ia. */
+    while (ib != SM_IDX_MAX && ib < ia) {
+      ib = sm_next_member(b, ib);
+    }
+    if (ib == ia) {
+      /* In both, skip from a's count. */
+      ib = sm_next_member(b, ib);
+    } else {
+      count++;
+    }
+    ia = sm_next_member(a, ia);
+  }
+  return count;
+}
+
+bool
+sm_nonempty_difference(const sparsemap_t *a, const sparsemap_t *b)
+{
+  if (sm_is_empty(a)) return false;
+  if (sm_is_empty(b)) return true;
+
+  uint64_t ia = sm_next_member(a, SM_IDX_MAX);
+  uint64_t ib = sm_next_member(b, SM_IDX_MAX);
+  while (ia != SM_IDX_MAX) {
+    while (ib != SM_IDX_MAX && ib < ia) {
+      ib = sm_next_member(b, ib);
+    }
+    if (ib != ia) {
+      return true;
+    }
+    ia = sm_next_member(a, ia);
+    ib = sm_next_member(b, ib);
+  }
+  return false;
+}
+
+double
+sm_jaccard_index(const sparsemap_t *a, const sparsemap_t *b)
+{
+  /* Walk both lockstep, accumulating intersection and union counts
+   * in a single pass. */
+  if (sm_is_empty(a) && sm_is_empty(b)) return 0.0;
+  size_t intersect = 0, union_ = 0;
+  uint64_t ia = sm_next_member(a, SM_IDX_MAX);
+  uint64_t ib = sm_next_member(b, SM_IDX_MAX);
+  while (ia != SM_IDX_MAX || ib != SM_IDX_MAX) {
+    if (ia == ib) {
+      intersect++;
+      union_++;
+      ia = sm_next_member(a, ia);
+      ib = sm_next_member(b, ib);
+    } else if (ia != SM_IDX_MAX && (ib == SM_IDX_MAX || ia < ib)) {
+      union_++;
+      ia = sm_next_member(a, ia);
+    } else {
+      union_++;
+      ib = sm_next_member(b, ib);
+    }
+  }
+  return union_ == 0 ? 0.0 : (double)intersect / (double)union_;
+}
+
+bool
+sm_add_many(sparsemap_t *map, const uint64_t *arr, size_t n)
+{
+  if (map == NULL || (arr == NULL && n > 0)) return false;
+  for (size_t i = 0; i < n; i++) {
+    if (sm_add(map, arr[i]) == SM_IDX_MAX) {
+      return false;
+    }
+  }
+  return true;
+}
+
+void
+sm_to_array(const sparsemap_t *map, uint64_t *out, size_t *n_out)
+{
+  if (n_out == NULL) return;
+  const size_t cap = (out == NULL) ? 0 : *n_out;
+  size_t written = 0;
+
+  if (out == NULL) {
+    /* Query: just count. */
+    *n_out = sm_is_empty(map) ? 0 : sm_cardinality((sparsemap_t *)map);
+    return;
+  }
+
+  uint64_t i = SM_IDX_MAX;
+  while ((i = sm_next_member(map, i)) != SM_IDX_MAX) {
+    if (written >= cap) break;
+    out[written++] = i;
+  }
+  *n_out = written;
+}
+
 /**
  * @brief Copy a raw chunk (start offset + descriptor + vectors) into result.
  */

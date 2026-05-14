@@ -1154,8 +1154,146 @@ CASE(test_offset_chunk_aligned_negative)
 }
 
 /* ------------------------------------------------------------------ */
-/*  Phase A: predicates and member-by-member iteration                */
+/*  Phase B: cardinality-without-alloc, bulk add, to_array            */
 /* ------------------------------------------------------------------ */
+
+CASE(test_union_cardinality)
+{
+    sparsemap_t *a = sm_create(2048);
+    sparsemap_t *b = sm_create(2048);
+    EXPECT(sm_union_cardinality(a, b) == 0, "empty union 0");
+
+    for (int i = 0; i < 10; i++) sm_add(a, i * 100);
+    EXPECT(sm_union_cardinality(a, b) == 10, "a alone = 10");
+    for (int i = 0; i < 10; i++) sm_add(b, i * 100 + 50);  /* disjoint */
+    EXPECT(sm_union_cardinality(a, b) == 20, "disjoint = 20");
+
+    /* Add a duplicate: now b contains some of a's bits. */
+    sm_add(b, 0);
+    sm_add(b, 100);
+    EXPECT(sm_union_cardinality(a, b) == 20, "shared bits not double-counted");
+
+    sm_free(a); sm_free(b);
+    return 0;
+}
+
+CASE(test_intersection_cardinality)
+{
+    sparsemap_t *a = sm_create(2048);
+    sparsemap_t *b = sm_create(2048);
+    EXPECT(sm_intersection_cardinality(a, b) == 0, "empty intersect = 0");
+
+    for (int i = 0; i < 10; i++) sm_add(a, i * 100);
+    for (int i = 0; i < 10; i++) sm_add(b, i * 100 + 50); /* disjoint */
+    EXPECT(sm_intersection_cardinality(a, b) == 0, "disjoint = 0");
+
+    sm_add(b, 100); sm_add(b, 200); sm_add(b, 300);
+    EXPECT(sm_intersection_cardinality(a, b) == 3, "three in common");
+
+    sm_free(a); sm_free(b);
+    return 0;
+}
+
+CASE(test_difference_cardinality)
+{
+    sparsemap_t *a = sm_create(2048);
+    sparsemap_t *b = sm_create(2048);
+    EXPECT(sm_difference_cardinality(a, b) == 0, "empty - empty = 0");
+
+    for (int i = 0; i < 10; i++) sm_add(a, i * 100);
+    EXPECT(sm_difference_cardinality(a, b) == 10, "a - empty = a");
+    EXPECT(sm_difference_cardinality(b, a) == 0, "empty - a = 0");
+
+    /* Remove three from a's perspective via b. */
+    sm_add(b, 100); sm_add(b, 200); sm_add(b, 300);
+    EXPECT(sm_difference_cardinality(a, b) == 7, "a - b removes 3");
+
+    sm_free(a); sm_free(b);
+    return 0;
+}
+
+CASE(test_nonempty_difference)
+{
+    sparsemap_t *a = sm_create(2048);
+    sparsemap_t *b = sm_create(2048);
+    EXPECT(!sm_nonempty_difference(a, b), "empty - empty: false");
+
+    sm_add(a, 100);
+    EXPECT(sm_nonempty_difference(a, b), "populated - empty: true");
+
+    sm_add(b, 100);
+    EXPECT(!sm_nonempty_difference(a, b), "a == b: false");
+
+    sm_add(a, 200);
+    EXPECT(sm_nonempty_difference(a, b), "a has extra bit: true");
+
+    sm_free(a); sm_free(b);
+    return 0;
+}
+
+CASE(test_jaccard_index)
+{
+    sparsemap_t *a = sm_create(2048);
+    sparsemap_t *b = sm_create(2048);
+    EXPECT(sm_jaccard_index(a, b) == 0.0, "empty pair: 0.0");
+
+    for (int i = 0; i < 10; i++) sm_add(a, i * 100);
+    for (int i = 0; i < 10; i++) sm_add(b, i * 100);  /* identical */
+    EXPECT(sm_jaccard_index(a, b) == 1.0, "identical: 1.0");
+
+    /* Add disjoint bits to each. */
+    sm_add(a, 9999);
+    sm_add(b, 8888);
+    /* intersection = 10, union = 12. j = 10/12 ~= 0.833 */
+    const double j = sm_jaccard_index(a, b);
+    EXPECT(j > 0.83 && j < 0.84, "jaccard around 0.833");
+
+    sm_free(a); sm_free(b);
+    return 0;
+}
+
+CASE(test_add_many)
+{
+    sparsemap_t *m = sm_create(2048);
+    const uint64_t arr[] = { 5, 10, 100, 200, 1500 };
+    EXPECT(sm_add_many(m, arr, 5), "add_many succeeds");
+    EXPECT(sm_cardinality(m) == 5, "5 bits added");
+    EXPECT(sm_contains(m, 5) && sm_contains(m, 1500), "first and last present");
+
+    /* Empty array. */
+    EXPECT(sm_add_many(m, NULL, 0), "add 0 elements ok");
+
+    sm_free(m);
+    return 0;
+}
+
+CASE(test_to_array)
+{
+    sparsemap_t *m = sm_create(2048);
+    sm_add(m, 5);
+    sm_add(m, 100);
+    sm_add(m, 1500);
+
+    /* Query size with NULL out. */
+    size_t n = 0;
+    sm_to_array(m, NULL, &n);
+    EXPECT(n == 3, "size query returns 3");
+
+    /* Materialize. */
+    uint64_t buf[10];
+    n = 10;
+    sm_to_array(m, buf, &n);
+    EXPECT(n == 3, "3 written");
+    EXPECT(buf[0] == 5 && buf[1] == 100 && buf[2] == 1500, "sorted output");
+
+    /* Truncated buffer. */
+    n = 2;
+    sm_to_array(m, buf, &n);
+    EXPECT(n == 2, "truncated to 2");
+
+    sm_free(m);
+    return 0;
+}
 
 CASE(test_is_empty)
 {
@@ -1462,6 +1600,15 @@ int main(void)
     RUN(test_next_member);
     RUN(test_prev_member);
     RUN(test_iteration_idiom);
+
+    /* Phase B: cardinality without alloc, bulk add, to_array */
+    RUN(test_union_cardinality);
+    RUN(test_intersection_cardinality);
+    RUN(test_difference_cardinality);
+    RUN(test_nonempty_difference);
+    RUN(test_jaccard_index);
+    RUN(test_add_many);
+    RUN(test_to_array);
 
     /* scan */
     RUN(test_scan_basic);

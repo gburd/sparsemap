@@ -757,6 +757,67 @@ uint64_t sm_next_member(const sparsemap_t *map, uint64_t prev_idx);
  */
 uint64_t sm_prev_member(const sparsemap_t *map, uint64_t prev_idx);
 
+/* -------------------------------------------------------------------
+ * Cardinality without allocation
+ *
+ * These compute |a OP b| without materializing the result.  Useful in
+ * hot paths where the caller only wants the size, not the bits.
+ * ------------------------------------------------------------------- */
+
+/** @brief Compute |a ∪ b| without allocating the union. */
+size_t sm_union_cardinality(const sparsemap_t *a, const sparsemap_t *b);
+
+/** @brief Compute |a ∩ b| without allocating the intersection. */
+size_t sm_intersection_cardinality(const sparsemap_t *a, const sparsemap_t *b);
+
+/** @brief Compute |a \ b| without allocating the difference. */
+size_t sm_difference_cardinality(const sparsemap_t *a, const sparsemap_t *b);
+
+/** @brief Test whether `a \ b` has any set bits, without allocating.
+ *
+ * Equivalent to `sm_difference_cardinality(a, b) > 0` but with
+ * short-circuit on first non-overlap.  Mirrors PostgreSQL's
+ * `bms_nonempty_difference`.
+ */
+bool sm_nonempty_difference(const sparsemap_t *a, const sparsemap_t *b);
+
+/** @brief Jaccard similarity index: |a ∩ b| / |a ∪ b|.
+ *
+ * @returns A value in [0.0, 1.0].  Returns 0.0 if both maps are empty
+ *          (the standard convention for the indeterminate 0/0 case).
+ */
+double sm_jaccard_index(const sparsemap_t *a, const sparsemap_t *b);
+
+/* -------------------------------------------------------------------
+ * Bulk add and array conversion
+ * ------------------------------------------------------------------- */
+
+/** @brief Add N indices from an array.
+ *
+ * Equivalent to a loop over `sm_add(map, arr[i])` but slightly more
+ * efficient when `arr` is already sorted (no formal contract that it
+ * must be — unsorted input still works, just slower).
+ *
+ * @param[in,out] map  Destination.
+ * @param[in]     arr  Array of indices.
+ * @param[in]     n    Length of `arr`.
+ * @returns true if every add succeeded; false if any add returned
+ *          SPARSEMAP_IDX_MAX (capacity exhausted).
+ */
+bool sm_add_many(sparsemap_t *map, const uint64_t *arr, size_t n);
+
+/** @brief Materialize all set bits as a uint64_t array.
+ *
+ * Two-pass: pass NULL for `out` to size, then allocate and pass the
+ * buffer.  Or pass a buffer of `*n_out` capacity; on return, `*n_out`
+ * is the number actually written.
+ *
+ * @param[in]     map    Source.
+ * @param[out]    out    Caller-allocated buffer (or NULL to query size).
+ * @param[in,out] n_out  In: capacity of `out`.  Out: number written.
+ */
+void sm_to_array(const sparsemap_t *map, uint64_t *out, size_t *n_out);
+
 #if defined(__cplusplus)
 }
 #endif
@@ -832,6 +893,15 @@ uint64_t sm_prev_member(const sparsemap_t *map, uint64_t prev_idx);
 #define sparsemap_singleton_member   sm_singleton_member
 #define sparsemap_next_member        sm_next_member
 #define sparsemap_prev_member        sm_prev_member
+
+/* Phase B: cardinality-without-alloc, bulk ops */
+#define sparsemap_union_cardinality          sm_union_cardinality
+#define sparsemap_intersection_cardinality   sm_intersection_cardinality
+#define sparsemap_difference_cardinality     sm_difference_cardinality
+#define sparsemap_nonempty_difference        sm_nonempty_difference
+#define sparsemap_jaccard_index              sm_jaccard_index
+#define sparsemap_add_many                   sm_add_many
+#define sparsemap_to_array                   sm_to_array
 
 #endif /* !defined(SM_NO_LEGACY_ALIASES) */
 
