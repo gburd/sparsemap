@@ -4707,6 +4707,230 @@ sm_to_array(const sparsemap_t *map, uint64_t *out, size_t *n_out)
   *n_out = written;
 }
 
+/* -------------------------------------------------------------------
+ * Phase B continued: range ops, XOR, constructors,
+ *                    hash/compare, destructive iteration
+ * ------------------------------------------------------------------- */
+
+bool
+sm_add_range(sparsemap_t *map, uint64_t lo, uint64_t hi)
+{
+  if (map == NULL || lo >= hi) return lo >= hi;  /* empty range = OK */
+  for (uint64_t i = lo; i < hi; i++) {
+    if (sm_add(map, i) == SM_IDX_MAX) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool
+sm_remove_range(sparsemap_t *map, uint64_t lo, uint64_t hi)
+{
+  if (map == NULL || lo >= hi) return lo >= hi;
+  for (uint64_t i = lo; i < hi; i++) {
+    if (sm_remove(map, i) == SM_IDX_MAX) {
+      return false;
+    }
+  }
+  return true;
+}
+
+sparsemap_t *
+sm_xor(const sparsemap_t *a, const sparsemap_t *b)
+{
+  if (sm_is_empty(a) && sm_is_empty(b)) return NULL;
+  if (sm_is_empty(a)) return sm_copy(b);
+  if (sm_is_empty(b)) return sm_copy(a);
+
+  /* Allocate a result big enough for the union (upper bound). */
+  const size_t cap = sm_get_capacity(a) + sm_get_capacity(b);
+  sparsemap_t *r = sm_create(cap > 1024 ? cap : 1024);
+  if (r == NULL) return NULL;
+
+  /* Walk both lockstep, emit bits set in exactly one. */
+  uint64_t ia = sm_next_member(a, SM_IDX_MAX);
+  uint64_t ib = sm_next_member(b, SM_IDX_MAX);
+  while (ia != SM_IDX_MAX || ib != SM_IDX_MAX) {
+    if (ia == ib) {
+      /* In both: skip from XOR. */
+      ia = sm_next_member(a, ia);
+      ib = sm_next_member(b, ib);
+    } else if (ia != SM_IDX_MAX && (ib == SM_IDX_MAX || ia < ib)) {
+      if (sm_add(r, ia) == SM_IDX_MAX) {
+        sm_free(r);
+        return NULL;
+      }
+      ia = sm_next_member(a, ia);
+    } else {
+      if (sm_add(r, ib) == SM_IDX_MAX) {
+        sm_free(r);
+        return NULL;
+      }
+      ib = sm_next_member(b, ib);
+    }
+  }
+  if (sm_is_empty(r)) {
+    sm_free(r);
+    return NULL;
+  }
+  return r;
+}
+
+size_t
+sm_xor_cardinality(const sparsemap_t *a, const sparsemap_t *b)
+{
+  if (sm_is_empty(a) && sm_is_empty(b)) return 0;
+  if (sm_is_empty(a)) return sm_cardinality((sparsemap_t *)b);
+  if (sm_is_empty(b)) return sm_cardinality((sparsemap_t *)a);
+
+  size_t count = 0;
+  uint64_t ia = sm_next_member(a, SM_IDX_MAX);
+  uint64_t ib = sm_next_member(b, SM_IDX_MAX);
+  while (ia != SM_IDX_MAX || ib != SM_IDX_MAX) {
+    if (ia == ib) {
+      ia = sm_next_member(a, ia);
+      ib = sm_next_member(b, ib);
+    } else if (ia != SM_IDX_MAX && (ib == SM_IDX_MAX || ia < ib)) {
+      count++;
+      ia = sm_next_member(a, ia);
+    } else {
+      count++;
+      ib = sm_next_member(b, ib);
+    }
+  }
+  return count;
+}
+
+sparsemap_t *
+sm_create_singleton(uint64_t idx)
+{
+  sparsemap_t *m = sm_create(1024);
+  if (m && sm_add(m, idx) == SM_IDX_MAX) {
+    sm_free(m);
+    return NULL;
+  }
+  return m;
+}
+
+sparsemap_t *
+sm_create_from_range(uint64_t lo, uint64_t hi)
+{
+  /* Estimate buffer size: each chunk is at most ~24 bytes; range
+   * spans (hi-lo)/2048 chunks plus partial-edge chunks. */
+  size_t chunks = (hi - lo) / 2048 + 2;
+  size_t bytes = 32 + chunks * 24;
+  sparsemap_t *m = sm_create(bytes < 1024 ? 1024 : bytes);
+  if (m == NULL) return NULL;
+  if (!sm_add_range(m, lo, hi)) {
+    /* Try once with a bigger buffer. */
+    sparsemap_t *grown = sm_set_data_size(m, NULL, bytes * 4);
+    if (grown == NULL) {
+      sm_free(m);
+      return NULL;
+    }
+    sm_clear(grown);
+    if (!sm_add_range(grown, lo, hi)) {
+      sm_free(grown);
+      return NULL;
+    }
+    return grown;
+  }
+  return m;
+}
+
+sparsemap_t *
+sm_create_from_array(const uint64_t *arr, size_t n)
+{
+  sparsemap_t *m = sm_create(1024);
+  if (m == NULL) return NULL;
+  if (!sm_add_many(m, arr, n)) {
+    sm_free(m);
+    return NULL;
+  }
+  return m;
+}
+
+uint64_t
+sm_hash(const sparsemap_t *map)
+{
+  /* FNV-1a 64-bit over the sequence of set bits.  Content-based
+   * (encoding-independent): two maps that compare equal under
+   * sm_equals() hash to the same value. */
+  uint64_t h = 0xcbf29ce484222325ULL;
+  if (sm_is_empty(map)) return h;
+  uint64_t i = SM_IDX_MAX;
+  while ((i = sm_next_member(map, i)) != SM_IDX_MAX) {
+    /* Mix all 8 bytes of the index. */
+    for (int b = 0; b < 8; b++) {
+      h ^= (i >> (b * 8)) & 0xffULL;
+      h *= 0x100000001b3ULL;
+    }
+  }
+  return h;
+}
+
+int
+sm_compare(const sparsemap_t *a, const sparsemap_t *b)
+{
+  /* Lexicographic: walk both lockstep and return the difference at
+   * the first point of divergence. */
+  uint64_t ia = sm_next_member(a, SM_IDX_MAX);
+  uint64_t ib = sm_next_member(b, SM_IDX_MAX);
+  while (ia != SM_IDX_MAX && ib != SM_IDX_MAX) {
+    if (ia < ib) return -1;
+    if (ia > ib) return  1;
+    ia = sm_next_member(a, ia);
+    ib = sm_next_member(b, ib);
+  }
+  if (ia == SM_IDX_MAX && ib == SM_IDX_MAX) return 0;
+  return (ia == SM_IDX_MAX) ? -1 : 1;  /* shorter sequence sorts first */
+}
+
+sm_subset_relation_t
+sm_subset_compare(const sparsemap_t *a, const sparsemap_t *b)
+{
+  bool a_subset_b = true;  /* every bit in a is in b */
+  bool b_subset_a = true;  /* every bit in b is in a */
+
+  uint64_t ia = sm_next_member(a, SM_IDX_MAX);
+  uint64_t ib = sm_next_member(b, SM_IDX_MAX);
+  while (ia != SM_IDX_MAX || ib != SM_IDX_MAX) {
+    if (ia == ib) {
+      ia = sm_next_member(a, ia);
+      ib = sm_next_member(b, ib);
+    } else if (ia != SM_IDX_MAX && (ib == SM_IDX_MAX || ia < ib)) {
+      /* a has a bit b doesn't. */
+      a_subset_b = false;
+      ia = sm_next_member(a, ia);
+    } else {
+      /* b has a bit a doesn't. */
+      b_subset_a = false;
+      ib = sm_next_member(b, ib);
+    }
+    if (!a_subset_b && !b_subset_a) {
+      return SM_REL_DIFFERENT;
+    }
+  }
+  if (a_subset_b && b_subset_a) return SM_REL_EQUAL;
+  if (a_subset_b) return SM_REL_SUBSET_A;
+  return SM_REL_SUBSET_B;
+}
+
+uint64_t
+sm_pop_first(sparsemap_t *map)
+{
+  if (sm_is_empty(map)) return SM_IDX_MAX;
+  const uint64_t lowest = sm_next_member(map, SM_IDX_MAX);
+  if (lowest == SM_IDX_MAX) return SM_IDX_MAX;
+  if (sm_remove(map, lowest) == SM_IDX_MAX) {
+    /* Should never happen on a populated map (remove only fails on
+     * ENOSPC for chunk separation, and we're removing not adding). */
+    return SM_IDX_MAX;
+  }
+  return lowest;
+}
+
 /**
  * @brief Copy a raw chunk (start offset + descriptor + vectors) into result.
  */

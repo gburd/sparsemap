@@ -818,6 +818,126 @@ bool sm_add_many(sparsemap_t *map, const uint64_t *arr, size_t n);
  */
 void sm_to_array(const sparsemap_t *map, uint64_t *out, size_t *n_out);
 
+/* -------------------------------------------------------------------
+ * Range manipulation and symmetric difference
+ * ------------------------------------------------------------------- */
+
+/** @brief Set every bit in `[lo, hi)`.
+ *
+ * Equivalent to looping `sm_add(map, i)` for i in [lo, hi).
+ * Implementation is currently the naive loop; a chunk-aware fast
+ * path may land in a future release.
+ *
+ * @param[in,out] map  Destination.
+ * @param[in]     lo   Inclusive lower bound.
+ * @param[in]     hi   Exclusive upper bound (lo == hi is a no-op).
+ * @returns true if every bit was added; false if any add returned
+ *          SPARSEMAP_IDX_MAX (capacity exhausted).
+ */
+bool sm_add_range(sparsemap_t *map, uint64_t lo, uint64_t hi);
+
+/** @brief Clear every bit in `[lo, hi)`.
+ *
+ * @param[in,out] map  Destination.
+ * @param[in]     lo   Inclusive lower bound.
+ * @param[in]     hi   Exclusive upper bound.
+ * @returns true if every bit was cleared; false if any remove failed.
+ */
+bool sm_remove_range(sparsemap_t *map, uint64_t lo, uint64_t hi);
+
+/** @brief Symmetric difference: bits set in exactly one of \a a, \a b.
+ *
+ * Returns a newly allocated owned-contiguous sparsemap.
+ */
+sparsemap_t *sm_xor(const sparsemap_t *a, const sparsemap_t *b);
+
+/** @brief XOR cardinality without allocation.
+ *
+ * Equivalent to `sm_cardinality(sm_xor(a,b))` but doesn't materialize
+ * the result.
+ */
+size_t sm_xor_cardinality(const sparsemap_t *a, const sparsemap_t *b);
+
+/* -------------------------------------------------------------------
+ * Constructors
+ * ------------------------------------------------------------------- */
+
+/** @brief Create a sparsemap containing exactly the bit at `idx`.
+ *
+ * Convenience wrapper around `sm_create()` + `sm_add()`.  Mirrors
+ * PostgreSQL's `bms_make_singleton`.
+ *
+ * @param[in] idx  The single bit to set.
+ * @returns A new owned-contiguous sparsemap, or NULL on alloc failure.
+ */
+sparsemap_t *sm_create_singleton(uint64_t idx);
+
+/** @brief Create a sparsemap containing every bit in `[lo, hi)`.
+ *
+ * @param[in] lo  Inclusive lower bound.
+ * @param[in] hi  Exclusive upper bound.
+ * @returns A new owned-contiguous sparsemap, or NULL on alloc failure.
+ *          Empty range produces an empty map (not NULL).
+ */
+sparsemap_t *sm_create_from_range(uint64_t lo, uint64_t hi);
+
+/** @brief Create a sparsemap from an array of indices.
+ *
+ * @param[in] arr  Array of indices.
+ * @param[in] n    Length of `arr`.
+ * @returns A new owned-contiguous sparsemap, or NULL on alloc failure.
+ */
+sparsemap_t *sm_create_from_array(const uint64_t *arr, size_t n);
+
+/* -------------------------------------------------------------------
+ * Hashing and comparison
+ * ------------------------------------------------------------------- */
+
+/** @brief Stable content-based hash of the bit set.
+ *
+ * Two maps that compare equal under sm_equals() always hash to the
+ * same value, regardless of internal RLE-vs-sparse encoding choices.
+ */
+uint64_t sm_hash(const sparsemap_t *map);
+
+/** @brief Three-way compare for ordering bitmaps.
+ *
+ * Lexicographic order on the bit sequence (sorted ascending).  Suitable
+ * for sorting an array of bitmaps deterministically.  Mirrors
+ * PostgreSQL's `bms_compare`.
+ *
+ * @returns Negative, zero, or positive following the standard convention.
+ */
+int sm_compare(const sparsemap_t *a, const sparsemap_t *b);
+
+/** @brief Subset-relation between two sparsemaps. */
+typedef enum {
+    SM_REL_EQUAL    = 0, /**< a == b */
+    SM_REL_SUBSET_A = 1, /**< a is a strict subset of b */
+    SM_REL_SUBSET_B = 2, /**< b is a strict subset of a */
+    SM_REL_DIFFERENT = 3, /**< neither is a subset of the other */
+} sm_subset_relation_t;
+
+/** @brief Classify the subset relationship between \a a and \a b.
+ *
+ * Mirrors PostgreSQL's `bms_subset_compare`.  More efficient than
+ * calling `sm_is_subset` twice when the caller needs the full picture.
+ */
+sm_subset_relation_t sm_subset_compare(const sparsemap_t *a, const sparsemap_t *b);
+
+/* -------------------------------------------------------------------
+ * Destructive iteration
+ * ------------------------------------------------------------------- */
+
+/** @brief Find the lowest set bit, clear it, and return it.
+ *
+ * Useful for worklist algorithms.  Mirrors PostgreSQL's
+ * `bms_first_member`.
+ *
+ * @returns The lowest set bit's index, or SM_IDX_MAX if the map was empty.
+ */
+uint64_t sm_pop_first(sparsemap_t *map);
+
 #if defined(__cplusplus)
 }
 #endif
@@ -902,6 +1022,17 @@ void sm_to_array(const sparsemap_t *map, uint64_t *out, size_t *n_out);
 #define sparsemap_jaccard_index              sm_jaccard_index
 #define sparsemap_add_many                   sm_add_many
 #define sparsemap_to_array                   sm_to_array
+#define sparsemap_add_range                  sm_add_range
+#define sparsemap_remove_range               sm_remove_range
+#define sparsemap_xor                        sm_xor
+#define sparsemap_xor_cardinality            sm_xor_cardinality
+#define sparsemap_create_singleton           sm_create_singleton
+#define sparsemap_create_from_range          sm_create_from_range
+#define sparsemap_create_from_array          sm_create_from_array
+#define sparsemap_hash                       sm_hash
+#define sparsemap_compare                    sm_compare
+#define sparsemap_subset_compare             sm_subset_compare
+#define sparsemap_pop_first                  sm_pop_first
 
 #endif /* !defined(SM_NO_LEGACY_ALIASES) */
 

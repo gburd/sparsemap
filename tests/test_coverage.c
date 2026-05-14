@@ -1154,8 +1154,202 @@ CASE(test_offset_chunk_aligned_negative)
 }
 
 /* ------------------------------------------------------------------ */
-/*  Phase B: cardinality-without-alloc, bulk add, to_array            */
+/*  Phase B continued: range ops, XOR, constructors, hash, compare,   */
+/*  destructive iteration                                             */
 /* ------------------------------------------------------------------ */
+
+CASE(test_add_range)
+{
+    sparsemap_t *m = sm_create(2048);
+    EXPECT(sm_add_range(m, 100, 100), "empty range no-op");
+    EXPECT(sm_cardinality(m) == 0, "still empty");
+
+    EXPECT(sm_add_range(m, 100, 200), "add [100, 200)");
+    EXPECT(sm_cardinality(m) == 100, "100 bits");
+    EXPECT(sm_contains(m, 100) && sm_contains(m, 199), "endpoints");
+    EXPECT(!sm_contains(m, 99) && !sm_contains(m, 200), "outside excluded");
+
+    sm_free(m);
+    return 0;
+}
+
+CASE(test_remove_range)
+{
+    sparsemap_t *m = sm_create(8192);
+    sm_add_range(m, 0, 1000);
+    EXPECT(sm_cardinality(m) == 1000, "1000 bits added");
+
+    EXPECT(sm_remove_range(m, 200, 700), "remove middle");
+    EXPECT(sm_cardinality(m) == 500, "500 left");
+    EXPECT(sm_contains(m, 100) && sm_contains(m, 800), "edges still set");
+    EXPECT(!sm_contains(m, 300) && !sm_contains(m, 600), "middle cleared");
+
+    sm_free(m);
+    return 0;
+}
+
+CASE(test_xor)
+{
+    /* Disjoint: xor = union */
+    sparsemap_t *a = sm_create(2048);
+    sparsemap_t *b = sm_create(2048);
+    for (int i = 0; i < 10; i++) sm_add(a, i * 100);
+    for (int i = 0; i < 10; i++) sm_add(b, i * 100 + 50);
+    sparsemap_t *x = sm_xor(a, b);
+    EXPECT(x != NULL && sm_cardinality(x) == 20, "disjoint xor = 20");
+    sm_free(x);
+
+    /* Identical: xor = empty */
+    sparsemap_t *c = sm_create(2048);
+    for (int i = 0; i < 10; i++) sm_add(c, i * 100);
+    x = sm_xor(a, c);
+    EXPECT(x == NULL || sm_cardinality(x) == 0, "identical xor = empty");
+    if (x) sm_free(x);
+
+    /* Overlap: xor = symmetric diff */
+    sm_add(b, 100);  /* now b has bit 100 too, which a also has */
+    sm_add(b, 200);
+    x = sm_xor(a, b);
+    /* a={0,100,200,...,900}; b={50,100,150,200,250,...,950}
+     * a ^ b: bits unique to one or the other. 100 and 200 in both -> excluded. */
+    EXPECT(x != NULL, "overlap xor non-null");
+    EXPECT(!sm_contains(x, 100) && !sm_contains(x, 200), "shared excluded");
+    EXPECT(sm_contains(x, 0) && sm_contains(x, 50), "unique included");
+    sm_free(x);
+
+    sm_free(a); sm_free(b); sm_free(c);
+    return 0;
+}
+
+CASE(test_xor_cardinality)
+{
+    sparsemap_t *a = sm_create(2048);
+    sparsemap_t *b = sm_create(2048);
+    for (int i = 0; i < 10; i++) sm_add(a, i * 100);
+    for (int i = 0; i < 10; i++) sm_add(b, i * 100);
+    EXPECT(sm_xor_cardinality(a, b) == 0, "identical xor 0");
+
+    sm_add(b, 9999);
+    EXPECT(sm_xor_cardinality(a, b) == 1, "one diff = 1");
+
+    sm_free(a); sm_free(b);
+    return 0;
+}
+
+CASE(test_create_singleton)
+{
+    sparsemap_t *m = sm_create_singleton(42);
+    EXPECT(m != NULL, "singleton created");
+    EXPECT(sm_cardinality(m) == 1, "one bit");
+    EXPECT(sm_contains(m, 42), "correct bit");
+    EXPECT(sm_singleton_member(m) == 42, "matches singleton api");
+    sm_free(m);
+    return 0;
+}
+
+CASE(test_create_from_range)
+{
+    sparsemap_t *m = sm_create_from_range(0, 100);
+    EXPECT(m != NULL, "range created");
+    EXPECT(sm_cardinality(m) == 100, "100 bits");
+    EXPECT(sm_contains(m, 0) && sm_contains(m, 99), "endpoints");
+    EXPECT(!sm_contains(m, 100), "upper exclusive");
+    sm_free(m);
+
+    /* Empty range. */
+    sparsemap_t *e = sm_create_from_range(50, 50);
+    EXPECT(e != NULL && sm_is_empty(e), "empty range = empty map");
+    sm_free(e);
+    return 0;
+}
+
+CASE(test_create_from_array)
+{
+    const uint64_t arr[] = { 5, 100, 200, 1000 };
+    sparsemap_t *m = sm_create_from_array(arr, 4);
+    EXPECT(m != NULL && sm_cardinality(m) == 4, "4 bits");
+    EXPECT(sm_contains(m, 5), "first bit");
+    EXPECT(sm_contains(m, 1000), "last bit");
+    sm_free(m);
+    return 0;
+}
+
+CASE(test_hash)
+{
+    sparsemap_t *a = sm_create(2048);
+    sparsemap_t *b = sm_create(2048);
+    /* Empty maps hash to the same value. */
+    EXPECT(sm_hash(a) == sm_hash(b), "empty hashes equal");
+
+    sm_add(a, 42);
+    sm_add(b, 42);
+    EXPECT(sm_hash(a) == sm_hash(b), "identical content hashes equal");
+
+    sm_add(b, 100);
+    EXPECT(sm_hash(a) != sm_hash(b), "different content hashes differ");
+
+    /* Equality implies same hash (test contract directly). */
+    sparsemap_t *c = sm_copy(a);
+    EXPECT(sm_equals(a, c) && sm_hash(a) == sm_hash(c),
+           "equals implies same hash");
+
+    sm_free(a); sm_free(b); sm_free(c);
+    return 0;
+}
+
+CASE(test_compare)
+{
+    sparsemap_t *a = sm_create(2048);
+    sparsemap_t *b = sm_create(2048);
+    EXPECT(sm_compare(a, b) == 0, "empty == empty");
+
+    sm_add(a, 100);
+    EXPECT(sm_compare(a, b) > 0, "populated > empty");
+    EXPECT(sm_compare(b, a) < 0, "empty < populated");
+
+    sm_add(b, 200);  /* b > a now (200 > 100) */
+    EXPECT(sm_compare(a, b) < 0, "a < b lex");
+
+    sm_free(a); sm_free(b);
+    return 0;
+}
+
+CASE(test_subset_compare)
+{
+    sparsemap_t *a = sm_create(2048);
+    sparsemap_t *b = sm_create(2048);
+    EXPECT(sm_subset_compare(a, b) == SM_REL_EQUAL, "empty == empty");
+
+    sm_add(a, 100);
+    sm_add(b, 100);
+    sm_add(b, 200);
+    EXPECT(sm_subset_compare(a, b) == SM_REL_SUBSET_A, "a strict subset b");
+    EXPECT(sm_subset_compare(b, a) == SM_REL_SUBSET_B, "b strict superset a");
+
+    sm_add(a, 999);
+    EXPECT(sm_subset_compare(a, b) == SM_REL_DIFFERENT, "divergent");
+
+    sm_free(a); sm_free(b);
+    return 0;
+}
+
+CASE(test_pop_first)
+{
+    sparsemap_t *m = sm_create(2048);
+    EXPECT(sm_pop_first(m) == SM_IDX_MAX, "empty pops nothing");
+
+    sm_add(m, 100); sm_add(m, 200); sm_add(m, 50);
+    EXPECT(sm_pop_first(m) == 50, "first popped");
+    EXPECT(!sm_contains(m, 50), "popped bit gone");
+    EXPECT(sm_cardinality(m) == 2, "cardinality decreased");
+
+    EXPECT(sm_pop_first(m) == 100, "next popped");
+    EXPECT(sm_pop_first(m) == 200, "last popped");
+    EXPECT(sm_pop_first(m) == SM_IDX_MAX, "now empty");
+
+    sm_free(m);
+    return 0;
+}
 
 CASE(test_union_cardinality)
 {
@@ -1609,6 +1803,19 @@ int main(void)
     RUN(test_jaccard_index);
     RUN(test_add_many);
     RUN(test_to_array);
+
+    /* Phase B continued: range, xor, constructors, hash, compare */
+    RUN(test_add_range);
+    RUN(test_remove_range);
+    RUN(test_xor);
+    RUN(test_xor_cardinality);
+    RUN(test_create_singleton);
+    RUN(test_create_from_range);
+    RUN(test_create_from_array);
+    RUN(test_hash);
+    RUN(test_compare);
+    RUN(test_subset_compare);
+    RUN(test_pop_first);
 
     /* scan */
     RUN(test_scan_basic);
