@@ -1154,8 +1154,209 @@ CASE(test_offset_chunk_aligned_negative)
 }
 
 /* ------------------------------------------------------------------ */
-/*  Driver                                                            */
+/*  Phase A: predicates and member-by-member iteration                */
 /* ------------------------------------------------------------------ */
+
+CASE(test_is_empty)
+{
+    sparsemap_t *m = sm_create(2048);
+    EXPECT(sm_is_empty(m), "fresh map is empty");
+    EXPECT(sm_is_empty(NULL), "NULL is empty");
+    sm_add(m, 42);
+    EXPECT(!sm_is_empty(m), "after add, not empty");
+    sm_clear(m);
+    EXPECT(sm_is_empty(m), "after clear, empty");
+    sm_free(m);
+    return 0;
+}
+
+CASE(test_equals)
+{
+    EXPECT(sm_equals(NULL, NULL), "NULL == NULL");
+    sparsemap_t *a = sm_create(2048);
+    sparsemap_t *b = sm_create(2048);
+    EXPECT(sm_equals(a, b), "empty == empty");
+    EXPECT(sm_equals(NULL, a), "NULL == empty");
+    EXPECT(sm_equals(a, NULL), "empty == NULL");
+
+    sm_add(a, 42);
+    EXPECT(!sm_equals(a, b), "a != b after add");
+    sm_add(b, 42);
+    EXPECT(sm_equals(a, b), "equal again");
+
+    /* Encoding-independent: a built sparse, b built dense should still equal
+     * if the bit set is the same.  Build identical contents differently. */
+    sparsemap_t *c = sm_create(8192);
+    sparsemap_t *d = sm_create(8192);
+    for (uint64_t i = 0; i < 100; i++) sm_add(c, i);
+    for (uint64_t i = 0; i < 100; i++) sm_add(d, i);
+    EXPECT(sm_equals(c, d), "same content, identical maps equal");
+
+    sm_free(a); sm_free(b); sm_free(c); sm_free(d);
+    return 0;
+}
+
+CASE(test_is_subset)
+{
+    EXPECT(sm_is_subset(NULL, NULL), "empty subset of empty");
+    sparsemap_t *a = sm_create(2048);
+    sparsemap_t *b = sm_create(2048);
+    EXPECT(sm_is_subset(a, b), "empty subset of empty");
+
+    sm_add(b, 42);
+    EXPECT(sm_is_subset(a, b), "empty subset of {42}");
+    EXPECT(!sm_is_subset(b, a), "{42} not subset of empty");
+
+    sm_add(a, 42);
+    EXPECT(sm_is_subset(a, b), "a == b is subset");
+    EXPECT(sm_is_subset(b, a), "b == a is subset (mutual)");
+
+    sm_add(b, 100);
+    EXPECT(sm_is_subset(a, b), "{42} subset of {42, 100}");
+    EXPECT(!sm_is_subset(b, a), "{42, 100} not subset of {42}");
+
+    sm_free(a); sm_free(b);
+    return 0;
+}
+
+CASE(test_overlap)
+{
+    EXPECT(!sm_overlap(NULL, NULL), "NULL has no overlap");
+    sparsemap_t *a = sm_create(2048);
+    sparsemap_t *b = sm_create(2048);
+    EXPECT(!sm_overlap(a, b), "empty/empty no overlap");
+
+    sm_add(a, 42);
+    EXPECT(!sm_overlap(a, b), "a populated, b empty: no overlap");
+    sm_add(b, 100);
+    EXPECT(!sm_overlap(a, b), "disjoint: no overlap");
+    sm_add(b, 42);
+    EXPECT(sm_overlap(a, b), "share bit 42: overlap");
+
+    sm_free(a); sm_free(b);
+    return 0;
+}
+
+CASE(test_membership)
+{
+    sparsemap_t *m = sm_create(2048);
+    EXPECT(sm_membership(m) == SM_EMPTY, "fresh map empty");
+    EXPECT(sm_membership(NULL) == SM_EMPTY, "NULL empty");
+
+    sm_add(m, 42);
+    EXPECT(sm_membership(m) == SM_SINGLETON, "one bit -> singleton");
+    sm_add(m, 100);
+    EXPECT(sm_membership(m) == SM_MULTIPLE, "two bits -> multiple");
+    sm_add(m, 1000);
+    EXPECT(sm_membership(m) == SM_MULTIPLE, "three bits -> multiple");
+
+    sm_free(m);
+    return 0;
+}
+
+CASE(test_singleton_member)
+{
+    sparsemap_t *m = sm_create(2048);
+    EXPECT(sm_singleton_member(m) == SM_IDX_MAX, "empty: IDX_MAX");
+    EXPECT(sm_singleton_member(NULL) == SM_IDX_MAX, "NULL: IDX_MAX");
+
+    sm_add(m, 42);
+    EXPECT(sm_singleton_member(m) == 42, "singleton: returns the bit");
+
+    sm_add(m, 100);
+    EXPECT(sm_singleton_member(m) == SM_IDX_MAX, "two bits: IDX_MAX");
+
+    sm_free(m);
+    return 0;
+}
+
+CASE(test_next_member)
+{
+    sparsemap_t *m = sm_create(8192);
+    EXPECT(sm_next_member(m, SM_IDX_MAX) == SM_IDX_MAX, "empty: IDX_MAX");
+    EXPECT(sm_next_member(NULL, SM_IDX_MAX) == SM_IDX_MAX, "NULL: IDX_MAX");
+
+    sm_add(m, 0);
+    sm_add(m, 100);
+    sm_add(m, 1000);
+    sm_add(m, 4000);
+    EXPECT(sm_next_member(m, SM_IDX_MAX) == 0, "first set bit");
+    EXPECT(sm_next_member(m, 0) == 100, "after 0");
+    EXPECT(sm_next_member(m, 99) == 100, "after 99");
+    EXPECT(sm_next_member(m, 100) == 1000, "after 100");
+    EXPECT(sm_next_member(m, 1000) == 4000, "after 1000");
+    EXPECT(sm_next_member(m, 4000) == SM_IDX_MAX, "past last");
+    EXPECT(sm_next_member(m, 10000) == SM_IDX_MAX, "way past");
+
+    /* RLE chunk path. */
+    sparsemap_t *r = sm_create(8192);
+    for (uint64_t i = 0; i < 4096; i++) sm_add(r, i);
+    EXPECT(sm_next_member(r, SM_IDX_MAX) == 0, "RLE first");
+    EXPECT(sm_next_member(r, 100) == 101, "RLE walk");
+    EXPECT(sm_next_member(r, 4094) == 4095, "RLE last-1");
+    EXPECT(sm_next_member(r, 4095) == SM_IDX_MAX, "past RLE end");
+    sm_free(r);
+
+    sm_free(m);
+    return 0;
+}
+
+CASE(test_prev_member)
+{
+    sparsemap_t *m = sm_create(8192);
+    EXPECT(sm_prev_member(m, SM_IDX_MAX) == SM_IDX_MAX, "empty: IDX_MAX");
+
+    sm_add(m, 0);
+    sm_add(m, 100);
+    sm_add(m, 1000);
+    sm_add(m, 4000);
+    EXPECT(sm_prev_member(m, SM_IDX_MAX) == 4000, "last set bit");
+    EXPECT(sm_prev_member(m, 4000) == 1000, "before 4000");
+    EXPECT(sm_prev_member(m, 1001) == 1000, "before 1001");
+    EXPECT(sm_prev_member(m, 1000) == 100, "before 1000");
+    EXPECT(sm_prev_member(m, 100) == 0, "before 100");
+    EXPECT(sm_prev_member(m, 0) == SM_IDX_MAX, "before first");
+
+    /* RLE chunk path. */
+    sparsemap_t *r = sm_create(8192);
+    for (uint64_t i = 100; i < 200; i++) sm_add(r, i);
+    EXPECT(sm_prev_member(r, SM_IDX_MAX) == 199, "RLE last");
+    EXPECT(sm_prev_member(r, 150) == 149, "RLE walk");
+    EXPECT(sm_prev_member(r, 100) == SM_IDX_MAX, "before RLE start");
+    sm_free(r);
+
+    sm_free(m);
+    return 0;
+}
+
+CASE(test_iteration_idiom)
+{
+    sparsemap_t *m = sm_create(4096);
+    const uint64_t bits[] = { 0, 7, 64, 100, 200, 1000, 1500 };
+    const size_t n = sizeof(bits) / sizeof(bits[0]);
+    for (size_t i = 0; i < n; i++) sm_add(m, bits[i]);
+
+    /* Forward */
+    size_t count = 0;
+    uint64_t i = SM_IDX_MAX;
+    while ((i = sm_next_member(m, i)) != SM_IDX_MAX) {
+        EXPECT(i == bits[count], "forward iteration order");
+        count++;
+    }
+    EXPECT(count == n, "forward visits every bit");
+
+    /* Backward */
+    count = 0;
+    i = SM_IDX_MAX;
+    while ((i = sm_prev_member(m, i)) != SM_IDX_MAX) {
+        EXPECT(i == bits[n - 1 - count], "backward iteration order");
+        count++;
+    }
+    EXPECT(count == n, "backward visits every bit");
+
+    sm_free(m);
+    return 0;
+}
 
 int main(void)
 {
@@ -1250,6 +1451,17 @@ int main(void)
     RUN(test_select_empty_map);
     RUN(test_select_unset_in_rle);
     RUN(test_select_unset_in_partial_rle);
+
+    /* Phase A: predicates and iteration */
+    RUN(test_is_empty);
+    RUN(test_equals);
+    RUN(test_is_subset);
+    RUN(test_overlap);
+    RUN(test_membership);
+    RUN(test_singleton_member);
+    RUN(test_next_member);
+    RUN(test_prev_member);
+    RUN(test_iteration_idiom);
 
     /* scan */
     RUN(test_scan_basic);

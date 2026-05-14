@@ -4279,6 +4279,270 @@ next_chunk:
   return result;
 }
 
+/* -------------------------------------------------------------------
+ * Predicates and member-by-member iteration
+ * (Phase A of the API expansion: see
+ *  .agent/notes/api-gaps-and-tasks.md)
+ * ------------------------------------------------------------------- */
+
+bool
+sm_is_empty(const sparsemap_t *map)
+{
+  if (map == NULL) {
+    return true;
+  }
+  __sm_check_invariants(map);
+  return __sm_get_chunk_count(map) == 0;
+}
+
+/*
+ * Iterate set bits in `chunk` (anchored at absolute `start`),
+ * starting strictly after `lower_excl`.  Returns the first set bit
+ * found, or SM_IDX_MAX if none.  Pass UINT64_MAX as lower_excl to
+ * mean "start before bit 0" (return the first bit at or after start).
+ */
+static uint64_t
+__sm_chunk_next_set(const __sm_chunk_t *chunk, uint64_t start, uint64_t lower_excl)
+{
+  if (__sm_chunk_is_rle(chunk)) {
+    const size_t length = __sm_chunk_rle_get_length(chunk);
+    if (length == 0) {
+      return SM_IDX_MAX;
+    }
+    const uint64_t run_lo = start;
+    const uint64_t run_hi = start + length - 1;
+    if (lower_excl != UINT64_MAX && lower_excl >= run_hi) {
+      return SM_IDX_MAX;
+    }
+    if (lower_excl == UINT64_MAX || lower_excl < run_lo) {
+      return run_lo;
+    }
+    return lower_excl + 1;
+  }
+
+  for (size_t v = 0; v < SM_FLAGS_PER_INDEX; v++) {
+    const uint64_t vec_lo = start + v * SM_BITS_PER_VECTOR;
+    const uint64_t vec_hi = vec_lo + SM_BITS_PER_VECTOR - 1;
+    if (lower_excl != UINT64_MAX && vec_hi <= lower_excl) {
+      continue;
+    }
+    const size_t flags = SM_CHUNK_GET_FLAGS(chunk->m_data[0], v);
+    if (flags == SM_PAYLOAD_NONE || flags == SM_PAYLOAD_ZEROS) {
+      continue;
+    }
+    if (flags == SM_PAYLOAD_ONES) {
+      if (lower_excl == UINT64_MAX || lower_excl < vec_lo) {
+        return vec_lo;
+      }
+      return lower_excl + 1;
+    }
+    /* SM_PAYLOAD_MIXED: scan the payload word for a 1-bit > lower_excl. */
+    const __sm_bitvec_t w = chunk->m_data[1 + __sm_chunk_get_position(chunk, v)];
+    uint64_t skip = 0;
+    if (lower_excl != UINT64_MAX && lower_excl >= vec_lo) {
+      skip = lower_excl - vec_lo + 1;
+      if (skip >= SM_BITS_PER_VECTOR) continue;
+    }
+    const __sm_bitvec_t masked = w & (~(__sm_bitvec_t)0 << skip);
+    if (masked == 0) {
+      continue;
+    }
+    return vec_lo + (uint64_t)__builtin_ctzll(masked);
+  }
+  return SM_IDX_MAX;
+}
+
+/*
+ * Iterate set bits in `chunk` (anchored at absolute `start`),
+ * looking for the highest set bit strictly less than `upper_excl`.
+ */
+static uint64_t
+__sm_chunk_prev_set(const __sm_chunk_t *chunk, uint64_t start, uint64_t upper_excl)
+{
+  if (__sm_chunk_is_rle(chunk)) {
+    const size_t length = __sm_chunk_rle_get_length(chunk);
+    if (length == 0 || upper_excl <= start) {
+      return SM_IDX_MAX;
+    }
+    const uint64_t run_hi = start + length - 1;
+    return upper_excl - 1 < run_hi ? upper_excl - 1 : run_hi;
+  }
+
+  for (ssize_t v = SM_FLAGS_PER_INDEX - 1; v >= 0; v--) {
+    const uint64_t vec_lo = start + (uint64_t)v * SM_BITS_PER_VECTOR;
+    if (vec_lo >= upper_excl) {
+      continue;
+    }
+    const size_t flags = SM_CHUNK_GET_FLAGS(chunk->m_data[0], (size_t)v);
+    if (flags == SM_PAYLOAD_NONE || flags == SM_PAYLOAD_ZEROS) {
+      continue;
+    }
+    const uint64_t vec_hi = vec_lo + SM_BITS_PER_VECTOR - 1;
+    if (flags == SM_PAYLOAD_ONES) {
+      return upper_excl - 1 < vec_hi ? upper_excl - 1 : vec_hi;
+    }
+    /* SM_PAYLOAD_MIXED. */
+    __sm_bitvec_t w = chunk->m_data[1 + __sm_chunk_get_position(chunk, (size_t)v)];
+    if (upper_excl - 1 < vec_hi) {
+      const uint64_t bits_to_keep = upper_excl - vec_lo;
+      if (bits_to_keep == 0) continue;
+      w &= (~(__sm_bitvec_t)0) >> (SM_BITS_PER_VECTOR - bits_to_keep);
+    }
+    if (w == 0) continue;
+    return vec_lo + (uint64_t)(SM_BITS_PER_VECTOR - 1 - (size_t)__builtin_clzll(w));
+  }
+  return SM_IDX_MAX;
+}
+
+uint64_t
+sm_next_member(const sparsemap_t *map, uint64_t prev_idx)
+{
+  if (map == NULL) return SM_IDX_MAX;
+  __sm_check_invariants(map);
+  const size_t count = __sm_get_chunk_count(map);
+  if (count == 0) return SM_IDX_MAX;
+
+  uint8_t *p = __sm_get_chunk_data(map, 0);
+  for (size_t i = 0; i < count; i++) {
+    const __sm_idx_t start = __sm_load_idx((const uint8_t *)p);
+    __sm_chunk_t chunk;
+    __sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
+    const size_t cap = __sm_chunk_get_capacity(&chunk);
+    /* Skip chunks entirely below the lower bound. */
+    if (prev_idx != SM_IDX_MAX && start + cap - 1 <= prev_idx) {
+      p += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&chunk);
+      continue;
+    }
+    const uint64_t hit = __sm_chunk_next_set(&chunk, start, prev_idx);
+    if (hit != SM_IDX_MAX) {
+      return hit;
+    }
+    p += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&chunk);
+  }
+  return SM_IDX_MAX;
+}
+
+uint64_t
+sm_prev_member(const sparsemap_t *map, uint64_t prev_idx)
+{
+  if (map == NULL) return SM_IDX_MAX;
+  __sm_check_invariants(map);
+  const size_t count = __sm_get_chunk_count(map);
+  if (count == 0) return SM_IDX_MAX;
+
+  /* SM_IDX_MAX as input means "start past the end". */
+  const uint64_t upper_excl = (prev_idx == SM_IDX_MAX) ? UINT64_MAX : prev_idx;
+
+  /* Walk forward to the last chunk that starts before upper_excl,
+   * remembering each chunk so we can step back if needed. */
+  uint8_t *p = __sm_get_chunk_data(map, 0);
+  /* Track up to `count` candidate chunk pointers. */
+  uint8_t *last = NULL;
+  size_t last_idx = 0;
+  for (size_t i = 0; i < count; i++) {
+    const __sm_idx_t start = __sm_load_idx((const uint8_t *)p);
+    if (start >= upper_excl) break;
+    last = p;
+    last_idx = i;
+    __sm_chunk_t tmp;
+    __sm_chunk_init(&tmp, p + SM_SIZEOF_OVERHEAD);
+    p += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&tmp);
+  }
+  if (last == NULL) return SM_IDX_MAX;
+
+  /* Step back through chunks until we find a hit. */
+  while (true) {
+    const __sm_idx_t start = __sm_load_idx((const uint8_t *)last);
+    __sm_chunk_t chunk;
+    __sm_chunk_init(&chunk, last + SM_SIZEOF_OVERHEAD);
+    const uint64_t hit = __sm_chunk_prev_set(&chunk, start, upper_excl);
+    if (hit != SM_IDX_MAX) return hit;
+    if (last_idx == 0) break;
+    /* Walk forward to find the chunk preceding `last`. */
+    uint8_t *q = __sm_get_chunk_data(map, 0);
+    for (size_t j = 0; j + 1 < last_idx; j++) {
+      __sm_chunk_t tmp;
+      __sm_chunk_init(&tmp, q + SM_SIZEOF_OVERHEAD);
+      q += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&tmp);
+    }
+    last = q;
+    last_idx--;
+  }
+  return SM_IDX_MAX;
+}
+
+bool
+sm_equals(const sparsemap_t *a, const sparsemap_t *b)
+{
+  const bool a_empty = (a == NULL) || sm_is_empty(a);
+  const bool b_empty = (b == NULL) || sm_is_empty(b);
+  if (a_empty && b_empty) return true;
+  if (a_empty != b_empty) return false;
+
+  uint64_t ia = sm_next_member(a, SM_IDX_MAX);
+  uint64_t ib = sm_next_member(b, SM_IDX_MAX);
+  while (ia != SM_IDX_MAX && ib != SM_IDX_MAX) {
+    if (ia != ib) return false;
+    ia = sm_next_member(a, ia);
+    ib = sm_next_member(b, ib);
+  }
+  return ia == ib;
+}
+
+bool
+sm_is_subset(const sparsemap_t *a, const sparsemap_t *b)
+{
+  if (a == NULL || sm_is_empty(a)) return true;
+  if (b == NULL || sm_is_empty(b)) return false;
+
+  uint64_t ia = sm_next_member(a, SM_IDX_MAX);
+  uint64_t ib = sm_next_member(b, SM_IDX_MAX);
+  while (ia != SM_IDX_MAX) {
+    while (ib != SM_IDX_MAX && ib < ia) {
+      ib = sm_next_member(b, ib);
+    }
+    if (ib != ia) return false;
+    ia = sm_next_member(a, ia);
+  }
+  return true;
+}
+
+bool
+sm_overlap(const sparsemap_t *a, const sparsemap_t *b)
+{
+  if (a == NULL || b == NULL) return false;
+  if (sm_is_empty(a) || sm_is_empty(b)) return false;
+
+  uint64_t ia = sm_next_member(a, SM_IDX_MAX);
+  uint64_t ib = sm_next_member(b, SM_IDX_MAX);
+  while (ia != SM_IDX_MAX && ib != SM_IDX_MAX) {
+    if (ia == ib) return true;
+    if (ia < ib) ia = sm_next_member(a, ia);
+    else         ib = sm_next_member(b, ib);
+  }
+  return false;
+}
+
+sm_membership_t
+sm_membership(const sparsemap_t *map)
+{
+  if (map == NULL || sm_is_empty(map)) return SM_EMPTY;
+  const uint64_t first = sm_next_member(map, SM_IDX_MAX);
+  if (first == SM_IDX_MAX) return SM_EMPTY;
+  const uint64_t second = sm_next_member(map, first);
+  return (second == SM_IDX_MAX) ? SM_SINGLETON : SM_MULTIPLE;
+}
+
+uint64_t
+sm_singleton_member(const sparsemap_t *map)
+{
+  if (map == NULL || sm_is_empty(map)) return SM_IDX_MAX;
+  const uint64_t first = sm_next_member(map, SM_IDX_MAX);
+  if (first == SM_IDX_MAX) return SM_IDX_MAX;
+  const uint64_t second = sm_next_member(map, first);
+  return (second == SM_IDX_MAX) ? first : SM_IDX_MAX;
+}
+
 /**
  * @brief Copy a raw chunk (start offset + descriptor + vectors) into result.
  */

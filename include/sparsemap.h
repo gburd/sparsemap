@@ -647,6 +647,116 @@ uint64_t sm_split(sparsemap_t *map, uint64_t idx, sparsemap_t *other);
  */
 sparsemap_t *sm_offset(const sparsemap_t *map, ssize_t offset);
 
+/* -------------------------------------------------------------------
+ * Predicates and comparisons
+ * ------------------------------------------------------------------- */
+
+/** @brief Test whether a sparsemap is empty (has no set bits).
+ *
+ * O(1) check via the chunk count, faster than `sm_cardinality(map) == 0`
+ * which would walk every chunk.
+ *
+ * @param[in] map  The sparsemap to query.
+ * @returns true if the map has no set bits, false otherwise.
+ */
+bool sm_is_empty(const sparsemap_t *map);
+
+/** @brief Test bit-set equality of two sparsemaps.
+ *
+ * Two maps are equal iff every bit set in one is also set in the other.
+ * The on-disk representations need not be byte-identical: equality is
+ * defined by content, not encoding (so an RLE chunk and an equivalent
+ * sparse chunk encoding the same bits compare equal).
+ *
+ * @param[in] a  First sparsemap (may be NULL, treated as empty).
+ * @param[in] b  Second sparsemap (may be NULL, treated as empty).
+ * @returns true if a and b represent the same bit set.
+ */
+bool sm_equals(const sparsemap_t *a, const sparsemap_t *b);
+
+/** @brief Test whether \a a's bits are a subset of \a b's bits.
+ *
+ * @param[in] a  Candidate subset (NULL is the empty set, always a subset).
+ * @param[in] b  Candidate superset (NULL is the empty set).
+ * @returns true if every bit set in \a a is also set in \a b.
+ */
+bool sm_is_subset(const sparsemap_t *a, const sparsemap_t *b);
+
+/** @brief Test whether two sparsemaps share at least one set bit.
+ *
+ * Short-circuits on first overlap; never allocates the intersection.
+ *
+ * @param[in] a  First sparsemap (NULL or empty produces false).
+ * @param[in] b  Second sparsemap (NULL or empty produces false).
+ * @returns true if a and b have any bit in common.
+ */
+bool sm_overlap(const sparsemap_t *a, const sparsemap_t *b);
+
+/** @brief Membership classification of a sparsemap.
+ *
+ * Useful when callers want to special-case empty or singleton sets
+ * without paying the full cost of `sm_cardinality`.  Stops at the
+ * second set bit; never enumerates the rest.
+ */
+typedef enum {
+    SM_EMPTY      = 0, /**< no bits set */
+    SM_SINGLETON  = 1, /**< exactly one bit set */
+    SM_MULTIPLE   = 2, /**< two or more bits set */
+} sm_membership_t;
+
+/** @brief Classify a sparsemap as empty, singleton, or multi-element.
+ *
+ * @param[in] map  The sparsemap to classify (NULL is empty).
+ * @returns SM_EMPTY, SM_SINGLETON, or SM_MULTIPLE.
+ */
+sm_membership_t sm_membership(const sparsemap_t *map);
+
+/** @brief Return the sole member of a singleton sparsemap.
+ *
+ * @param[in] map  The sparsemap to query.
+ * @returns The 0-based index of the single set bit if `sm_membership(map)
+ *          == SM_SINGLETON`, or SM_IDX_MAX otherwise (empty or multi).
+ */
+uint64_t sm_singleton_member(const sparsemap_t *map);
+
+/* -------------------------------------------------------------------
+ * Member-by-member iteration
+ * ------------------------------------------------------------------- */
+
+/** @brief Find the lowest set bit at index > \a prev_idx.
+ *
+ * Standard idiom for forward iteration:
+ * @code
+ *   uint64_t i = SM_IDX_MAX;  // start sentinel
+ *   while ((i = sm_next_member(map, i)) != SM_IDX_MAX) {
+ *       // i is the next set bit
+ *   }
+ * @endcode
+ *
+ * Pass `SM_IDX_MAX` to start at the first set bit.
+ *
+ * @param[in] map       The sparsemap to scan.
+ * @param[in] prev_idx  Lower exclusive bound (use SM_IDX_MAX for "start at 0").
+ * @returns The next set bit index, or SM_IDX_MAX if none.
+ */
+uint64_t sm_next_member(const sparsemap_t *map, uint64_t prev_idx);
+
+/** @brief Find the highest set bit at index < \a prev_idx.
+ *
+ * Standard idiom for reverse iteration:
+ * @code
+ *   uint64_t i = SM_IDX_MAX;  // start past-the-end
+ *   while ((i = sm_prev_member(map, i)) != SM_IDX_MAX) {
+ *       // i is the previous set bit
+ *   }
+ * @endcode
+ *
+ * @param[in] map       The sparsemap to scan.
+ * @param[in] prev_idx  Upper exclusive bound (use SM_IDX_MAX for "start at end").
+ * @returns The previous set bit index, or SM_IDX_MAX if none.
+ */
+uint64_t sm_prev_member(const sparsemap_t *map, uint64_t prev_idx);
+
 #if defined(__cplusplus)
 }
 #endif
@@ -711,6 +821,17 @@ sparsemap_t *sm_offset(const sparsemap_t *map, ssize_t offset);
 #define sparsemap_difference         sm_difference
 #define sparsemap_split              sm_split
 #define sparsemap_offset             sm_offset
+
+/* Phase A predicate / iteration aliases (no pre-v1.1 equivalents,
+ * but kept under the legacy-aliases umbrella for symmetry). */
+#define sparsemap_is_empty           sm_is_empty
+#define sparsemap_equals             sm_equals
+#define sparsemap_is_subset          sm_is_subset
+#define sparsemap_overlap            sm_overlap
+#define sparsemap_membership         sm_membership
+#define sparsemap_singleton_member   sm_singleton_member
+#define sparsemap_next_member        sm_next_member
+#define sparsemap_prev_member        sm_prev_member
 
 #endif /* !defined(SM_NO_LEGACY_ALIASES) */
 
