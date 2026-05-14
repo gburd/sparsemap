@@ -2909,6 +2909,13 @@ sm_get_capacity(const sparsemap_t *map)
 __attribute__((hot)) bool
 sm_contains(sparsemap_t *map, uint64_t idx)
 {
+  /* Defensive: NULL or empty maps contain nothing.  Accepting NULL is
+   * cheap insurance for consumers that pass the result of
+   * sm_intersection / sm_difference / sm_xor unchecked, which
+   * legitimately return NULL when the result is empty. */
+  if (map == NULL) {
+    return false;
+  }
   __sm_assert(sm_get_size(map) >= SM_SIZEOF_OVERHEAD);
 
   /* Get the __sm_chunk_t which manages this index */
@@ -2968,6 +2975,7 @@ __sm_map_unset(sparsemap_t *map, uint64_t idx, const bool coalesce)
   if ((ssize_t)offset == -1) {
     /* There are no chunks in the map, there is nothing to clear, this is a
      * no-op. */
+    offset = SM_IDX_MAX;  /* gate coalesce off; chunk is uninitialized */
     goto done;
   }
 
@@ -2985,6 +2993,7 @@ __sm_map_unset(sparsemap_t *map, uint64_t idx, const bool coalesce)
     /* Our search resulted in the first chunk that starts after the index but
      * that means there is no chunk that contains this index, so again this is
      * a no-op. */
+    offset = SM_IDX_MAX;  /* gate coalesce off; chunk is uninitialized */
     goto done;
   }
 
@@ -2997,6 +3006,7 @@ __sm_map_unset(sparsemap_t *map, uint64_t idx, const bool coalesce)
      * Our search resulted in a chunk however it's capacity doesn't encompass
      * this index, so again a no-op.
      */
+    offset = SM_IDX_MAX;  /* gate coalesce off; chunk untouched */
     goto done;
   }
 
@@ -6748,7 +6758,11 @@ _qcc_format_chunk(const __sm_idx_t start, const __sm_chunk_t *chunk, const bool 
     char desc_str[(2 * SM_FLAGS_PER_INDEX + 1) * sizeof(wchar_t)] = { 0 };
     char *str = desc_str;
     int mixed = 0;
-    for (int i = 1; i <= SM_FLAGS_PER_INDEX; i++) {
+    /* Loop bound: i in [0, SM_FLAGS_PER_INDEX).  The original
+     * `i <= SM_FLAGS_PER_INDEX` shifted by 2 * 32 = 64, which is UB
+     * on a 64-bit type and tripped UBSan when the diagnostic code
+     * fired on a property-test failure. */
+    for (int i = 0; i < SM_FLAGS_PER_INDEX; i++) {
       const uint8_t flag = SM_CHUNK_GET_FLAGS(desc, i);
       switch (flag) {
       case SM_PAYLOAD_NONE:

@@ -56,12 +56,12 @@ exercise_readonly(sparsemap_t *m)
     (void)sm_contains(m, 65535);
     (void)sm_contains(m, SM_IDX_MAX - 1);
 
-    /* Iteration: visit up to 256 set bits, then stop. */
-    uint64_t idx = 0;
+    /* Iteration: visit up to 256 set bits, then stop.  prev_idx =
+     * SM_IDX_MAX is the documented sentinel for "start at first set". */
+    uint64_t idx = SM_IDX_MAX;
     for (int i = 0; i < 256; i++) {
         idx = sm_next_member(m, idx);
         if (idx == SM_IDX_MAX) break;
-        idx++;
     }
 
     /* Validate: must not crash on malformed input. */

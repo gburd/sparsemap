@@ -164,6 +164,19 @@ matters for on-disk consumers.
   (reserved for future SIMD; ignored in 2.2.x).  Per-map struct grew
   by ~32 bytes; consumers that embed `struct sparsemap` directly
   (vendored test harnesses) must update the duplicate.
+- **v2.3.0** — production-grade hardening release.  No source-level
+  API changes.  Internally:
+  * `sm_open` / `sm_open_copy` / `sm_deserialize` now bounds-check
+    every chunk against the buffer; corrupt or attacker-controlled
+    inputs no longer cause out-of-bounds reads.
+  * `sm_contains(NULL, ...)` returns `false` instead of
+    dereferencing NULL (defensive, lets consumers feed unchecked
+    set-op results through).
+  * Several latent uninitialized-memory and shift-overflow bugs
+    fixed via fuzz and stress testing.  See the v2.3.0 tag for
+    the catalogue.
+  Cross-architecture (aarch64, riscv64, s390x big-endian) and
+  libFuzzer harnesses now run in CI on every push.
 
 ## Future work: SIMD
 

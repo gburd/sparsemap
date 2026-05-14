@@ -2179,6 +2179,720 @@ CASE(test_iteration_idiom)
     return 0;
 }
 
+/* ------------------------------------------------------------------ */
+/*  v2.3 push: coverage of low-hit public surface + differential       */
+/*  property tests (sparsemap vs parallel bool array reference).       */
+/* ------------------------------------------------------------------ */
+
+/* Seedable LCG so failures reproduce deterministically. */
+static uint64_t prng_state = 0x9e3779b97f4a7c15ULL;
+static uint64_t
+prng(void)
+{
+    prng_state ^= prng_state << 13;
+    prng_state ^= prng_state >> 7;
+    prng_state ^= prng_state << 17;
+    return prng_state;
+}
+
+static void
+prng_seed(uint64_t s)
+{
+    if (s == 0) s = 1;
+    prng_state = s;
+}
+
+#define REF_MAX 65536
+
+/* Build a sparsemap and a parallel bool[] from the same random pattern.
+ * Returns the number of bits set.  Uses sm_add_grow so the sparsemap
+ * automatically grows if the initial capacity is exhausted. */
+static size_t
+build_random(sparsemap_t **mp, bool *ref, size_t ref_max, size_t n_bits, uint64_t seed)
+{
+    prng_seed(seed);
+    memset(ref, 0, ref_max * sizeof(*ref));
+    size_t set = 0;
+    for (size_t i = 0; i < n_bits; i++) {
+        uint64_t idx = prng() % ref_max;
+        if (!ref[idx]) {
+            uint64_t rc = sm_add_grow(mp, idx);
+            if (rc == SM_IDX_MAX) continue;  /* grow failed; skip */
+            ref[idx] = true;
+            set++;
+        }
+    }
+    return set;
+}
+
+/* Verify sparsemap and reference agree at every position in [0, ref_max). */
+static int
+check_agrees(const sparsemap_t *m, const bool *ref, size_t ref_max)
+{
+    for (size_t i = 0; i < ref_max; i++) {
+        if (sm_contains((sparsemap_t *)m, i) != ref[i]) {
+            fprintf(stderr, "    disagrees at idx %zu: sm=%d ref=%d\n",
+                    i, sm_contains((sparsemap_t *)m, i) ? 1 : 0, ref[i] ? 1 : 0);
+            return 0;
+        }
+    }
+    return 1;
+}
+
+CASE(test_diff_random_membership)
+{
+    sparsemap_t *m = sm_create(8192);
+    bool *ref = (bool *)calloc(REF_MAX, sizeof(*ref));
+
+    /* Three different density regimes. */
+    for (size_t density = 100; density <= 5000; density *= 7) {
+        sm_clear(m);
+        size_t set = build_random(&m, ref, REF_MAX, density, 0xdeadbeef + density);
+        EXPECT(sm_cardinality(m) == set, "cardinality matches reference");
+        EXPECT(check_agrees(m, ref, REF_MAX), "membership matches reference");
+    }
+
+    free(ref);
+    sm_free(m);
+    return 0;
+}
+
+CASE(test_diff_set_ops)
+{
+    sparsemap_t *a = sm_create(8192);
+    sparsemap_t *b = sm_create(8192);
+    bool *ra = (bool *)calloc(REF_MAX, sizeof(*ra));
+    bool *rb = (bool *)calloc(REF_MAX, sizeof(*rb));
+    bool *expected = (bool *)calloc(REF_MAX, sizeof(*expected));
+
+    build_random(&a, ra, REF_MAX, 800, 0x111);
+    build_random(&b, rb, REF_MAX, 800, 0x222);
+
+    /* sm_union vs ra | rb */
+    {
+        sparsemap_t *u = sm_union(a, b);
+        for (size_t i = 0; i < REF_MAX; i++) expected[i] = ra[i] || rb[i];
+        EXPECT(check_agrees(u, expected, REF_MAX), "union matches");
+        sm_free(u);
+    }
+
+    /* sm_intersection vs ra & rb */
+    {
+        sparsemap_t *x = sm_intersection(a, b);
+        size_t expected_card = 0;
+        for (size_t i = 0; i < REF_MAX; i++) {
+            expected[i] = ra[i] && rb[i];
+            if (expected[i]) expected_card++;
+        }
+        if (x != NULL) {
+            EXPECT(check_agrees(x, expected, REF_MAX), "intersection matches");
+            EXPECT(sm_cardinality(x) == expected_card, "intersection card matches");
+            sm_free(x);
+        } else {
+            EXPECT(expected_card == 0, "intersection NULL only when empty");
+        }
+    }
+
+    /* sm_difference vs ra & ~rb */
+    {
+        sparsemap_t *d = sm_difference(a, b);
+        for (size_t i = 0; i < REF_MAX; i++) expected[i] = ra[i] && !rb[i];
+        EXPECT(check_agrees(d, expected, REF_MAX), "difference matches");
+        sm_free(d);
+    }
+
+    /* sm_xor vs ra ^ rb */
+    {
+        sparsemap_t *x = sm_xor(a, b);
+        size_t expected_card = 0;
+        for (size_t i = 0; i < REF_MAX; i++) {
+            expected[i] = ra[i] != rb[i];
+            if (expected[i]) expected_card++;
+        }
+        EXPECT(check_agrees(x, expected, REF_MAX), "xor matches");
+        EXPECT(sm_xor_cardinality(a, b) == expected_card,
+               "xor_cardinality matches");
+        sm_free(x);
+    }
+
+    /* Cardinality variants without alloc. */
+    {
+        size_t exp_u = 0, exp_i = 0, exp_d = 0;
+        for (size_t i = 0; i < REF_MAX; i++) {
+            if (ra[i] || rb[i]) exp_u++;
+            if (ra[i] && rb[i]) exp_i++;
+            if (ra[i] && !rb[i]) exp_d++;
+        }
+        EXPECT(sm_union_cardinality(a, b) == exp_u, "union_card");
+        EXPECT(sm_intersection_cardinality(a, b) == exp_i, "inter_card");
+        EXPECT(sm_difference_cardinality(a, b) == exp_d, "diff_card");
+    }
+
+    free(ra); free(rb); free(expected);
+    sm_free(a); sm_free(b);
+    return 0;
+}
+
+CASE(test_diff_inplace_ops)
+{
+    sparsemap_t *a = sm_create(8192);
+    sparsemap_t *b = sm_create(8192);
+    bool *ra = (bool *)calloc(REF_MAX, sizeof(*ra));
+    bool *rb = (bool *)calloc(REF_MAX, sizeof(*rb));
+    bool *expected = (bool *)calloc(REF_MAX, sizeof(*expected));
+
+    /* union_inplace */
+    build_random(&a, ra, REF_MAX, 500, 0x333);
+    build_random(&b, rb, REF_MAX, 500, 0x444);
+    sparsemap_t *out = sm_union_inplace(a, b);
+    EXPECT(out != NULL, "union_inplace returns non-NULL");
+    for (size_t i = 0; i < REF_MAX; i++) expected[i] = ra[i] || rb[i];
+    EXPECT(check_agrees(out, expected, REF_MAX), "union_inplace matches");
+    sm_free(out);
+
+    /* intersection_inplace */
+    a = sm_create(8192);
+    build_random(&a, ra, REF_MAX, 500, 0x333);
+    out = sm_intersection_inplace(a, b);
+    if (out != NULL) {
+        for (size_t i = 0; i < REF_MAX; i++) expected[i] = ra[i] && rb[i];
+        EXPECT(check_agrees(out, expected, REF_MAX), "inter_inplace matches");
+        sm_free(out);
+    }
+
+    /* difference_inplace */
+    a = sm_create(8192);
+    build_random(&a, ra, REF_MAX, 500, 0x333);
+    out = sm_difference_inplace(a, b);
+    EXPECT(out != NULL, "diff_inplace returns non-NULL");
+    for (size_t i = 0; i < REF_MAX; i++) expected[i] = ra[i] && !rb[i];
+    EXPECT(check_agrees(out, expected, REF_MAX), "diff_inplace matches");
+    sm_free(out);
+
+    free(ra); free(rb); free(expected);
+    sm_free(b);
+    return 0;
+}
+
+CASE(test_create_helpers)
+{
+    /* sm_create_singleton */
+    sparsemap_t *s = sm_create_singleton(12345);
+    EXPECT(s != NULL, "singleton non-NULL");
+    EXPECT(sm_cardinality(s) == 1, "singleton has 1 bit");
+    EXPECT(sm_contains(s, 12345), "singleton contains its bit");
+    EXPECT(!sm_contains(s, 12346), "singleton has no other bits");
+    sm_free(s);
+
+    /* sm_create_from_array */
+    uint64_t arr[] = {1, 5, 100, 1000, 10000};
+    sparsemap_t *fa = sm_create_from_array(arr, 5);
+    EXPECT(fa != NULL, "from_array non-NULL");
+    EXPECT(sm_cardinality(fa) == 5, "from_array has all bits");
+    for (int i = 0; i < 5; i++) {
+        EXPECT(sm_contains(fa, arr[i]), "from_array contains each bit");
+    }
+    sm_free(fa);
+
+    /* Empty array. */
+    sparsemap_t *fe = sm_create_from_array(NULL, 0);
+    EXPECT(fe != NULL, "empty from_array non-NULL");
+    EXPECT(sm_is_empty(fe), "empty from_array is empty");
+    sm_free(fe);
+
+    /* sm_create_from_range */
+    sparsemap_t *r = sm_create_from_range(100, 105);
+    EXPECT(r != NULL, "from_range non-NULL");
+    EXPECT(sm_cardinality(r) == 5, "from_range cardinality");
+    for (uint64_t i = 100; i < 105; i++) {
+        EXPECT(sm_contains(r, i), "from_range contains each bit");
+    }
+    EXPECT(!sm_contains(r, 99), "from_range excludes start-1");
+    EXPECT(!sm_contains(r, 105), "from_range excludes end");
+    sm_free(r);
+
+    /* Empty range. */
+    sparsemap_t *re = sm_create_from_range(50, 50);
+    EXPECT(re != NULL && sm_is_empty(re), "empty from_range is empty");
+    sm_free(re);
+    return 0;
+}
+
+CASE(test_to_array_round_trip)
+{
+    sparsemap_t *m = sm_create(4096);
+    uint64_t bits[] = {3, 7, 64, 65, 128, 1000, 1500, 2047, 5000};
+    for (size_t i = 0; i < 9; i++) sm_add(m, bits[i]);
+
+    uint64_t out[16];
+    size_t n = 16;
+    sm_to_array(m, out, &n);
+    EXPECT(n == 9, "to_array returns full count");
+    for (size_t i = 0; i < 9; i++) {
+        EXPECT(out[i] == bits[i], "to_array preserves order");
+    }
+
+    /* Truncated output buffer. */
+    n = 3;
+    sm_to_array(m, out, &n);
+    EXPECT(n == 3, "to_array honors out_size cap");
+    EXPECT(out[0] == 3 && out[1] == 7 && out[2] == 64, "to_array first 3");
+
+    sm_free(m);
+    return 0;
+}
+
+CASE(test_extract_range_thorough)
+{
+    sparsemap_t *m = sm_create(8192);
+    for (uint64_t i = 100; i < 200; i++) sm_add(m, i);
+    for (uint64_t i = 1000; i < 1010; i++) sm_add(m, i);
+
+    /* Range fully inside one cluster. */
+    sparsemap_t *e1 = sm_extract_range(m, 110, 120);
+    EXPECT(e1 != NULL && sm_cardinality(e1) == 10, "extract inside cluster");
+    for (uint64_t i = 110; i < 120; i++) EXPECT(sm_contains(e1, i), "e1 bit");
+    sm_free(e1);
+
+    /* Range spanning two clusters. */
+    sparsemap_t *e2 = sm_extract_range(m, 150, 1005);
+    EXPECT(e2 != NULL && sm_cardinality(e2) == 50 + 5, "extract spans clusters");
+    sm_free(e2);
+
+    /* Range outside any cluster. */
+    sparsemap_t *e3 = sm_extract_range(m, 500, 600);
+    EXPECT(e3 == NULL || sm_is_empty(e3), "extract empty");
+    if (e3) sm_free(e3);
+
+    /* Inverted range. */
+    sparsemap_t *e4 = sm_extract_range(m, 200, 100);
+    EXPECT(e4 == NULL || sm_is_empty(e4), "extract inverted");
+    if (e4) sm_free(e4);
+
+    sm_free(m);
+    return 0;
+}
+
+CASE(test_compare_subset_compare)
+{
+    sparsemap_t *a = sm_create(2048);
+    sparsemap_t *b = sm_create(2048);
+    sparsemap_t *c = sm_create(2048);
+
+    for (int i = 0; i < 10; i++) sm_add(a, i * 100);
+    for (int i = 0; i < 10; i++) sm_add(b, i * 100);
+    for (int i = 0; i < 5;  i++) sm_add(c, i * 100);   /* c subset of a */
+
+    EXPECT(sm_compare(a, b) == 0, "equal compares 0");
+    EXPECT(sm_compare(a, c) != 0, "unequal compares non-0");
+
+    EXPECT(sm_subset_compare(c, a) == SM_REL_SUBSET_A, "c is strict subset of a");
+    EXPECT(sm_subset_compare(a, c) == SM_REL_SUBSET_B, "a is strict superset of c");
+    EXPECT(sm_subset_compare(a, b) == SM_REL_EQUAL, "a equals b");
+
+    /* Disjoint maps. */
+    sparsemap_t *d = sm_create(2048);
+    sm_add(d, 50000);
+    EXPECT(sm_subset_compare(d, a) == SM_REL_DIFFERENT,
+           "disjoint -> different");
+
+    sm_free(a); sm_free(b); sm_free(c); sm_free(d);
+    return 0;
+}
+
+CASE(test_split_span)
+{
+    sparsemap_t *m = sm_create(8192);
+    for (uint64_t i = 0; i < 100; i++) sm_add(m, i);
+    for (uint64_t i = 1000; i < 1100; i++) sm_add(m, i);
+
+    /* sm_span: find a run of N consecutive set bits starting from 0. */
+    uint64_t pos = sm_span(m, 0, 50, true);
+    EXPECT(pos == 0, "span finds first 50-bit run at 0");
+
+    /* No 200-bit consecutive run exists. */
+    pos = sm_span(m, 0, 200, true);
+    EXPECT(pos == SM_IDX_MAX, "no 200-bit run -> SM_IDX_MAX");
+
+    /* Run of unset bits. */
+    pos = sm_span(m, 0, 800, false);
+    EXPECT(pos == 100, "unset run starts at 100");
+
+    /* sm_split: move bits >= idx into another map. */
+    sparsemap_t *other = sm_create(8192);
+    uint64_t pivot = sm_split(m, 1000, other);
+    (void)pivot;  /* return value documented as pivot index */
+    EXPECT(sm_cardinality(m) == 100, "left has bits below 1000");
+    EXPECT(sm_cardinality(other) == 100, "right has bits >= 1000");
+    EXPECT(sm_contains(m, 50), "left keeps low");
+    EXPECT(!sm_contains(m, 1050), "left drops high");
+    EXPECT(sm_contains(other, 1050), "right has high");
+    EXPECT(!sm_contains(other, 50), "right has no low");
+
+    sm_free(m); sm_free(other);
+    return 0;
+}
+
+CASE(test_scan_to_buffer)
+{
+    sparsemap_t *m = sm_create(4096);
+    for (uint64_t i = 0; i < 50; i++) sm_add(m, i * 17);
+
+    uint64_t buf[64];
+    size_t pos = 0;
+    /* sm_next_member: prev_idx = SM_IDX_MAX is the sentinel for
+     * "start at the first set bit".  Subsequent calls pass the
+     * previous result. */
+    uint64_t cursor = SM_IDX_MAX;
+    while (pos < 64) {
+        cursor = sm_next_member(m, cursor);
+        if (cursor == SM_IDX_MAX) break;
+        buf[pos++] = cursor;
+    }
+    EXPECT(pos == 50, "scan visits all 50");
+    for (size_t i = 0; i < 50; i++) EXPECT(buf[i] == i * 17, "scan order");
+
+    sm_free(m);
+    return 0;
+}
+
+CASE(test_statistics_thorough)
+{
+    sparsemap_t *m = sm_create(8192);
+    /* Build a map with all four chunk types. */
+    for (uint64_t i = 0; i < 100; i++) sm_add(m, i);          /* mixed */
+    for (uint64_t i = 1000; i < 1500; i++) sm_add(m, i);      /* potentially RLE */
+    sm_add(m, 100000);                                         /* sparse */
+
+    sm_stats_t s;
+    sm_statistics(m, &s);
+    EXPECT(s.bits_set == sm_cardinality(m), "stats card matches");
+    EXPECT(s.chunks_total >= 1, "at least one chunk");
+    EXPECT(s.bytes_used <= s.bytes_capacity, "used <= capacity");
+    sm_free(m);
+    return 0;
+}
+
+/* Randomized stress test: alternates add/remove/contains/range_ops on
+ * pairs of sparsemaps, comparing against bool[] references at every
+ * step.  Designed to hit internal chunk-codec transitions:
+ *
+ *   - empty -> single -> dense -> RLE -> back to dense -> back to empty
+ *   - chunk fill/spill (capacity exhaustion -> __sm_increase_capacity)
+ *   - RLE separation (__sm_separate_rle_chunk on remove inside RLE run)
+ *   - mixed-RLE merges in set ops
+ *   - serialize/deserialize round-trip on randomly-shaped maps
+ */
+CASE(test_stress_randomized)
+{
+    sparsemap_t *m = sm_create(8192);
+    bool *ref = (bool *)calloc(REF_MAX, sizeof(*ref));
+
+    prng_seed(0xC0FFEE);
+    for (int round = 0; round < 12; round++) {
+        size_t target = 50 + (round % 5) * 400;
+        for (size_t op = 0; op < target; op++) {
+            uint64_t r = prng();
+            uint64_t idx = r % REF_MAX;
+            uint64_t which = (r >> 32) % 4;
+            if (which < 2) {
+                if (sm_add_grow(&m, idx) != SM_IDX_MAX) ref[idx] = true;
+            } else if (which == 2) {
+                sm_remove(m, idx);
+                ref[idx] = false;
+            } else {
+                bool got = sm_contains(m, idx);
+                EXPECT(got == ref[idx], "contains matches reference");
+            }
+        }
+
+        size_t expected = 0;
+        for (size_t i = 0; i < REF_MAX; i++) if (ref[i]) expected++;
+        EXPECT(sm_cardinality(m) == expected, "cardinality matches in stress");
+        EXPECT(sm_validate(m), "map remains valid after stress round");
+
+        size_t sn = sm_serialized_size(m);
+        uint8_t *sb = (uint8_t *)malloc(sn);
+        sm_serialize(m, sb, sn);
+        sparsemap_t *r = sm_deserialize(sb, sn);
+        EXPECT(r != NULL, "deserialize round-trips");
+        EXPECT(sm_equals(r, m), "round-trip preserves contents");
+        sm_free(r);
+        free(sb);
+
+        if (round % 3 == 0) {
+            uint64_t lo = (prng() % REF_MAX) & ~63ULL;
+            uint64_t hi = lo + 64 + (prng() % 256);
+            if (hi > REF_MAX) hi = REF_MAX;
+            sm_remove_range(m, lo, hi);
+            for (uint64_t i = lo; i < hi; i++) ref[i] = false;
+        }
+        if (round % 4 == 0) {
+            uint64_t lo = (prng() % REF_MAX) & ~63ULL;
+            uint64_t hi = lo + 64 + (prng() % 256);
+            if (hi > REF_MAX) hi = REF_MAX;
+            sm_flip_range(m, lo, hi);
+            for (uint64_t i = lo; i < hi; i++) ref[i] = !ref[i];
+        }
+    }
+
+    /* Final to_array check. */
+    size_t out_n = sm_cardinality(m);
+    if (out_n > 0) {
+        uint64_t *out = (uint64_t *)malloc(out_n * sizeof(uint64_t));
+        size_t actual_n = out_n;
+        sm_to_array(m, out, &actual_n);
+        EXPECT(actual_n == out_n, "to_array returns full count");
+        size_t ref_idx = 0;
+        for (size_t i = 0; i < REF_MAX && ref_idx < actual_n; i++) {
+            if (ref[i]) {
+                EXPECT(out[ref_idx++] == i, "to_array agrees with ref");
+            }
+        }
+        free(out);
+    }
+
+    /* Pop bits. */
+    for (size_t i = 0; i < 10 && sm_cardinality(m) > 0; i++) {
+        uint64_t lo = sm_pop_first(m);
+        EXPECT(lo != SM_IDX_MAX, "pop_first non-empty");
+        EXPECT(ref[lo], "popped bit was set");
+        ref[lo] = false;
+    }
+    for (size_t i = 0; i < 10 && sm_cardinality(m) > 0; i++) {
+        uint64_t hi = sm_pop_last(m);
+        EXPECT(hi != SM_IDX_MAX, "pop_last non-empty");
+        EXPECT(ref[hi], "popped bit was set");
+        ref[hi] = false;
+    }
+
+    uint64_t h1 = sm_hash(m);
+    uint64_t h2 = sm_hash(m);
+    EXPECT(h1 == h2, "hash deterministic");
+
+    free(ref);
+    sm_free(m);
+    return 0;
+}
+
+/* RLE-targeting stress test: build runs that compress to RLE chunks,
+ * then poke holes to force RLE-to-sparse separations.  Aimed at
+ * __sm_separate_rle_chunk, __sm_flush_carry, __sm_merge_carry,
+ * __sm_chunk_scan, and the sparse<->RLE transition branches that
+ * the set-op stress test doesn't reach. */
+CASE(test_stress_rle_paths)
+{
+    sparsemap_t *m = sm_create(8192);
+
+    /* Build a long RLE-able run, then poke holes inside it. */
+    for (uint64_t i = 0; i < 4096; i++) {
+        if (sm_add_grow(&m, i) == SM_IDX_MAX) break;
+    }
+    EXPECT(sm_cardinality(m) == 4096, "4096 contiguous bits set");
+
+    sm_remove(m, 1500);
+    EXPECT(!sm_contains(m, 1500), "middle bit cleared");
+    EXPECT(sm_contains(m, 1499) && sm_contains(m, 1501), "neighbors kept");
+    EXPECT(sm_validate(m), "valid after RLE separation");
+
+    sm_remove(m, 1000);
+    sm_remove(m, 2000);
+    sm_remove(m, 3000);
+    EXPECT(sm_cardinality(m) == 4096 - 4, "four removals applied");
+    EXPECT(sm_validate(m), "valid after multiple RLE separations");
+
+    sm_add(m, 1500);
+    sm_add(m, 1000);
+    sm_add(m, 2000);
+    sm_add(m, 3000);
+    EXPECT(sm_cardinality(m) == 4096, "all 4096 bits restored");
+    EXPECT(sm_validate(m), "valid after coalesce");
+
+    sparsemap_t *sparse = sm_create(8192);
+    for (uint64_t i = 100; i < 4000; i += 137) sm_add_grow(&sparse, i);
+
+    sparsemap_t *u = sm_union(m, sparse);
+    EXPECT(u != NULL, "RLE-vs-sparse union");
+    EXPECT(sm_validate(u), "union valid");
+    sm_free(u);
+
+    sparsemap_t *isct = sm_intersection(m, sparse);
+    EXPECT(isct != NULL, "RLE-vs-sparse intersection");
+    EXPECT(sm_validate(isct), "intersection valid");
+    sm_free(isct);
+
+    sparsemap_t *xor_ = sm_xor(m, sparse);
+    EXPECT(xor_ != NULL, "RLE-vs-sparse xor");
+    EXPECT(sm_validate(xor_), "xor valid");
+    sm_free(xor_);
+
+    /* Cross-chunk RLE: a run that spans multiple chunks.  Each chunk
+     * holds 2048 bits (8-byte header * 32 flag pairs * 64 bits). */
+    sm_clear(m);
+    static const uint64_t CHUNK_BITS = 2048;
+    for (uint64_t i = 0; i < CHUNK_BITS * 3 + 200; i++) {
+        if (sm_add_grow(&m, i) == SM_IDX_MAX) break;
+    }
+    EXPECT(sm_validate(m), "valid after long cross-chunk RLE");
+    sm_remove(m, CHUNK_BITS - 1);
+    sm_remove(m, CHUNK_BITS);
+    sm_remove(m, CHUNK_BITS + 1);
+    EXPECT(sm_validate(m), "valid after cross-chunk-boundary holes");
+
+    /* sm_or / sm_and / sm_andnot synonyms. */
+    sparsemap_t *o = sm_or(m, sparse);
+    EXPECT(o != NULL && sm_validate(o), "sm_or non-trivial");
+    sm_free(o);
+    sparsemap_t *an = sm_and(m, sparse);
+    if (an) { EXPECT(sm_validate(an), "sm_and non-trivial"); sm_free(an); }
+    sparsemap_t *anot = sm_andnot(m, sparse);
+    if (anot) { EXPECT(sm_validate(anot), "sm_andnot non-trivial"); sm_free(anot); }
+
+    /* sm_open / sm_open_copy paths. */
+    size_t n = sm_get_size(m);
+    uint8_t *raw = (uint8_t *)malloc(n + 64);
+    memcpy(raw, sm_get_data(m), n);
+    sparsemap_t *opened = sm_create(n + 64);
+    memcpy(sm_get_data(opened), raw, n);
+    sm_open(opened, sm_get_data(opened), n + 64);
+    EXPECT(sm_equals(opened, m), "sm_open round-trips RLE-heavy map");
+    sm_free(opened);
+
+    sparsemap_t *copied = sm_open_copy(raw, n, 64);
+    EXPECT(copied != NULL, "sm_open_copy non-NULL");
+    EXPECT(sm_equals(copied, m), "sm_open_copy round-trips");
+    sm_free(copied);
+    free(raw);
+
+    /* Inplace ops on RLE-heavy maps. */
+    sparsemap_t *m2 = sm_create(8192);
+    for (uint64_t i = 0; i < 2000; i++) sm_add_grow(&m2, i);
+    sparsemap_t *r2 = sm_union_inplace(m2, sparse);
+    EXPECT(r2 != NULL && sm_validate(r2), "union_inplace on RLE");
+    sm_free(r2);
+
+    sparsemap_t *m3 = sm_create(8192);
+    for (uint64_t i = 0; i < 2000; i++) sm_add_grow(&m3, i);
+    sparsemap_t *r3 = sm_intersection_inplace(m3, sparse);
+    if (r3 != NULL) { EXPECT(sm_validate(r3), "inter_inplace valid"); sm_free(r3); }
+
+    sparsemap_t *m4 = sm_create(8192);
+    for (uint64_t i = 0; i < 2000; i++) sm_add_grow(&m4, i);
+    sparsemap_t *r4 = sm_difference_inplace(m4, sparse);
+    EXPECT(r4 != NULL && sm_validate(r4), "diff_inplace valid");
+    sm_free(r4);
+
+    size_t remaining = sm_capacity_remaining(m);
+    (void)remaining;
+    /* sm_shrink_to_fit returns the (possibly relocated) pointer; the
+     * original is invalid after this call.  Assign back to m. */
+    m = sm_shrink_to_fit(m);
+    EXPECT(m != NULL, "shrink non-NULL");
+
+    sm_set_allocator((sm_allocator_t){0});
+
+    sm_free(sparse);
+    sm_free(m);
+    return 0;
+}
+
+/* Pair-level set-op stress: hammer union/intersection/difference/xor
+ * across maps with varied densities to exercise the merge driver's
+ * chunk-pair branches. */
+CASE(test_stress_setops)
+{
+    bool *ra = (bool *)calloc(REF_MAX, sizeof(*ra));
+    bool *rb = (bool *)calloc(REF_MAX, sizeof(*rb));
+    bool *exp = (bool *)calloc(REF_MAX, sizeof(*exp));
+
+    struct shape {
+        size_t na, nb;
+        uint64_t seed_a, seed_b;
+        const char *name;
+    } shapes[] = {
+        {  100,   100, 0xa1, 0xb1, "sparse-sparse" },
+        { 5000,  5000, 0xa2, 0xb2, "dense-dense"   },
+        {   10,  5000, 0xa3, 0xb3, "tiny-dense"    },
+        { 2000,    20, 0xa4, 0xb4, "medium-tiny"   },
+        {    0,   500, 0xa5, 0xb5, "empty-medium"  },
+        {  500,     0, 0xa6, 0xb6, "medium-empty"  },
+    };
+
+    for (size_t s = 0; s < sizeof(shapes)/sizeof(shapes[0]); s++) {
+        sparsemap_t *a = sm_create(8192);
+        sparsemap_t *b = sm_create(8192);
+        build_random(&a, ra, REF_MAX, shapes[s].na, shapes[s].seed_a);
+        build_random(&b, rb, REF_MAX, shapes[s].nb, shapes[s].seed_b);
+
+        sparsemap_t *u = sm_union(a, b);
+        for (size_t i = 0; i < REF_MAX; i++) exp[i] = ra[i] || rb[i];
+        size_t exp_u_card = 0;
+        for (size_t i = 0; i < REF_MAX; i++) if (exp[i]) exp_u_card++;
+        if (u != NULL) {
+            EXPECT(check_agrees(u, exp, REF_MAX), "union agrees");
+            sm_free(u);
+        } else {
+            EXPECT(exp_u_card == 0, "union NULL only when result empty");
+        }
+
+        sparsemap_t *isct = sm_intersection(a, b);
+        size_t exp_card = 0;
+        for (size_t i = 0; i < REF_MAX; i++) {
+            exp[i] = ra[i] && rb[i];
+            if (exp[i]) exp_card++;
+        }
+        if (isct != NULL) {
+            EXPECT(check_agrees(isct, exp, REF_MAX), "intersection agrees");
+            sm_free(isct);
+        } else {
+            EXPECT(exp_card == 0, "intersection NULL only when empty");
+        }
+
+        sparsemap_t *d = sm_difference(a, b);
+        size_t exp_d_card = 0;
+        for (size_t i = 0; i < REF_MAX; i++) {
+            exp[i] = ra[i] && !rb[i];
+            if (exp[i]) exp_d_card++;
+        }
+        if (d != NULL) {
+            EXPECT(check_agrees(d, exp, REF_MAX), "difference agrees");
+            sm_free(d);
+        } else {
+            EXPECT(exp_d_card == 0, "difference NULL only when empty");
+        }
+
+        sparsemap_t *x = sm_xor(a, b);
+        size_t exp_x_card = 0;
+        for (size_t i = 0; i < REF_MAX; i++) {
+            exp[i] = ra[i] != rb[i];
+            if (exp[i]) exp_x_card++;
+        }
+        if (x != NULL) {
+            EXPECT(check_agrees(x, exp, REF_MAX), "xor agrees");
+            sm_free(x);
+        } else {
+            EXPECT(exp_x_card == 0, "xor NULL only when empty");
+        }
+
+        size_t e_u = 0, e_i = 0, e_d = 0, e_x = 0;
+        for (size_t i = 0; i < REF_MAX; i++) {
+            if (ra[i] || rb[i]) e_u++;
+            if (ra[i] && rb[i]) e_i++;
+            if (ra[i] && !rb[i]) e_d++;
+            if (ra[i] != rb[i]) e_x++;
+        }
+        EXPECT(sm_union_cardinality(a, b) == e_u, "union_card");
+        EXPECT(sm_intersection_cardinality(a, b) == e_i, "inter_card");
+        EXPECT(sm_difference_cardinality(a, b) == e_d, "diff_card");
+        EXPECT(sm_xor_cardinality(a, b) == e_x, "xor_card");
+
+        sm_free(a); sm_free(b);
+    }
+
+    free(ra); free(rb); free(exp);
+    return 0;
+}
+
 int main(void)
 {
     fprintf(stderr, "test_coverage:\n");
@@ -2337,6 +3051,21 @@ int main(void)
     /* v2.2 additions */
     RUN(test_allocator_alloc_zero);
     RUN(test_allocator_partial_hooks);
+
+    /* v2.3: differential property tests + low-hit public surface */
+    RUN(test_diff_random_membership);
+    RUN(test_diff_set_ops);
+    RUN(test_diff_inplace_ops);
+    RUN(test_create_helpers);
+    RUN(test_to_array_round_trip);
+    RUN(test_extract_range_thorough);
+    RUN(test_compare_subset_compare);
+    RUN(test_split_span);
+    RUN(test_scan_to_buffer);
+    RUN(test_statistics_thorough);
+    RUN(test_stress_randomized);
+    RUN(test_stress_setops);
+    RUN(test_stress_rle_paths);
 
     /* scan */
     RUN(test_scan_basic);
