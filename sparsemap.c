@@ -1,68 +1,47 @@
-/* SPDX-License-Identifier: MIT */
-/*
- * Copyright (c) 2024 Gregory Burd <greg@burd.me>.  All rights reserved.
+/*-------------------------------------------------------------------------
  *
- * Permission is hereby granted, free of charge, to any person obtaining a copy
- * of this software and associated documentation files (the "Software"), to deal
- * in the Software without restriction, including without limitation the rights
- * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
- * copies of the Software, and to permit persons to whom the Software is
- * furnished to do so, subject to the following conditions:
+ * sparsemap.c
+ *    A sparse, compressed bitmap with run-length encoding (RLE).
  *
- * The above copyright notice and this permission notice shall be included in
- * all copies or substantial portions of the Software.
+ * This file is derived from the sparsemap library v2.3.0 by Gregory Burd,
+ * adapted for use within PostgreSQL.  The original code is MIT-licensed.
  *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
- * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
+ * Adaptations for PostgreSQL:
+ *   - Uses palloc/palloc0/pfree/repalloc instead of malloc/calloc/free/realloc
+ *   - Uses pg_popcount64() instead of popcountll/__builtin_popcountll
+ *   - Uses pg_rightmost_one_pos64() instead of __builtin_ctzll
+ *   - Uses pg_attribute_always_inline instead of __attribute__((always_inline))
+ *   - Uses Assert() instead of assert()
+ *   - Uses uint8/uint32/uint64/int64 PG types
+ *   - Struct definition exposed in sparsemap.h for embedded use
+ *   - Default allocator routes through palloc/pfree when hooks are NULL
+ *
+ * Copyright (c) 2024 Gregory Burd <greg@burd.me>
+ * Portions Copyright (c) 1996-2026, PostgreSQL Global Development Group
+ *
+ * src/backend/lib/sparsemap.c
+ *
+ *-------------------------------------------------------------------------
  */
+#include "postgres.h"
 
-#include <sys/types.h>
-
-#include <errno.h>
-#include "sm_portability.h"
-#include "sparsemap.h"
-#include <stdarg.h>
-#include <stdbool.h>
-#include <stddef.h>
-#include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
-#ifdef SPARSEMAP_DIAGNOSTIC
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wpedantic"
-#pragma GCC diagnostic ignored "-Wvariadic-macros"
-#define __sm_diag(format, ...) __sm_diag_(__FILE__, __LINE__, __func__, format, ##__VA_ARGS__)
-#pragma GCC diagnostic pop
-void __attribute__((format(printf, 4, 5))) __sm_diag_(const char *file, const int line, const char *func, const char *format, ...)
-{
-  va_list args = { 0 };
-  fprintf(stderr, "%s:%d:%s(): ", file, line, func);
-  va_start(args, format);
-  vfprintf(stderr, format, args);
-  va_end(args);
-}
+#include "lib/sparsemap.h"
+#include "port/pg_bitutils.h"
 
-#define __sm_assert(expr) \
-  if (!(expr))            \
-  fprintf(stderr, "%s:%d:%s(): assertion failed! %s\n", __FILE__, __LINE__, __func__, #expr)
-
-#define __sm_when_diag(expr) \
-  if (1)                     \
-  expr
+/* Diagnostic macros - use PostgreSQL's Assert/elog infrastructure */
+#ifdef USE_ASSERT_CHECKING
+#define __sm_assert(expr) Assert(expr)
 #else
-#define __sm_diag(format, ...) ((void)0)
 #define __sm_assert(expr) ((void)0)
+#endif
+
+#define __sm_diag(format, ...) elog(DEBUG5, format, ##__VA_ARGS__)
 #define __sm_when_diag(expr) \
   if (0)                     \
   expr
-#endif
+
 
 #define IS_8_BYTE_ALIGNED(addr) (((uintptr_t)(addr)&0x7) == 0)
 
@@ -71,8 +50,30 @@ void __attribute__((format(printf, 4, 5))) __sm_diag_(const char *file, const in
  * understand __builtin_expect; on gcc/clang they let the optimizer
  * lay out the hot path inline and push the cold path off the icache.
  */
-#define SM_LIKELY(cond)   __builtin_expect(!!(cond), 1)
-#define SM_UNLIKELY(cond) __builtin_expect(!!(cond), 0)
+#define SM_LIKELY(cond)   likely(cond)
+#define SM_UNLIKELY(cond) unlikely(cond)
+
+/*
+ * Portable software prefetch hint.  __builtin_prefetch is a gcc/clang
+ * extension; on MSVC use _mm_prefetch (x86/x64) or __prefetch
+ * (arm/arm64), and fall back to a no-op on unrecognized toolchains.
+ * Sparsemap uses these as hot-loop optimizations; dropping them is a
+ * perf hint, not a correctness change.
+ */
+#if defined(__GNUC__) || defined(__clang__)
+#define SM_PREFETCH(addr) __builtin_prefetch((addr), 0, 1)
+#elif defined(_MSC_VER)
+#include <intrin.h>
+#if defined(_M_ARM64) || defined(_M_ARM)
+#define SM_PREFETCH(addr) __prefetch((const void *) (addr))
+#elif defined(_M_X64) || defined(_M_IX86)
+#define SM_PREFETCH(addr) _mm_prefetch((const char *) (addr), _MM_HINT_T0)
+#else
+#define SM_PREFETCH(addr) ((void) 0)
+#endif
+#else
+#define SM_PREFETCH(addr) ((void) 0)
+#endif
 
 typedef uint64_t __sm_bitvec_t;
 typedef uint32_t __sm_idx_t;
@@ -89,13 +90,36 @@ typedef uint32_t __sm_idx_t;
  * address.  Without this typedef, accesses through chunk->m_data trip
  * UBSan and would trap on strict-alignment cpus.
  *
- * gcc and clang lower the unaligned access to whatever the platform
- * requires (a single load on x86_64, two byte-shuffled half-loads on
- * a strict-alignment cpu).  Zero overhead on the common targets.
+ * Portability:
+ *   gcc/clang: __attribute__((aligned(1))) on a typedef tells the
+ *     compiler "treat this type as 1-byte aligned"; pointer deref
+ *     emits unaligned-safe code (single load on x86_64; ldur on
+ *     aarch64; byte-shuffled half-loads on strict-alignment ARMv5).
+ *   MSVC: __unaligned is the equivalent keyword; placed before the
+ *     base type in a typedef.  __declspec(align(N)) cannot reduce
+ *     alignment below the natural alignment, so it is the wrong
+ *     tool here.
+ *   Other compilers: fall back to natural alignment (which is fine
+ *     on platforms whose CPU tolerates unaligned 64-bit loads).
  */
+#if defined(_MSC_VER)
+typedef __unaligned uint64_t __sm_bitvec_unaligned_t;
+#elif defined(__GNUC__) || defined(__clang__)
 typedef uint64_t __sm_bitvec_unaligned_t __attribute__((aligned(1)));
+#else
+typedef uint64_t __sm_bitvec_unaligned_t;
+#endif
 
-typedef struct __attribute__((aligned(1))) {
+/*
+ * __sm_chunk_t holds a pointer into the map buffer.  No alignment
+ * attribute is needed on the struct itself: the unalignedness is a
+ * property of what m_data points at, not of the struct.  Earlier
+ * versions decorated this with pg_attribute_aligned(1); that was
+ * defensive on gcc and outright invalid on MSVC, where
+ * __declspec(align(N)) cannot reduce alignment below the natural
+ * alignment.
+ */
+typedef struct {
   __sm_bitvec_unaligned_t *m_data;
 } __sm_chunk_t;
 
@@ -154,33 +178,6 @@ __sm_store_u32(uint8_t *p, const uint32_t v)
   memcpy(p, &v, sizeof(v));
 }
 
-// NOTE: When using in production feel free to remove this section of test code.
-#ifdef SPARSEMAP_TESTING
-#include <inttypes.h>
-char *QCC_showSparsemap(void *value, int len);
-char *QCC_showChunk(void *value, int len);
-static char *_qcc_format_chunk(__sm_idx_t start, const __sm_chunk_t *chunk, bool none);
-
-static void __attribute__((format(printf, 2, 3), unused))
-__sm_diag_map(sparsemap_t *map, const char *fmt, ...)
-{
-  va_list args = { 0 };
-  va_start(args, fmt);
-  vfprintf(stdout, fmt, args);
-  va_end(args);
-  const char *s = QCC_showSparsemap(map, 0);
-  fprintf(stdout, "\n%s\n", s);
-  free((void *)s);
-}
-
-static void __attribute__((unused))
-__sm_diag_chunk(const char *msg, __sm_chunk_t *chunk)
-{
-  const char *s = QCC_showChunk(chunk, 0);
-  fprintf(stdout, "%s\n%s\n", msg, s);
-  free((char *)s);
-}
-#endif
 
 enum __SM_CHUNK_INFO {
   /* metadata overhead: 4 bytes for __sm_chunk_t count */
@@ -257,7 +254,7 @@ typedef struct {
     __sm_chunk_t c;
   } ex[2]; // 0 is "on the left", 1 is "on the right"
 
-  _Alignas(__sm_bitvec_t) uint8_t buf[(SM_SIZEOF_OVERHEAD * (unsigned long)3) + (sizeof(__sm_bitvec_t) * 6)];
+  pg_attribute_aligned(8) uint8_t buf[(SM_SIZEOF_OVERHEAD * (unsigned long)3) + (sizeof(__sm_bitvec_t) * 6)];
   size_t expand_by;
   size_t count;
 } __sm_chunk_sep_t;
@@ -321,7 +318,7 @@ typedef struct {
  * @param[in] chunk The chunk to check.
  * @return True if the chunk is flagged as RLE encoded, false otherwise.
  */
-static inline __attribute__((always_inline)) bool
+pg_attribute_always_inline static bool
 __sm_chunk_is_rle(const __sm_chunk_t *chunk)
 {
   const __sm_bitvec_t w = chunk->m_data[0];
@@ -502,91 +499,34 @@ __sm_chunk_get_run_length(const __sm_chunk_t *chunk)
   return length;
 }
 
-struct __attribute__((aligned(8))) sparsemap {
-  size_t m_capacity;  /* The total size of m_data */
-  size_t m_data_used; /* The used size of m_data */
-  uint8_t *m_data;    /* The serialized bitmap data */
-  /*
-   * Tail-chunk cursor (in-memory only; not serialized).
-   *
-   * The chunk-locator __sm_get_chunk_offset() is the dominant cost
-   * for ascending-order builds and forward iteration when the map
-   * has many chunks (high-cardinality TID postings can produce
-   * 100k+ single-bit chunks).  Without a cursor, every lookup walks
-   * from chunk 0 -- O(N) per call, O(N^2) per build.
-   *
-   * The cursor caches the (offset, chunk_index, start_idx) of the
-   * last chunk returned by __sm_get_chunk_offset().  When the next
-   * lookup's idx is >= that chunk's start, we resume the walk from
-   * the cursor instead of from the head.  For ascending workloads
-   * this collapses each lookup to O(1) amortized.
-   *
-   * Invalidation: any operation that shifts chunk bytes at or
-   * before the cursor's offset.  See __sm_insert_data and
-   * __sm_remove_data for the policy.
-   *
-   * In-memory only.  sm_init / sm_open / sm_clear / sm_create all
-   * start with m_cursor_valid = 0 (zero-init covers most paths).
-   * sm_copy / sm_owned_copy / sm_deserialize get fresh maps and
-   * therefore fresh cursors.
-   *
-   * NB: the SHARED on-disk format is m_data; the cursor lives only
-   * in this in-memory struct and is not part of any serialization.
-   */
-  size_t   m_cursor_offset;
-  size_t   m_cursor_chunk_index;
-  uint32_t m_cursor_start_idx;
-  uint8_t  m_cursor_valid;
-  /*
-   * m_alloc_kind tags how m_data was provisioned.  See enum
-   * sm_alloc_kind below.  Used by sm_set_data_size and
-   * sm_free to know whether the library may realloc / free
-   * the buffer.  Pre-v1 maps that predate this field would have
-   * m_alloc_kind == SM_OWNED_CONTIGUOUS == 0 by zero-initialization,
-   * which matches their actual lineage (everyone allocated via
-   * sparsemap()).
-   */
-  uint8_t m_alloc_kind;
-  /*
-   * Per-map allocator (v2.2+).  Held by value: the map carries its
-   * own copy of the hooks so the caller's source struct can go out
-   * of scope without invalidating the map.
-   *
-   * Sentinel: m_allocator.alloc == NULL means "use libc".  Other
-   * function pointers are checked individually at each call site,
-   * so an allocator can implement only a subset and let libc handle
-   * the rest.
-   */
-  sm_allocator_t m_allocator;
-};
 
 /*
  * Allocation lineage.  Tracked per sparsemap_t so the grow / dispose
- * paths know what they may safely realloc or free.
+ * paths know what they may safely repalloc or pfree.
  *
- * SM_OWNED_CONTIGUOUS  Single calloc(1, sizeof(sparsemap_t) + size).
+ * SM_OWNED_CONTIGUOUS  Single palloc0(sizeof(sparsemap_t) + size).
  *                      Both the struct and m_data live in one heap
  *                      block; m_data sits immediately after the struct.
  *                      Set by sparsemap() and sm_copy().  May be
- *                      grown via realloc, and disposed with free(map).
+ *                      grown via repalloc, and disposed with pfree(map).
  *                      Default for zero-initialized memory.
  *
  * SM_WRAPPED           m_data points to a buffer the caller owns.  Set
  *                      by sm_wrap(), sm_init(), and
- *                      sm_open().  Cannot be realloc'd in place;
+ *                      sm_open().  Cannot be repalloc'd in place;
  *                      sm_set_data_size with data == NULL will
  *                      transparently promote to SM_OWNED_SPLIT by
  *                      allocating a fresh library-owned buffer and
  *                      copying the m_data_used prefix into it.  The
  *                      caller's original buffer is left untouched and
- *                      remains theirs to free.
+ *                      remains theirs to pfree.
  *
  * SM_OWNED_SPLIT       The struct is heap-allocated; m_data is
  *                      separately heap-allocated and owned by the
  *                      library (typically the result of promoting an
  *                      SM_WRAPPED map via grow).  Disposed with
- *                      sm_free, which does free(m_data) +
- *                      free(map).
+ *                      sm_free, which does pfree(m_data) +
+ *                      pfree(map).
  */
 enum sm_alloc_kind {
   SM_OWNED_CONTIGUOUS = 0,
@@ -597,14 +537,15 @@ enum sm_alloc_kind {
 /* -------------------------------------------------------------------
  * Allocator hooks (v2.2+ pass-by-value)
  *
- * Sparsemap routes every malloc/realloc/free through these helpers.
- * Each helper takes a const sm_allocator_t * which points at either
- * a per-map field (&map->m_allocator) or the global default.
+ * Sparsemap routes every allocation through these helpers.  Each
+ * helper takes a const sm_allocator_t * which points at either a
+ * per-map field (&map->m_allocator) or the global default.
  *
  * Within an allocator any individual function pointer may be NULL;
- * the helper falls back to libc for that operation.  This means an
- * all-zero sm_allocator_t means "use libc throughout", and a partial
- * allocator (e.g. only `free` overridden) works as expected.
+ * the helper falls back to PostgreSQL's palloc/pfree/repalloc for
+ * that operation.  This means an all-zero sm_allocator_t means
+ * "use palloc throughout", and a partial allocator (e.g. only
+ * `free` overridden) works as expected.
  * ------------------------------------------------------------------- */
 
 static sm_allocator_t __sm_g_allocator = {0};
@@ -621,7 +562,7 @@ __sm_alloc(const sm_allocator_t *a, size_t n)
   if (a != NULL && a->alloc != NULL) {
     return a->alloc(n, a->aux);
   }
-  return malloc(n);
+  return palloc(n);
 }
 
 static inline void *
@@ -630,14 +571,16 @@ __sm_alloc_zero(const sm_allocator_t *a, size_t n)
   if (a != NULL && a->alloc_zero != NULL) {
     return a->alloc_zero(n, a->aux);
   }
-  /* Fall back to alloc + memset.  Use the same allocator's alloc()
-   * (so a per-map override stays in-family) and only fall through to
-   * libc if even that one is NULL. */
-  void *p = __sm_alloc(a, n);
-  if (p != NULL) {
-    memset(p, 0, n);
+  /* Fall back: if a custom alloc hook is set, use it + memset.
+   * Otherwise use PostgreSQL's palloc0 for the default path. */
+  if (a != NULL && a->alloc != NULL) {
+    void *p = a->alloc(n, a->aux);
+    if (p != NULL) {
+      memset(p, 0, n);
+    }
+    return p;
   }
-  return p;
+  return palloc0(n);
 }
 
 static inline void *
@@ -646,18 +589,22 @@ __sm_realloc(const sm_allocator_t *a, void *p, size_t n)
   if (a != NULL && a->realloc != NULL) {
     return a->realloc(p, n, a->aux);
   }
-  return realloc(p, n);
+  return repalloc(p, n);
 }
 
 static inline void
 __sm_free(const sm_allocator_t *a, void *p)
 {
+  if (p == NULL) {
+    return;
+  }
   if (a != NULL && a->free != NULL) {
     a->free(p, a->aux);
     return;
   }
-  free(p);
+  pfree(p);
 }
+
 
 
 /*
@@ -743,7 +690,7 @@ __sm_chunk_calc_vector_size(const uint8_t b)
  * @param[in] bv The bit vector index within the chunk.
  * @return The position within the chunk's data array corresponding to the specified bit vector index.
  */
-static inline __attribute__((always_inline)) size_t
+pg_attribute_always_inline static size_t
 __sm_chunk_get_position(const __sm_chunk_t *chunk, size_t bv)
 {
   /* Defense-in-depth: callers compute `bv` as `idx / SM_BITS_PER_VECTOR`
@@ -808,7 +755,7 @@ __sm_chunk_init(__sm_chunk_t *chunk, uint8_t *data)
  * @param[in] chunk The chunk whose capacity is to be determined.
  * @return The capacity of the chunk.
  */
-static inline __attribute__((always_inline)) size_t
+pg_attribute_always_inline static size_t
 __sm_chunk_get_capacity(const __sm_chunk_t *chunk)
 {
   /* Handle RLE which encodes the capacity in the vector. */
@@ -919,7 +866,7 @@ __sm_chunk_is_empty(const __sm_chunk_t *chunk)
  * @param[in] chunk The chunk whose size is to be determined.
  * @return The size of the chunk in bytes.
  */
-static inline __attribute__((always_inline)) size_t
+pg_attribute_always_inline static size_t
 __sm_chunk_get_size(const __sm_chunk_t *chunk)
 {
   /* At least one __sm_bitvec_t is required for the flags (m_data[0]) */
@@ -944,7 +891,7 @@ __sm_chunk_get_size(const __sm_chunk_t *chunk)
  * @param[in] idx The index of the bit to check within the chunk.
  * @return True if the bit at the specified index is set, false otherwise.
  */
-static inline __attribute__((always_inline)) bool
+pg_attribute_always_inline static bool
 __sm_chunk_is_set(const __sm_chunk_t *chunk, const size_t idx)
 {
   if (SM_UNLIKELY(__sm_chunk_is_rle(chunk))) {
@@ -1218,7 +1165,7 @@ __sm_chunk_select(const __sm_chunk_t *chunk, ssize_t n, ssize_t *offset, const b
         __sm_bitvec_t target_bits = value ? w : ~w;
         __sm_bitvec_t remaining = target_bits;
         while (remaining) {
-          int k = SM_CTZ64(remaining);
+          int k = pg_rightmost_one_pos64(remaining);
           if (n == 0) {
             *offset = -1;
             return ret + (size_t)k;
@@ -1380,7 +1327,7 @@ __sm_chunk_rank(__sm_chunk_rank_t *rank, const bool value, const __sm_chunk_t *c
             to -= SM_BITS_PER_VECTOR;
             mask = from == 0 ? UINT64_MAX : ~(UINT64_MAX >> (SM_BITS_PER_VECTOR - (from >= 64 ? 64 : from)));
             mw = (value ? w : ~w) & mask;
-            pc = SM_POPCOUNT64(mw);
+            pc = pg_popcount64(mw);
             amt += pc;
             from = from > SM_BITS_PER_VECTOR ? from - SM_BITS_PER_VECTOR : 0;
           } else {
@@ -1390,7 +1337,7 @@ __sm_chunk_rank(__sm_chunk_rank_t *rank, const bool value, const __sm_chunk_t *c
             /* Create a mask for the range [from, to] and use popcount. */
             mask = to_mask & from_mask;
             mw = (value ? w : ~w) & mask;
-            pc = SM_POPCOUNT64(mw);
+            pc = pg_popcount64(mw);
             amt += pc;
             rank->rem = mw >> (from > 63 ? 63 : from);
             goto done;
@@ -1504,7 +1451,7 @@ __sm_chunk_scan(const __sm_chunk_t *chunk, const __sm_idx_t start, void (*scanne
         __sm_bitvec_t remaining = chunk->m_data[1 + __sm_chunk_get_position(chunk, (i * SM_FLAGS_PER_INDEX_BYTE) + j)];
         size_t n = 0;
         while (remaining) {
-          int b = SM_CTZ64(remaining);
+          int b = pg_rightmost_one_pos64(remaining);
           if (skip > 0) {
             skip--;
             skipped++;
@@ -1748,49 +1695,7 @@ __sm_get_size_impl(const sparsemap_t *map)
  * @param[in] map The sparse map to search within.
  * @param[in] idx The index to find the corresponding chunk offset for.
  * @return The offset of the chunk if found, otherwise -1 if no appropriate chunk is found.
- *
- * Tail-chunk cursor optimization:
- *
- * The original implementation walked from chunk 0 on every call.
- * For a map with N chunks this is O(N) per lookup.  Build paths
- * that call sm_set for every index in ascending order are then
- * O(N^2), which dominates large-cardinality builds.  We cache
- * the (offset, chunk_index, start) of the most-recently-returned
- * chunk in three in-memory-only fields on the sparsemap_t struct,
- * and resume the walk from there when the new idx is at or after
- * the cursor's chunk start.  For random-order inserts the cursor's
- * preconditions don't hold and we fall back to a full walk.
- *
- * The cursor is invalidated whenever __sm_insert_data or
- * __sm_remove_data shifts bytes at or before the cached offset,
- * and reset by sm_clear / sm_init / sm_open / sm_open_copy /
- * sm_create / sm_copy / sm_owned_copy / sm_deserialize /
- * __sm_replace_buffer / sm_split (both halves) / __sm_coalesce_map.
- *
- * The cursor is purely an in-memory speedup; the on-disk format
- * is unchanged, and a freshly-deserialized map starts with an
- * invalid cursor and rebuilds it on first use.
  */
-static inline void
-__sm_cursor_invalidate(const sparsemap_t *map_ro)
-{
-  /* Cursor lives on the in-memory struct only; const-cast is safe
-   * because we never publish a const pointer that aliases the
-   * mutable fields outside the library. */
-  sparsemap_t *m = (sparsemap_t *)map_ro;
-  m->m_cursor_valid = 0;
-}
-
-static inline void
-__sm_cursor_record(const sparsemap_t *map_ro, size_t offset, size_t chunk_index, __sm_idx_t start)
-{
-  sparsemap_t *m = (sparsemap_t *)map_ro;
-  m->m_cursor_offset = offset;
-  m->m_cursor_chunk_index = chunk_index;
-  m->m_cursor_start_idx = start;
-  m->m_cursor_valid = 1;
-}
-
 static ssize_t
 __sm_get_chunk_offset(const sparsemap_t *map, const uint64_t idx)
 {
@@ -1800,25 +1705,10 @@ __sm_get_chunk_offset(const sparsemap_t *map, const uint64_t idx)
     return -1;
   }
 
-  uint8_t *base = __sm_get_chunk_data(map, 0);
-  uint8_t *p = base;
-  size_t i = 0;
+  uint8_t *start = __sm_get_chunk_data(map, 0);
+  uint8_t *p = start;
 
-  /*
-   * Cursor fast-path.  If the cursor is valid, references a
-   * still-existing chunk, and the lookup idx is at or after the
-   * cursor's chunk start, resume the walk from the cursor instead
-   * of from the head.  Otherwise (cursor stale or idx earlier than
-   * the cursor's chunk start) fall through to a full walk from 0.
-   */
-  if (map->m_cursor_valid
-      && map->m_cursor_chunk_index < count
-      && idx >= map->m_cursor_start_idx) {
-    p = base + map->m_cursor_offset;
-    i = map->m_cursor_chunk_index;
-  }
-
-  for (; i < count - 1; i++) {
+  for (size_t i = 0; i < count - 1; i++) {
     const __sm_idx_t s = __sm_load_idx((const uint8_t *)p);
     __sm_chunk_t chunk;
     __sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
@@ -1826,17 +1716,11 @@ __sm_get_chunk_offset(const sparsemap_t *map, const uint64_t idx)
     if (idx >= s + __sm_chunk_get_capacity(&chunk)) {
       p += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&chunk);
     } else {
-      __sm_cursor_record(map, (size_t)(p - base), i, s);
-      return p - base;
+      break;
     }
   }
 
-  /* Fell through: p points at the last chunk (count - 1). */
-  {
-    const __sm_idx_t s = __sm_load_idx((const uint8_t *)p);
-    __sm_cursor_record(map, (size_t)(p - base), count - 1, s);
-  }
-  return p - base;
+  return p - start;
 }
 
 /**
@@ -1893,19 +1777,6 @@ __sm_insert_data(sparsemap_t *map, const size_t offset, const uint8_t *buffer, c
   __sm_assert(map->m_data_used + buffer_size <= map->m_capacity);
   __sm_assert(offset <= map->m_data_used);
 
-  /*
-   * Invalidate the tail-chunk cursor if the insertion lands at or
-   * before the cursor's chunk.  Insertions strictly after
-   * m_cursor_offset either grow the cursor's chunk (offset inside
-   * its body) or appear in a later chunk -- either way the cursor's
-   * (offset, chunk_index, start) remain accurate.  Insertions at
-   * exactly m_cursor_offset displace the cursor's chunk forward,
-   * so we must invalidate.
-   */
-  if (map->m_cursor_valid && offset <= map->m_cursor_offset) {
-    map->m_cursor_valid = 0;
-  }
-
   uint8_t *p = __sm_get_chunk_data(map, offset);
   memmove(p + buffer_size, p, map->m_data_used - offset);
   memcpy(p, buffer, buffer_size);
@@ -1926,16 +1797,6 @@ static void
 __sm_remove_data(sparsemap_t *map, const size_t offset, const size_t gap_size)
 {
   __sm_assert(map->m_data_used >= gap_size);
-  /*
-   * Mirror __sm_insert_data: removals at or before the cursor
-   * either erase the cursor's chunk header outright (offset ==
-   * cursor) or shift it leftward (offset < cursor).  In either
-   * case the cached (offset, chunk_index) is no longer trustworthy.
-   * Removals strictly after the cursor leave it valid.
-   */
-  if (map->m_cursor_valid && offset <= map->m_cursor_offset) {
-    map->m_cursor_valid = 0;
-  }
   uint8_t *p = __sm_get_chunk_data(map, offset);
   memmove(p, p + gap_size, map->m_data_used - offset - gap_size);
   map->m_data_used -= gap_size;
@@ -2534,7 +2395,6 @@ sm_clear(sparsemap_t *map)
   }
   memset(map->m_data, 0, map->m_capacity);
   map->m_data_used = SM_SIZEOF_OVERHEAD;
-  map->m_cursor_valid = 0;
   __sm_set_chunk_count(map, 0);
 }
 
@@ -2663,8 +2523,7 @@ sm_owned_copy(const sparsemap_t *map)
     return NULL;
   }
   out->m_data_used = map->m_data_used;
-  /* m_capacity is already cap; m_alloc_kind is SM_OWNED_CONTIGUOUS.
-   * Cursor was zeroed by sm_create's calloc; leave it invalid. */
+  /* m_capacity is already cap; m_alloc_kind is SM_OWNED_CONTIGUOUS. */
   if (cap > 0 && map->m_data != NULL) {
     memcpy(out->m_data, map->m_data, cap);
   }
@@ -2689,8 +2548,7 @@ sm_copy(const sparsemap_t *other)
   if (map) {
     map->m_capacity = other->m_capacity;
     map->m_data_used = other->m_data_used;
-    /* m_alloc_kind is already SM_OWNED_CONTIGUOUS from sparsemap().
-     * Cursor stays at its zero-initialized invalid state. */
+    /* m_alloc_kind is already SM_OWNED_CONTIGUOUS from sparsemap(). */
     memcpy(map->m_data, other->m_data, cap);
   }
   return map;
@@ -2738,7 +2596,6 @@ sm_init(sparsemap_t *map, uint8_t *data, const size_t size)
   map->m_data = data;
   map->m_data_used = 0;
   map->m_capacity = size;
-  map->m_cursor_valid = 0;
   /*
    * Caller-allocated struct + caller-allocated buffer.  The buffer is
    * not owned by the library; sm_set_data_size will treat any
@@ -2764,7 +2621,6 @@ void
 sm_open(sparsemap_t *map, uint8_t *data, const size_t size)
 {
   map->m_data = data;
-  map->m_cursor_valid = 0;
   /*
    * Set m_capacity and a temporary m_data_used = m_capacity *before*
    * calling __sm_get_size_impl.  __sm_get_size_impl walks chunks via
@@ -2867,8 +2723,6 @@ sm_set_data_size(sparsemap_t *map, uint8_t *data, const size_t size)
     }
     map->m_capacity = size;
     map->m_alloc_kind = SM_WRAPPED;
-    /* New buffer (caller-supplied) means cursor offsets are stale. */
-    map->m_cursor_valid = 0;
     return map;
   }
 
@@ -2908,7 +2762,6 @@ sm_set_data_size(sparsemap_t *map, uint8_t *data, const size_t size)
      */
     if (m->m_data_used > size) {
       m->m_data_used = size;
-      m->m_cursor_valid = 0;
     }
     __sm_when_diag({ __sm_assert(IS_8_BYTE_ALIGNED(m->m_data)); });
     return m;
@@ -2929,7 +2782,6 @@ sm_set_data_size(sparsemap_t *map, uint8_t *data, const size_t size)
     map->m_capacity = size;
     if (map->m_data_used > size) {
       map->m_data_used = size;
-      map->m_cursor_valid = 0;
     }
     return map;
   }
@@ -2959,7 +2811,6 @@ sm_set_data_size(sparsemap_t *map, uint8_t *data, const size_t size)
       map->m_capacity = size;
       if (map->m_data_used > size) {
         map->m_data_used = size;
-        map->m_cursor_valid = 0;
       }
       return map;
     }
@@ -2975,9 +2826,6 @@ sm_set_data_size(sparsemap_t *map, uint8_t *data, const size_t size)
     map->m_data = new_data;
     map->m_capacity = size;
     map->m_alloc_kind = SM_OWNED_SPLIT;
-    /* Buffer relocated; cursor offsets are still valid as offsets,
-     * and we copied the in-use prefix verbatim.  Leave the cursor
-     * untouched. */
     return map;
   }
   }
@@ -3036,7 +2884,7 @@ sm_get_capacity(const sparsemap_t *map)
  * @param[in] idx The index of the bit to check.
  * @return True if the bit is set, false otherwise.
  */
-__attribute__((hot)) bool
+pg_attribute_hot bool
 sm_contains(sparsemap_t *map, uint64_t idx)
 {
   /* Defensive: NULL or empty maps contain nothing.  Accepting NULL is
@@ -3228,7 +3076,7 @@ done:;
  * @param[in] idx The index at which the value will be unset.
  * @return The index that was unset.
  */
-__attribute__((hot)) uint64_t
+pg_attribute_hot uint64_t
 sm_remove(sparsemap_t *map, const uint64_t idx)
 {
   return __sm_map_unset(map, idx, true);
@@ -3504,7 +3352,7 @@ done:;
  * @param[in] idx The index to set in the sparsemap.
  * @return The index that was set in the sparsemap.
  */
-__attribute__((hot)) uint64_t
+pg_attribute_hot uint64_t
 sm_add(sparsemap_t *map, const uint64_t idx)
 {
   return __sm_map_set(map, idx, true);
@@ -4240,7 +4088,7 @@ __sm_append_rle_chunk(sparsemap_t **resultp, __sm_idx_t start,
   __sm_append_data(result, (const uint8_t *)&start, SM_SIZEOF_OVERHEAD);
 
   /* Build and write the RLE word */
-  _Alignas(__sm_bitvec_t) uint8_t rle_buf[sizeof(__sm_bitvec_t)] = { 0 };
+  pg_attribute_aligned(8) uint8_t rle_buf[sizeof(__sm_bitvec_t)] = { 0 };
   __sm_chunk_t tmp;
   __sm_chunk_init(&tmp, rle_buf);
   __sm_chunk_set_rle(&tmp);
@@ -4697,7 +4545,7 @@ __sm_chunk_next_set(const __sm_chunk_t *chunk, uint64_t start, uint64_t lower_ex
     if (masked == 0) {
       continue;
     }
-    return vec_lo + (uint64_t)SM_CTZ64(masked);
+    return vec_lo + (uint64_t)pg_rightmost_one_pos64(masked);
   }
   return SM_IDX_MAX;
 }
@@ -4739,7 +4587,7 @@ __sm_chunk_prev_set(const __sm_chunk_t *chunk, uint64_t start, uint64_t upper_ex
       w &= (~(__sm_bitvec_t)0) >> (SM_BITS_PER_VECTOR - bits_to_keep);
     }
     if (w == 0) continue;
-    return vec_lo + (uint64_t)(SM_BITS_PER_VECTOR - 1 - (size_t)SM_CLZ64(w));
+    return vec_lo + (uint64_t)pg_leftmost_one_pos64(w);
   }
   return SM_IDX_MAX;
 }
@@ -4752,27 +4600,8 @@ sm_next_member(const sparsemap_t *map, uint64_t prev_idx)
   const size_t count = __sm_get_chunk_count(map);
   if (count == 0) return SM_IDX_MAX;
 
-  uint8_t *base = __sm_get_chunk_data(map, 0);
-  uint8_t *p = base;
-  size_t i = 0;
-
-  /*
-   * Cursor fast-path.  Sequential forward iteration
-   *   while ((i = sm_next_member(map, i)) != SM_IDX_MAX) ...
-   * is the dominant scan-side hot path.  Without a cursor each
-   * call walks from chunk 0 -- O(N) per call, O(N^2) per scan.
-   * Resume from the most-recently-returned chunk when prev_idx is
-   * not earlier than that chunk's start.
-   */
-  if (prev_idx != SM_IDX_MAX
-      && map->m_cursor_valid
-      && map->m_cursor_chunk_index < count
-      && map->m_cursor_start_idx <= prev_idx) {
-    p = base + map->m_cursor_offset;
-    i = map->m_cursor_chunk_index;
-  }
-
-  for (; i < count; i++) {
+  uint8_t *p = __sm_get_chunk_data(map, 0);
+  for (size_t i = 0; i < count; i++) {
     const __sm_idx_t start = __sm_load_idx((const uint8_t *)p);
     __sm_chunk_t chunk;
     __sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
@@ -4784,7 +4613,6 @@ sm_next_member(const sparsemap_t *map, uint64_t prev_idx)
     }
     const uint64_t hit = __sm_chunk_next_set(&chunk, start, prev_idx);
     if (hit != SM_IDX_MAX) {
-      __sm_cursor_record(map, (size_t)(p - base), i, start);
       return hit;
     }
     p += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&chunk);
@@ -5408,7 +5236,6 @@ __sm_replace_buffer(sparsemap_t *dst, sparsemap_t *result)
   }
   memcpy(dst->m_data, result->m_data, result_size);
   dst->m_data_used = result_size;
-  dst->m_cursor_valid = 0;
   sm_free(result);
   return dst;
 }
@@ -5536,7 +5363,7 @@ sm_statistics(const sparsemap_t *map, sm_stats_t *stats)
         if (flags == SM_PAYLOAD_ONES) {
           stats->bits_in_sparse += SM_BITS_PER_VECTOR;
         } else if (flags == SM_PAYLOAD_MIXED) {
-          stats->bits_in_sparse += (uint64_t)SM_POPCOUNT64(chunk.m_data[pos]);
+          stats->bits_in_sparse += (uint64_t)pg_popcount64(chunk.m_data[pos]);
           pos++;
         }
       }
@@ -6578,7 +6405,7 @@ sm_split(sparsemap_t *map, uint64_t idx, sparsemap_t *other)
 
       sparsemap_t stunt;
       __sm_chunk_t chunk;
-      _Alignas(__sm_bitvec_t) uint8_t buf[(SM_SIZEOF_OVERHEAD * (unsigned long)3) + (sizeof(__sm_bitvec_t) * 6)] = { 0 };
+      pg_attribute_aligned(8) uint8_t buf[(SM_SIZEOF_OVERHEAD * (unsigned long)3) + (sizeof(__sm_bitvec_t) * 6)] = { 0 };
 
       /* Copy the source chunk into the buffer. */
       memcpy(buf + SM_SIZEOF_OVERHEAD, src, SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t));
@@ -6675,10 +6502,6 @@ sm_split(sparsemap_t *map, uint64_t idx, sparsemap_t *other)
   /* Update chunk counts and force recalculation of data sizes */
   __sm_set_chunk_count(map, __sm_get_chunk_count(map) - chunks_to_move);
   map->m_data_used = split_offset;
-  /* sm_split moves chunks across two maps; cursor caches on either
-   * side are no longer trustworthy. */
-  map->m_cursor_valid = 0;
-  other->m_cursor_valid = 0;
 
   __sm_assert(sm_get_size(map) >= SM_SIZEOF_OVERHEAD);
   __sm_assert(sm_get_size(other) > SM_SIZEOF_OVERHEAD);
@@ -6887,661 +6710,3 @@ sm_span(sparsemap_t *map, uint64_t idx, size_t len, bool value)
 
   return offset;
 }
-
-#ifdef SPARSEMAP_TESTING
-/* LCOV_EXCL_START
- *
- * Everything from here to the matching #endif is QCC-style property-
- * test scaffolding compiled in only when SPARSEMAP_TESTING is
- * defined.  These functions are reachable only from the test harness
- * (and only when QCC chooses to format a counterexample) so their
- * coverage is incidental to the library's correctness.  Excluded from
- * the coverage metric so the percentage reflects production code only.
- */
-
-#include <qc.h>
-
-static char *
-_qcc_format_chunk(const __sm_idx_t start, const __sm_chunk_t *chunk, const bool none)
-{
-  size_t amt = sizeof(wchar_t) * (SM_FLAGS_PER_INDEX * 16 + SM_BITS_PER_VECTOR * 64 + 16) * 2;
-  char *buf = malloc(amt);
-
-  const __sm_bitvec_t desc = chunk->m_data[0];
-
-  if (!__sm_chunk_is_rle(chunk)) {
-    char desc_str[(2 * SM_FLAGS_PER_INDEX + 1) * sizeof(wchar_t)] = { 0 };
-    char *str = desc_str;
-    int mixed = 0;
-    /* Loop bound: i in [0, SM_FLAGS_PER_INDEX).  The original
-     * `i <= SM_FLAGS_PER_INDEX` shifted by 2 * 32 = 64, which is UB
-     * on a 64-bit type and tripped UBSan when the diagnostic code
-     * fired on a property-test failure. */
-    for (int i = 0; i < SM_FLAGS_PER_INDEX; i++) {
-      const uint8_t flag = SM_CHUNK_GET_FLAGS(desc, i);
-      switch (flag) {
-      case SM_PAYLOAD_NONE:
-        if (!none) {
-          __sm_assert(flag == SM_PAYLOAD_NONE);
-        }
-        str += sprintf(str, "_");
-        break;
-      case SM_PAYLOAD_ONES:
-        str += sprintf(str, "1");
-        break;
-      case SM_PAYLOAD_ZEROS:
-        str += sprintf(str, "0");
-        break;
-      case SM_PAYLOAD_MIXED:
-        str += sprintf(str, "X");
-        mixed++;
-        break;
-      }
-      if (i % 8 == 0 && i < 32) {
-        str += sprintf(str, " ");
-      }
-    }
-    str = buf + sprintf(buf, "%.10u\t|%s|%s", start, desc_str, mixed ? " :: " : "");
-    for (int i = 0; i < mixed; i++) {
-      const size_t n = snprintf(str, amt - 1, "%#018" PRIx64 "%s", chunk->m_data[1 + i], i + 1 < mixed ? " " : "");
-      str += n;
-      amt -= n;
-    }
-  } else {
-    const size_t len = __sm_chunk_rle_get_length(chunk);
-    const size_t cap = __sm_chunk_rle_get_capacity(chunk);
-    sprintf(buf, "%.10u\t[%u, %zu) %zu of %zu", start, start, start + len - 1, len, cap);
-  }
-  return buf;
-}
-
-char *
-QCC_showChunk(void *value, int len)
-{
-  (void)len;
-  const __sm_idx_t start = __sm_load_idx((const uint8_t *)value);
-  __sm_chunk_t chunk;
-  __sm_chunk_init(&chunk, value + SM_SIZEOF_OVERHEAD);
-
-  return _qcc_format_chunk(start, &chunk, false);
-}
-
-char *
-QCC_showSparsemap(void *value, int len)
-{
-  (void)len;
-  char *buf = NULL;
-  const sparsemap_t *map = (sparsemap_t *)value;
-  const size_t count = __sm_get_chunk_count(map);
-
-  if (count > 0) {
-    char *str = NULL;
-    uint8_t *p = __sm_get_chunk_data(map, 0);
-    for (size_t i = 0; i < count; i++) {
-      __sm_chunk_t chunk;
-      const __sm_idx_t start = __sm_load_idx((const uint8_t *)p);
-      __sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
-      char *c = _qcc_format_chunk(start, &chunk, true);
-      if (buf) {
-        char *new_buf = realloc(buf, strlen(buf) + strlen(c) + 24);
-        if (new_buf) {
-          buf = new_buf;
-          str += sprintf(str, "\n%s", c);
-        }
-      } else {
-        buf = c;
-        str = buf + strlen(c);
-      }
-      p += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&chunk);
-    }
-  }
-
-  return buf;
-}
-
-static void
-QCC_freeChunkValue(void *value)
-{
-  free(value);
-}
-
-static void
-QCC_freeSparsemapValue(void *value)
-{
-  free(value);
-}
-
-QCC_GenValue *
-QCC_genChunk()
-{
-  if ((double)random() / (double)RAND_MAX > 0.5) {
-    // Generate a run-length encoded (RLE) chunk:
-    const uint64_t from = 1, to = SM_CHUNK_RLE_MAX_LENGTH;
-    const unsigned int len = ((unsigned int)random() % (to - from)) + from;
-    // First allocate enough room for the chunk data ...
-    uint8_t *p = malloc(SM_SIZEOF_OVERHEAD + (sizeof(__sm_bitvec_t) * 2));
-    // ... then set the offset to the length so we can test for that later ...
-    __sm_store_idx((uint8_t *)p, len);
-    // ... next is the chunk begins after the offset ...
-    __sm_chunk_t chunk_local = { .m_data = (__sm_bitvec_unaligned_t *)((uintptr_t)p + SM_SIZEOF_OVERHEAD) };
-    __sm_chunk_t *chunk = &chunk_local;
-    // ... this contains a single vector ...
-    chunk->m_data[0] = 0;
-    // ... set the flags on this vector to indicate that is it RLE ...
-    __sm_chunk_set_rle(chunk);
-    // ... set the RLE chunk's initial capacity ...
-    __sm_chunk_rle_set_capacity(chunk, SM_CHUNK_RLE_MAX_CAPACITY);
-    // ... and set the RLE chunk's length of 1s to len.
-    __sm_chunk_rle_set_length(chunk, len);
-    // Now, test what we've generated to ensure it's correct.
-    __sm_assert(__sm_load_idx(p) == len);
-    __sm_assert(__sm_chunk_is_rle(chunk));
-    __sm_assert(__sm_chunk_rle_get_capacity(chunk) == SM_CHUNK_RLE_MAX_CAPACITY);
-    __sm_assert(__sm_chunk_rle_get_length(chunk) == len);
-    return QCC_initGenValue(p, 1, QCC_showChunk, QCC_freeChunkValue);
-  }
-  // Generate a chunk with the offset equal to the number of additional
-  // vectors (len) and a descriptor that matches that with random data.
-  const unsigned int from = 0, to = SM_FLAGS_PER_INDEX;
-  const unsigned int len = ((unsigned int)random() % (to - from)) + from;
-  const unsigned int cut = ((unsigned int)random() % ((SM_FLAGS_PER_INDEX - len) - from)) + from;
-  // First allocate enough room for the chunk data ...
-  uint8_t *p = malloc(SM_SIZEOF_OVERHEAD + (sizeof(__sm_bitvec_t) * (len + 1)));
-  // ... then set the offset to the capacity ...
-  __sm_store_idx((uint8_t *)p, SM_CHUNK_MAX_CAPACITY - (cut * SM_BITS_PER_VECTOR));
-  // ... next is the chunk begins after the offset ...
-  __sm_chunk_t chunk_local = { .m_data = (__sm_bitvec_unaligned_t *)((uintptr_t)p + SM_SIZEOF_OVERHEAD) };
-  __sm_chunk_t *chunk = &chunk_local;
-  // ... the first is the descriptor with the flags ...
-  __sm_bitvec_unaligned_t *desc = chunk->m_data;
-  *desc = 0;
-  // ... ensure that exactly `len` flags are set to SM_PAYLOAD_MIXED ...
-  for (size_t i = 0; i < len; i++) {
-    SM_CHUNK_SET_FLAGS(*desc, i, SM_PAYLOAD_MIXED);
-    /*
-     * The marker is `(uintptr_t)p + i` so that the test consumer can
-     * recompute it from the same buffer base, regardless of where
-     * the stack-local __sm_chunk_t happens to sit.
-     */
-    chunk->m_data[1 + i] = (uintptr_t)p + i;
-  }
-  // ... and, on average, 50% of the rest are SM_PAYLOAD_ONES ...
-  for (size_t i = len; i < SM_FLAGS_PER_INDEX - cut; i++) {
-    const double coin = (double)random() / (double)RAND_MAX;
-    if (SM_CHUNK_GET_FLAGS(*desc, i) != SM_PAYLOAD_MIXED && coin >= 0.5) {
-      SM_CHUNK_SET_FLAGS(*desc, i, SM_PAYLOAD_ONES);
-    }
-  }
-  // ... shuffle those around ...
-  for (size_t i = 0; i < SM_FLAGS_PER_INDEX - cut - 1; i++) {
-    const size_t range = SM_FLAGS_PER_INDEX - cut - i - 1;
-    if (range == 0) break;
-    const size_t j = i + 1 + ((size_t)random() % range);
-    const int flags = SM_CHUNK_GET_FLAGS(*desc, j);
-    SM_CHUNK_SET_FLAGS(*desc, j, SM_CHUNK_GET_FLAGS(*desc, i));
-    SM_CHUNK_SET_FLAGS(*desc, i, flags);
-  }
-  // ... reduce the capacity by setting trailing flags to SM_PAYLOAD_NONE ...
-  *desc <<= cut * 2;
-  for (size_t i = 0; i < cut; i++) {
-    SM_CHUNK_SET_FLAGS(*desc, i, SM_PAYLOAD_NONE);
-  }
-  // fprintf(stdout, "\n%s\n", QCC_showChunk(p, 0));
-  // ... and check that our franken-chunk appears to be correct.
-  __sm_assert(__sm_chunk_is_rle(chunk) == false);
-  return QCC_initGenValue(p, 1, QCC_showChunk, QCC_freeChunkValue);
-}
-
-extern void populate_map(sparsemap_t *map, int size, int max_value);
-
-QCC_GenValue *
-QCC_genSparsemap()
-{
-  sparsemap_t *map = sparsemap(1024);
-  return QCC_initGenValue(map, 1, QCC_showSparsemap, QCC_freeSparsemapValue);
-}
-
-static size_t
-_tst_sm_chunk_calc_vector_size(uint8_t b)
-{
-  int count = 0;
-
-  for (int i = 0; i < 4; i++) {
-    if (((b >> (i * 2)) & 0x03) == 0x02) {
-      count++;
-    }
-  }
-
-  return count;
-}
-
-QCC_TestStatus
-_tst_chunk_calc_vector_size_equality(QCC_GenValue **vals, int len, QCC_Stamp **stamp)
-{
-  (void)len;
-  (void)stamp;
-  unsigned int a = *QCC_getValue(vals, 0, unsigned int *) % 256;
-  if (_tst_sm_chunk_calc_vector_size(a) != __sm_chunk_calc_vector_size(a)) {
-    return QCC_FAIL;
-  }
-  return QCC_OK;
-}
-
-QCC_TestStatus
-_tst_chunk_get_position(QCC_GenValue **vals, int len, QCC_Stamp **stamp)
-{
-  (void)len;
-  (void)stamp;
-  uint8_t *p = QCC_getValue(vals, 0, void *);
-  /*
-   * The buffer's layout is: 4-byte start offset, then the chunk's
-   * bitvec data (descriptor + optional vectors).  Construct a
-   * stack-local __sm_chunk_t pointing at the bitvecs; do NOT cast
-   * the buffer to __sm_chunk_t * (which would interpret the
-   * descriptor as the m_data pointer).
-   */
-  __sm_chunk_t chunk_local = { .m_data = (__sm_bitvec_unaligned_t *)((uintptr_t)p + SM_SIZEOF_OVERHEAD) };
-  __sm_chunk_t *chunk = &chunk_local;
-  size_t pos;
-
-  if (__sm_chunk_is_rle(chunk)) {
-    for (size_t i = 0; i < SM_FLAGS_PER_INDEX; i++) {
-      pos = __sm_chunk_get_position(chunk, i);
-      if (pos != 0) {
-        return QCC_FAIL;
-      }
-    }
-  } else {
-    size_t mixed = 0;
-    for (size_t i = 0; i < SM_FLAGS_PER_INDEX; i++) {
-      uint8_t flag = SM_CHUNK_GET_FLAGS(*chunk->m_data, i);
-      switch (flag) {
-      case SM_PAYLOAD_MIXED:
-        pos = __sm_chunk_get_position(chunk, i);
-        if (chunk->m_data[1 + pos] != (uintptr_t)p + pos) {
-          return QCC_FAIL;
-        }
-        mixed++;
-        break;
-      case SM_PAYLOAD_ONES:
-      case SM_PAYLOAD_ZEROS:
-        pos = __sm_chunk_get_position(chunk, i);
-        if (pos != mixed) {
-          return QCC_FAIL;
-        }
-        break;
-      case SM_PAYLOAD_NONE:
-      default:
-        break;
-      }
-    }
-  }
-  return QCC_OK;
-}
-
-QCC_TestStatus
-_tst_chunk_get_capacity(QCC_GenValue **vals, int len, QCC_Stamp **stamp)
-{
-  (void)len;
-  (void)stamp;
-  uint8_t *p = (uint8_t *)QCC_getValue(vals, 0, void *);
-  __sm_idx_t start = __sm_load_idx((const uint8_t *)p);
-  /* See _tst_chunk_get_position above for layout notes. */
-  __sm_chunk_t chunk_local = { .m_data = (__sm_bitvec_unaligned_t *)((uintptr_t)p + SM_SIZEOF_OVERHEAD) };
-  __sm_chunk_t *chunk = &chunk_local;
-
-  if (__sm_chunk_is_rle(chunk)) {
-    if (__sm_chunk_rle_get_length(chunk) != start) {
-      return QCC_FAIL;
-    }
-  } else {
-    if (__sm_chunk_get_capacity(chunk) != start) {
-      return QCC_FAIL;
-    }
-  }
-  return QCC_OK;
-}
-
-QCC_TestStatus
-_tst_get_chunk_offset(QCC_GenValue **vals, int len, QCC_Stamp **stamp)
-{
-  const unsigned int idx = *QCC_getValue(vals, 0, unsigned int *);
-  sparsemap_t *map = QCC_getValue(vals, 1, sparsemap_t *);
-  const unsigned int max_offset = (SM_FLAGS_PER_INDEX - 1) * sizeof(__sm_bitvec_t);
-  const unsigned int rnd_offset = (idx % max_offset) - (idx % max_offset % sizeof(__sm_bitvec_t));
-  const unsigned int rnd_nvec = rnd_offset / sizeof(__sm_bitvec_t);
-  const __sm_idx_t offset = __sm_get_chunk_aligned_offset(idx);
-  ssize_t result;
-  size_t expected;
-
-  (void)len;
-  (void)stamp;
-
-#define FAIL_AT(line, ...) do { \
-  fprintf(stderr, "FAIL at line %d (test input idx=%u): ", line, idx); \
-  fprintf(stderr, __VA_ARGS__); \
-  fprintf(stderr, "\n"); \
-  return QCC_FAIL; \
-} while(0)
-
-  // An empty map should return -1 (no chunks present, so offset of -1).
-  for (unsigned int i = offset; i < SM_CHUNK_MAX_CAPACITY + offset; i++) {
-    ssize_t result = __sm_get_chunk_offset(map, i);
-    if (result != -1) {
-      FAIL_AT(__LINE__, "empty map check failed: __sm_get_chunk_offset(map, %u) = %zd, expected -1", i, result);
-    }
-  }
-
-  // By setting the first bit in each of rnd_nvec chunks we create one chunk
-  // per and with exactly one additional bitvec per so we should observe...
-  for (unsigned int i = 0; i < rnd_nvec; i++) {
-    uint64_t l = offset + (i * SM_CHUNK_MAX_CAPACITY);
-    sm_add(map, l);
-  }
-  for (unsigned int i = 0; i < rnd_nvec; i++) {
-    size_t expected_offset = __sm_get_chunk_offset(map, offset + (i * SM_CHUNK_MAX_CAPACITY));
-    size_t calculated_offset = i * (SM_SIZEOF_OVERHEAD + (sizeof(__sm_bitvec_t) * 2));
-    if (calculated_offset != expected_offset) {
-      FAIL_AT(__LINE__, "%d-chunk offset mismatch: expected=%zu, got=%zu", i, calculated_offset, expected_offset);
-    }
-  }
-
-  // Now for RLE, first let's clear and check a full chunk.
-  sm_clear(map);
-  for (int i = 0; i < SM_CHUNK_MAX_CAPACITY; i++) {
-    sm_add(map, i);
-  }
-  for (int i = 0; i < SM_CHUNK_MAX_CAPACITY; i++) {
-    ssize_t result = __sm_get_chunk_offset(map, i);
-    if (result != 0) {
-      FAIL_AT(__LINE__, "RLE full chunk check failed: __sm_get_chunk_offset(map, %d) = %zd, expected 0", i, result);
-    }
-  }
-  result = __sm_get_chunk_offset(map, SM_CHUNK_MAX_CAPACITY);
-  if (result != 0) {
-    FAIL_AT(__LINE__, "chunk offset at boundary (before RLE transform) failed: __sm_get_chunk_offset(map, %d) = %zd, expected 0", SM_CHUNK_MAX_CAPACITY, result);
-  }
-
-  // This should trigger the transformation of the 0th chunk into RLE.
-  sm_add(map, SM_CHUNK_MAX_CAPACITY);
-  result = __sm_get_chunk_offset(map, SM_CHUNK_MAX_CAPACITY);
-  if (result != 0) {
-    FAIL_AT(__LINE__, "chunk offset after RLE transform failed: __sm_get_chunk_offset(map, %d) = %zd, expected 0", SM_CHUNK_MAX_CAPACITY, result);
-  }
-  // This should trigger the transformation of the 0th chunk back to sparse.
-  sm_remove(map, SM_CHUNK_MAX_CAPACITY);
-  result = __sm_get_chunk_offset(map, SM_CHUNK_MAX_CAPACITY);
-  if (result != 0) {
-    FAIL_AT(__LINE__, "chunk offset after sparse transform failed: __sm_get_chunk_offset(map, %d) = %zd, expected 0", SM_CHUNK_MAX_CAPACITY, result);
-  }
-
-  // This should trigger the transformation of the 0th chunk into RLE again.
-  for (int i = 0; i < 3000; i++) {
-    sm_add(map, SM_CHUNK_MAX_CAPACITY + i);
-  }
-
-#ifdef SPARSEMAP_DIAGNOSTIC
-  // Debug: check state after setting 3000 bits
-  {
-    size_t chunk_count = __sm_get_chunk_count(map);
-    __sm_diag("After set 3000 bits (2048-5047): chunk_count=%zu\n", chunk_count);
-    uint8_t *p = __sm_get_chunk_data(map, 0);
-    for (size_t i = 0; i < chunk_count; i++) {
-      __sm_idx_t start = __sm_load_idx((const uint8_t *)p);
-      __sm_chunk_t chunk;
-      __sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
-      size_t cap = __sm_chunk_get_capacity(&chunk);
-      bool is_rle = __sm_chunk_is_rle(&chunk);
-      size_t len = is_rle ? __sm_chunk_rle_get_length(&chunk) : 0;
-      __sm_diag("  Chunk %zu: start=%u, capacity=%zu, length=%zu, RLE=%d\n",
-              i, start, cap, len, is_rle);
-      p += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&chunk);
-    }
-  }
-#endif
-
-  // This should trigger the transformation of the 0th chunk back to sparse,
-  // but also create a second and third sparse chunks.
-  sm_remove(map, 0);
-  __sm_diag("After unset(0): chunk_count=%zu\n", __sm_get_chunk_count(map));
-  result = __sm_get_chunk_offset(map, 0);
-  if (result != 0) {
-    FAIL_AT(__LINE__, "chunk offset after unset at 0 failed: __sm_get_chunk_offset(map, 0) = %zd, expected 0", result);
-  }
-  sm_add(map, 0);
-#ifdef SPARSEMAP_DIAGNOSTIC
-  {
-    size_t chunk_count = __sm_get_chunk_count(map);
-    __sm_diag("After set(0): chunk_count=%zu\n", chunk_count);
-    uint8_t *p = __sm_get_chunk_data(map, 0);
-    __sm_idx_t start = __sm_load_idx((const uint8_t *)p);
-    __sm_chunk_t chunk;
-    __sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
-    bool is_rle = __sm_chunk_is_rle(&chunk);
-    size_t cap = __sm_chunk_get_capacity(&chunk);
-    size_t len = is_rle ? __sm_chunk_rle_get_length(&chunk) : 0;
-    __sm_diag("  Chunk 0: start=%u, capacity=%zu, length=%zu, RLE=%d, m_data[0]=0x%llx\n",
-            start, cap, len, is_rle, (unsigned long long)chunk.m_data[0]);
-    // Verify some bits
-    __sm_diag("  Bit checks: is_set(0)=%d, is_set(100)=%d, is_set(2050)=%d, is_set(5000)=%d\n",
-            sm_contains(map, 0), sm_contains(map, 100),
-            sm_contains(map, 2050), sm_contains(map, 5000));
-  }
-#endif
-
-  // This will split the chunk into two chunks; sparse, RLE.
-  __sm_diag("Before unset(129): chunk_count=%zu\n", __sm_get_chunk_count(map));
-  sm_remove(map, 129);
-#ifdef SPARSEMAP_DIAGNOSTIC
-  {
-    size_t chunk_count = __sm_get_chunk_count(map);
-    __sm_diag("After unset(129): chunk_count=%zu\n", chunk_count);
-    for (size_t i = 0; i < chunk_count && i < 3; i++) {
-      size_t chunk_offset = i == 0 ? 0 : __sm_get_chunk_offset(map, i * SM_CHUNK_MAX_CAPACITY);
-      if ((ssize_t)chunk_offset == -1) break;
-      uint8_t *p = __sm_get_chunk_data(map, chunk_offset);
-      __sm_idx_t start = __sm_load_idx((const uint8_t *)p);
-      __sm_chunk_t chunk;
-      __sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
-      bool is_rle = __sm_chunk_is_rle(&chunk);
-      size_t cap = __sm_chunk_get_capacity(&chunk);
-      size_t len = is_rle ? __sm_chunk_rle_get_length(&chunk) : 0;
-      __sm_diag("  Chunk %zu: start=%u, capacity=%zu, length=%zu, RLE=%d\n",
-              i, start, cap, len, is_rle);
-    }
-  }
-#endif
-  result = __sm_get_chunk_offset(map, 129);
-  if (result != 0) {
-    FAIL_AT(__LINE__, "chunk offset after split at 129 failed: __sm_get_chunk_offset(map, 129) = %zd, expected 0", result);
-  }
-  sm_add(map, 129);
-#ifdef SPARSEMAP_DIAGNOSTIC
-  {
-    size_t chunk_count = __sm_get_chunk_count(map);
-    __sm_diag("After set(129): chunk_count=%zu\n", chunk_count);
-    if (chunk_count > 0) {
-      uint8_t *p = __sm_get_chunk_data(map, 0);
-      __sm_idx_t start = __sm_load_idx((const uint8_t *)p);
-      __sm_chunk_t chunk;
-      __sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
-      bool is_rle = __sm_chunk_is_rle(&chunk);
-      size_t cap = __sm_chunk_get_capacity(&chunk);
-      size_t len = is_rle ? __sm_chunk_rle_get_length(&chunk) : 0;
-      __sm_diag("  Chunk 0: start=%u, capacity=%zu, length=%zu, RLE=%d\n",
-              start, cap, len, is_rle);
-    }
-  }
-#endif
-
-  // This will split the chunk into three chunks; sparse, sparse, RLE.
-  __sm_diag("Before unset(2050): chunk_count=%zu\n", __sm_get_chunk_count(map));
-#ifdef SPARSEMAP_DIAGNOSTIC
-  {
-    uint8_t *p = __sm_get_chunk_data(map, 0);
-    __sm_idx_t start = __sm_load_idx((const uint8_t *)p);
-    __sm_chunk_t chunk;
-    __sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
-    bool is_rle = __sm_chunk_is_rle(&chunk);
-    size_t cap = __sm_chunk_get_capacity(&chunk);
-    size_t len = is_rle ? __sm_chunk_rle_get_length(&chunk) : 0;
-    __sm_diag("  Chunk 0: start=%u, capacity=%zu, length=%zu, RLE=%d\n",
-            start, cap, len, is_rle);
-    __sm_diag("  Bit 2050 is_set=%d, idx 2050 in range [start=%u, start+length=%zu)? %d\n",
-            sm_contains(map, 2050), start, start + len, (2050 >= start && 2050 < start + len));
-  }
-#endif
-  sm_remove(map, 2050);
-
-#ifdef SPARSEMAP_DIAGNOSTIC
-  // Debug: check chunk count and structure
-  {
-    size_t chunk_count = __sm_get_chunk_count(map);
-    __sm_diag("After unset(2050): chunk_count=%zu\n", chunk_count);
-    uint8_t *p = __sm_get_chunk_data(map, 0);
-    for (size_t i = 0; i < chunk_count; i++) {
-      __sm_idx_t start = __sm_load_idx((const uint8_t *)p);
-      __sm_chunk_t chunk;
-      __sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
-      size_t capacity = __sm_chunk_get_capacity(&chunk);
-      size_t size = __sm_chunk_get_size(&chunk);
-      bool is_rle = __sm_chunk_is_rle(&chunk);
-      __sm_diag("  Chunk %zu: start=%u, capacity=%zu, size=%zu, RLE=%d\n",
-              i, start, capacity, size, is_rle);
-      p += SM_SIZEOF_OVERHEAD + size;
-    }
-  }
-#endif
-
-  result = __sm_get_chunk_offset(map, 0);
-  if (result != 0) {
-    FAIL_AT(__LINE__, "chunk offset after 3-way split, chunk 0 failed: __sm_get_chunk_offset(map, 0) = %zd, expected 0", result);
-  }
-  result = __sm_get_chunk_offset(map, 2050);
-  expected = SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t);
-  if ((size_t)result != expected) {
-    FAIL_AT(__LINE__, "chunk offset after 3-way split, chunk 1 failed: __sm_get_chunk_offset(map, 2050) = %zd, expected %zu", result, expected);
-  }
-  result = __sm_get_chunk_offset(map, 2050 + SM_CHUNK_MAX_CAPACITY);
-  expected = 2 * SM_SIZEOF_OVERHEAD + 3 * sizeof(__sm_bitvec_t);
-  if ((size_t)result != expected) {
-    FAIL_AT(__LINE__, "chunk offset after 3-way split, chunk 2 failed: __sm_get_chunk_offset(map, %d) = %zd, expected %zu", 2050 + SM_CHUNK_MAX_CAPACITY, result, expected);
-  }
-  sm_add(map, 2050);
-
-  // This won't split the chunk, it just shrinks the RLE by one.
-  sm_remove(map, 5047);
-  result = __sm_get_chunk_offset(map, 5046);
-  if (result != 0) {
-    FAIL_AT(__LINE__, "chunk offset after RLE shrink failed: __sm_get_chunk_offset(map, 5046) = %zd, expected 0", result);
-  }
-
-  // This will split the chunk, the index is outside the range but inside the capacity.
-  sm_add(map, 5048);
-  result = __sm_get_chunk_offset(map, 4090);
-  if (result != 0) {
-    FAIL_AT(__LINE__, "chunk offset after split, first chunk failed: __sm_get_chunk_offset(map, 4090) = %zd, expected 0", result);
-  }
-  result = __sm_get_chunk_offset(map, 5046);
-  if (result != 12) {
-    FAIL_AT(__LINE__, "chunk offset after split, second chunk failed: __sm_get_chunk_offset(map, 5046) = %zd, expected 12", result);
-  }
-
-  sm_remove(map, 5048);
-  result = __sm_get_chunk_offset(map, 5046);
-  if (result != 0) {
-    FAIL_AT(__LINE__, "chunk offset after unset 5048 failed: __sm_get_chunk_offset(map, 5046) = %zd, expected 0", result);
-  }
-
-#undef FAIL_AT
-  return QCC_OK;
-}
-
-QCC_TestStatus
-_tst_rle_select_rank_consistency(QCC_GenValue **vals, int len, QCC_Stamp **stamp)
-{
-  (void)len;
-  (void)stamp;
-
-  sparsemap_t *map = QCC_getValue(vals, 0, sparsemap_t *);
-  if (!map || !map->m_data) {
-    return QCC_OK;
-  }
-
-  /* Test property: for any set bit at index i, select(rank(0, i, true) - 1, true) should equal i
-   * This verifies that rank and select are inverse operations. */
-
-  size_t count = sm_cardinality(map);
-  if (count == 0) {
-    return QCC_OK;
-  }
-
-  /* Sample up to 100 set bits to test */
-  size_t test_limit = count < 100 ? count : 100;
-
-  for (size_t n = 0; n < test_limit; n++) {
-    /* Get the nth set bit */
-    uint64_t idx = sm_select(map, n, true);
-    if (!SM_FOUND(idx)) {
-      break; /* No more set bits */
-    }
-
-    /* Verify the bit is actually set */
-    if (!sm_contains(map, idx)) {
-      return QCC_FAIL;
-    }
-
-    /* Get rank up to this index */
-    int r = sm_rank(map, 0, idx, true);
-    if (r <= 0) {
-      return QCC_FAIL;
-    }
-
-    /* Select should give us back the same index */
-    __sm_idx_t idx2 = sm_select(map, r - 1, true);
-    if (idx2 != idx) {
-      return QCC_FAIL;
-    }
-  }
-
-  return QCC_OK;
-}
-
-/* Helper for scan completeness test */
-static size_t scan_completeness_count = 0;
-static void
-_scan_completeness_counter(uint32_t v[], size_t n, void *aux)
-{
-  (void)v;
-  (void)aux;
-  scan_completeness_count += n;
-}
-
-QCC_TestStatus
-_tst_rle_scan_completeness(QCC_GenValue **vals, int len, QCC_Stamp **stamp)
-{
-  (void)len;
-  (void)stamp;
-
-  sparsemap_t *map = QCC_getValue(vals, 0, sparsemap_t *);
-  if (!map || !map->m_data) {
-    return QCC_OK;
-  }
-
-  /* Test property: scan must visit exactly count() set bits, no more, no less */
-
-  size_t expected_count = sm_cardinality(map);
-
-  /* Reset counter and scan */
-  scan_completeness_count = 0;
-  sm_scan(map, _scan_completeness_counter, 0, NULL);
-
-  if (scan_completeness_count != expected_count) {
-    return QCC_FAIL;
-  }
-
-  return QCC_OK;
-}
-
-/* LCOV_EXCL_STOP */
-#endif
