@@ -98,3 +98,6 @@ vgcore.*
 # Core dumps
 core
 core.*
+# Rust build artifacts
+/rust/target/
+rust/Cargo.lock

@@ -1,0 +1,43 @@
+name: rust
+
+on:
+  push:
+    branches: [ports/rust]
+  pull_request:
+    branches: [ports/rust]
+
+defaults:
+  run:
+    working-directory: rust
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - name: Test (default features, incl. C wire-compat FFI)
+        run: cargo test
+      - run: cargo doc --no-deps
+
+  no_std:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build without default features (no_std)
+        run: cargo build --no-default-features
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.77
+      - name: Build at MSRV
+        env:
+          SPARSEMAP_NO_C_FFI: "1"
+        run: cargo build
