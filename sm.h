@@ -193,21 +193,21 @@ typedef struct sparsemap sparsemap_t;
  * therefore means "use libc throughout".
  */
 typedef struct sm_allocator {
-    void *(*alloc)        (size_t n, void *aux);
-    void *(*alloc_zero)   (size_t n, void *aux);
-    void *(*realloc)      (void *p, size_t n, void *aux);
-    void  (*free)         (void *p, void *aux);
-    /* Aligned-allocation slots, reserved for future SIMD work.  Not
-     * exercised by any 2.2.x code path — the regular alloc/realloc
-     * already hand back 8-byte-aligned blocks, which is what every
-     * current sparsemap operation needs.  Provide them now so the
-     * struct shape is stable when SIMD lands; the scalar paths
-     * ignore them.  When implemented, semantics will match C11
-     * aligned_alloc(): `alignment` is a power of two, `n` must be a
-     * multiple of `alignment`. */
-    void *(*aligned_alloc)(size_t alignment, size_t n, void *aux);
-    void  (*aligned_free) (void *p, void *aux);
-    void  *aux;
+	void *(*alloc)(size_t n, void *aux);
+	void *(*alloc_zero)(size_t n, void *aux);
+	void *(*realloc)(void *p, size_t n, void *aux);
+	void (*free)(void *p, void *aux);
+	/* Aligned-allocation slots, reserved for future SIMD work.  Not
+	 * exercised by any 2.2.x code path — the regular alloc/realloc
+	 * already hand back 8-byte-aligned blocks, which is what every
+	 * current sparsemap operation needs.  Provide them now so the
+	 * struct shape is stable when SIMD lands; the scalar paths
+	 * ignore them.  When implemented, semantics will match C11
+	 * aligned_alloc(): `alignment` is a power of two, `n` must be a
+	 * multiple of `alignment`. */
+	void *(*aligned_alloc)(size_t alignment, size_t n, void *aux);
+	void (*aligned_free)(void *p, void *aux);
+	void *aux;
 } sm_allocator_t;
 
 /** @brief Set the process-wide default allocator hooks.
@@ -698,7 +698,9 @@ uint64_t sm_span(sparsemap_t *map, uint64_t start, size_t len, bool value);
  *   sm_scan(map, print_bits, 0, NULL);
  * @endcode
  */
-void sm_scan(const sparsemap_t *map, void (*scanner)(uint32_t vec[], size_t n, void *aux), size_t skip, void *aux);
+void sm_scan(const sparsemap_t *map,
+    void (*scanner)(uint32_t vec[], size_t n, void *aux), size_t skip,
+    void *aux);
 
 /* -------------------------------------------------------------------
  * Bulk operations
@@ -846,9 +848,9 @@ bool sm_overlap(const sparsemap_t *a, const sparsemap_t *b);
  * second set bit; never enumerates the rest.
  */
 typedef enum {
-    SM_EMPTY      = 0, /**< no bits set */
-    SM_SINGLETON  = 1, /**< exactly one bit set */
-    SM_MULTIPLE   = 2, /**< two or more bits set */
+	SM_EMPTY = 0,     /**< no bits set */
+	SM_SINGLETON = 1, /**< exactly one bit set */
+	SM_MULTIPLE = 2,  /**< two or more bits set */
 } sm_membership_t;
 
 /** @brief Classify a sparsemap as empty, singleton, or multi-element.
@@ -1087,10 +1089,10 @@ int sm_compare(const sparsemap_t *a, const sparsemap_t *b);
 
 /** @brief Subset-relation between two sparsemaps. */
 typedef enum {
-    SM_REL_EQUAL    = 0, /**< a == b */
-    SM_REL_SUBSET_A = 1, /**< a is a strict subset of b */
-    SM_REL_SUBSET_B = 2, /**< b is a strict subset of a */
-    SM_REL_DIFFERENT = 3, /**< neither is a subset of the other */
+	SM_REL_EQUAL = 0,     /**< a == b */
+	SM_REL_SUBSET_A = 1,  /**< a is a strict subset of b */
+	SM_REL_SUBSET_B = 2,  /**< b is a strict subset of a */
+	SM_REL_DIFFERENT = 3, /**< neither is a subset of the other */
 } sm_subset_relation_t;
 
 /** @brief Classify the subset relationship between \a a and \a b.
@@ -1098,7 +1100,8 @@ typedef enum {
  * Mirrors PostgreSQL's `bms_subset_compare`.  More efficient than
  * calling `sm_is_subset` twice when the caller needs the full picture.
  */
-sm_subset_relation_t sm_subset_compare(const sparsemap_t *a, const sparsemap_t *b);
+sm_subset_relation_t sm_subset_compare(const sparsemap_t *a,
+    const sparsemap_t *b);
 
 /* -------------------------------------------------------------------
  * Destructive iteration
@@ -1189,15 +1192,15 @@ bool sm_validate(const sparsemap_t *map);
  * unexpectedly-large maps.
  */
 typedef struct sm_stats {
-    size_t   chunks_total;     /**< total chunks */
-    size_t   chunks_rle;       /**< chunks using RLE encoding */
-    size_t   chunks_sparse;    /**< chunks using sparse encoding */
-    size_t   bytes_used;       /**< sm_get_size(map) */
-    size_t   bytes_capacity;   /**< sm_get_capacity(map) */
-    uint64_t bits_set;         /**< sm_cardinality(map) */
-    uint64_t bits_in_rle;      /**< bits set within RLE chunks */
-    uint64_t bits_in_sparse;   /**< bits set within sparse chunks */
-    double   bytes_per_set_bit;/**< bytes_used / bits_set */
+	size_t chunks_total;      /**< total chunks */
+	size_t chunks_rle;        /**< chunks using RLE encoding */
+	size_t chunks_sparse;     /**< chunks using sparse encoding */
+	size_t bytes_used;        /**< sm_get_size(map) */
+	size_t bytes_capacity;    /**< sm_get_capacity(map) */
+	uint64_t bits_set;        /**< sm_cardinality(map) */
+	uint64_t bits_in_rle;     /**< bits set within RLE chunks */
+	uint64_t bits_in_sparse;  /**< bits set within sparse chunks */
+	double bytes_per_set_bit; /**< bytes_used / bits_set */
 } sm_stats_t;
 
 /** @brief Fill an sm_stats_t with introspection data. */
@@ -1259,6 +1262,5 @@ sparsemap_t *sm_deserialize(const uint8_t *in, size_t n);
 #if defined(__cplusplus)
 }
 #endif
-
 
 #endif /* !defined(SPARSEMAP_H) */
