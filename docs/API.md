@@ -1,6 +1,6 @@
 # sparsemap public API reference
 
-Companion to `include/sparsemap.h`.  Every public function is
+Companion to `sm.h`.  Every public function is
 documented here with semantics, allocation lineage, error returns,
 and how it interacts with the lifetime contract.  See
 [ARCHITECTURE.md](ARCHITECTURE.md) for the data model and

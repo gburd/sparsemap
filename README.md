@@ -64,7 +64,7 @@ make test
 Use it from C:
 
 ```c
-#include <sparsemap/sparsemap.h>
+#include <sparsemap/sm.h>
 
 sparsemap_t *map = sm_create(4096);
 sm_add(map, 42);
@@ -108,6 +108,26 @@ Sparsemap is vendored by:
 
 `contrib/pg_tre_sync.sh` and `contrib/postgres_undo_sync.sh` keep the
 vendored copies in sync with upstream.
+
+### Vendoring and symbol prefixing
+
+The library is exactly two files, `sm.h` and `sm.c`; vendoring is a
+two-file copy.  If you need two independently-vendored copies of
+sparsemap to coexist in one binary, rename every public symbol by
+defining `SM_PREFIX` before including the header:
+
+```c
+#define SM_PREFIX myapp_
+#include <sparsemap/sm.h>
+
+myapp_sparsemap_t *m = myapp_sm_create(4096);   /* renamed */
+myapp_sm_add(m, 42);
+```
+
+Every public function and type picks up the prefix at both declaration
+and call sites (Berkeley DB `--with-uniquename` style).  Compile-time
+macros (`SM_IDX_MAX`, the `SM_VERSION_*` values, enum constants) and
+the serialized wire format are unaffected.
 
 ## Versioning and history
 
@@ -153,7 +173,7 @@ matters for on-disk consumers.
   (the type itself stays `sparsemap_t`).
 - **v2.1.0** — added per-map `m_allocator` field to `sparsemap_t`.
   Code that duplicates the struct definition (test harnesses,
-  vendored copies that don't include `<sparsemap.h>`) must keep
+  vendored copies that don't include `<sm.h>`) must keep
   it in sync.  No source-level API breakage.
 - **v2.2.0** — the `sm_allocator_t` is now passed by value, not by
   pointer.  `sm_set_allocator(hooks)` and

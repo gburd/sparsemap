@@ -1,12 +1,12 @@
 .\" SPDX-License-Identifier: MIT
 .\"
-.TH sparsemap 3 "2026-05-13" "sparsemap 1.1.0" "Sparsemap Library"
+.TH sparsemap 3 "2026-06-03" "sparsemap 2.3.0" "Sparsemap Library"
 .SH NAME
 sm_create, sm_free, sm_add, sm_contains, sm_remove, sm_cardinality,
 sm_union, sm_intersection, sm_difference \- sparse compressed bitmap
 .SH SYNOPSIS
 .nf
-.B #include <sparsemap/sparsemap.h>
+.B #include <sparsemap/sm.h>
 .PP
 Lifecycle:
 .RS
@@ -96,10 +96,11 @@ will leak the buffer.
 , NULL,
 .I new_size
 )
-never silently no-ops.  Pre-v1 callers may have relied on the broken
-behavior; see the
-.IR HEISENBUG_REPORT.md
-file in the source distribution.
+never silently no-ops: it grows the buffer (relocating the map for the
+contiguous lineage, or promoting a wrapped map to owned-split) or
+returns
+.B NULL
+on allocation failure.
 .SH ERRORS
 Mutating functions return
 .B SM_IDX_MAX
@@ -112,28 +113,46 @@ when the backing buffer is full.  The caller can grow with
 and retry.  Allocation functions return
 .B NULL
 on allocation failure.
-.SH BACKWARD COMPATIBILITY
-v1.1 renamed the public prefix from
-.B sparsemap_
-to
-.B sm_
-for shorter, BSD-style names.  The old names are kept as
-.B #define
-aliases so pre-v1.1 callers compile without change.  Define
-.B SM_NO_LEGACY_ALIASES
-before
-.B #include\ <sparsemap/sparsemap.h>
-to opt out and force-fail anything not yet migrated.
+.SH EMBEDDING
+The library is two files,
+.I sm.h
+and
+.IR sm.c ,
+so it can be vendored by copying them into another source tree.  To
+let two independently-vendored copies coexist in one binary, define
+.B SM_PREFIX
+before including the header:
+.PP
+.RS
+.nf
+.B #define SM_PREFIX myapp_
+.B #include <sparsemap/sm.h>
+.fi
+.RE
+.PP
+Every public function and type then carries the prefix
+.RB ( sm_create
+becomes
+.IR myapp_sm_create ,
+.B sparsemap_t
+becomes
+.IR myapp_sparsemap_t ).
+Compile-time macros
+.RB ( SM_IDX_MAX ,
+the
+.B SM_VERSION_*
+values, the enum constants) are not renamed, and the serialized wire
+format is unchanged.
+.PP
+The wire format produced by
+.IR sm_serialize ()
+and read by
+.IR sm_deserialize ()/ sm_open ()
+is stable across releases within a major version.  The in-memory
+.B struct sparsemap
+layout is not stable: always allocate via the constructors and treat
+the type as opaque.
 .SH SEE ALSO
 .BR sparsemap (7)
-.SH BUGS
-.IR docs/API.md " §" "Known issues"
-in the source distribution.  v1.1.0 has two known sanitizer-only
-issues: (1) a deferred bug in
-.IR sm_split ()
-when separating an RLE chunk in unusual positions, and (2) UBSan
-warnings about misaligned 8-byte loads inside the chunk codec.
-Neither affects production builds on x86_64, aarch64, or standard
-RISC-V.
 .SH AUTHOR
 Gregory Burd <greg@burd.me>.

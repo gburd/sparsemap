@@ -1,6 +1,6 @@
 .\" SPDX-License-Identifier: MIT
 .\"
-.TH sparsemap 7 "2026-05-13" "sparsemap 1.1.0" "Sparsemap Concepts"
+.TH sparsemap 7 "2026-06-03" "sparsemap 2.3.0" "Sparsemap Concepts"
 .SH NAME
 sparsemap \- conceptual overview of the compressed bitmap library
 .SH DESCRIPTION
@@ -52,20 +52,21 @@ lock-free / wait-free variant is in design (see the
 .B experiment/thread-safe
 branch).
 .IP \(bu 2
-Strict-alignment cpus (ARMv5, some embedded RISC-V).  v1.1 has
-documented misaligned 8-byte loads inside the chunk codec.
+32-bit integer universes.  Sparsemap indexes with 64-bit values.
 .SH PORTABILITY
-Tested on:
-.IP \(bu 2
-x86_64 Linux (gcc, clang)
-.IP \(bu 2
-RISC-V 64 Linux (Ubuntu 24.04, gcc 13)
+Scalar C99 only: no SIMD intrinsics, no target-specific code.  The
+same source compiles unchanged on x86_64, aarch64, ARM, and RISC-V,
+with both gcc and clang, and on Windows with MSVC, MinGW, or clang.
+Continuous integration exercises x86_64, aarch64, riscv64, and a
+big-endian (s390x) target.
 .PP
-Should work on any 64-bit POSIX cpu where misaligned 8-byte loads
-are permitted (so x86_64, aarch64, standard RISC-V profiles).  The
-4-byte chunk-count and chunk-start-offset loads use
+The on-disk layout puts the 4-byte chunk count and chunk-start
+offsets at 4-byte boundaries and the 8-byte chunk descriptors at
+4-aligned addresses.  All such accesses go through
 .IR memcpy -based
-helpers and are portable to strict-alignment cpus.
+helpers or a 1-byte-aligned bitvector type, so the codec is safe on
+strict-alignment cpus; on x86_64 and aarch64 the compiler lowers them
+to single native loads with no overhead.
 .SH SEE ALSO
 .BR sparsemap (3)
 .SH AUTHOR
