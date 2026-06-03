@@ -578,7 +578,7 @@ __sm_chunk_get_run_length(const __sm_chunk_t *chunk)
 	} else {
 		size_t count = 0;
 		int j = SM_FLAGS_PER_INDEX, k = SM_BITS_PER_VECTOR;
-		__sm_bitvec_t w = chunk->m_data[0], v = chunk->m_data[1];
+		__sm_bitvec_t w = chunk->m_data[0];
 
 		switch (w) {
 		case 0:
@@ -598,6 +598,15 @@ __sm_chunk_get_run_length(const __sm_chunk_t *chunk)
 				count *= SM_BITS_PER_VECTOR;
 				if ((w & SM_PAYLOAD_MIXED) ==
 				    SM_PAYLOAD_MIXED) {
+					/*
+					 * Only now is m_data[1] guaranteed
+					 * to exist: a leading run of all-ones
+					 * vectors followed by a MIXED vector
+					 * means a payload word was stored.
+					 * Loading it earlier would read past a
+					 * single-word chunk.
+					 */
+					__sm_bitvec_t v = chunk->m_data[1];
 					w >>= 2;
 					j--;
 					while (k && (v & 1) == 1) {

@@ -15,10 +15,19 @@
  */
 #include <sm.h>
 
-#include <assert.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
+
+/* Always-on check (unlike assert(), survives -DNDEBUG). */
+#define CHECK(cond)                                                        \
+	do {                                                               \
+		if (!(cond)) {                                             \
+			fprintf(stderr, "test_prefix: %s:%d: %s\n",        \
+			    __FILE__, __LINE__, #cond);                    \
+			return (1);                                        \
+		}                                                          \
+	} while (0)
 
 int
 main(void)
@@ -34,27 +43,27 @@ main(void)
 
 	smtest_sm_add(m, 42);
 	smtest_sm_add(m, 1024);
-	assert(smtest_sm_contains(m, 42));
-	assert(!smtest_sm_contains(m, 43));
-	assert(smtest_sm_cardinality(m) == 2);
+	CHECK(smtest_sm_contains(m, 42));
+	CHECK(!smtest_sm_contains(m, 43));
+	CHECK(smtest_sm_cardinality(m) == 2);
 
 	/* Enum constants are not prefixed (compile-time only). */
 	mb = smtest_sm_membership(m);
-	assert(mb == SM_MULTIPLE);
+	CHECK(mb == SM_MULTIPLE);
 
-	assert(smtest_sm_select(m, 0, true) == 42);
-	assert(smtest_sm_minimum(m) == 42);
-	assert(smtest_sm_maximum(m) == 1024);
+	CHECK(smtest_sm_select(m, 0, true) == 42);
+	CHECK(smtest_sm_minimum(m) == 42);
+	CHECK(smtest_sm_maximum(m) == 1024);
 
 	smtest_sm_add_many(m, arr, 3);
-	assert(smtest_sm_contains(m, 100000));
+	CHECK(smtest_sm_contains(m, 100000));
 
 	smtest_sm_statistics(m, &st);
-	assert(st.bits_set == smtest_sm_cardinality(m));
+	CHECK(st.bits_set == smtest_sm_cardinality(m));
 
 	/* Macros are not prefixed. */
-	assert(SM_NOT_FOUND(smtest_sm_select(m, 999999, true)));
-	assert(SM_IDX_MAX == UINT64_MAX);
+	CHECK(SM_NOT_FOUND(smtest_sm_select(m, 999999, true)));
+	CHECK(SM_IDX_MAX == UINT64_MAX);
 
 	smtest_sm_free(m);
 
