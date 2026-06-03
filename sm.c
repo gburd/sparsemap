@@ -724,7 +724,7 @@ enum sm_alloc_kind {
 };
 
 /* -------------------------------------------------------------------
- * Allocator hooks (v2.2+ pass-by-value)
+ * Allocator hooks
  *
  * Sparsemap routes every malloc/realloc/free through these helpers.
  * Each helper takes a const sm_allocator_t * which points at either
@@ -1711,6 +1711,11 @@ __sm_chunk_scan(const __sm_chunk_t *chunk, const __sm_idx_t start,
 	}
 	return (skipped);
 }
+
+/* -------------------------------------------------------------------
+ * Map structure: chunk navigation, the tail cursor, and the
+ * byte-level insert/remove/coalesce primitives
+ * ------------------------------------------------------------------- */
 
 /**
  * @brief Retrieves the count of chunks in the sparse map.
@@ -2982,6 +2987,10 @@ __sm_separate_rle_chunk(sparsemap_t *map, __sm_chunk_sep_t *sep,
 	return (0);
 }
 
+/* -------------------------------------------------------------------
+ * Lifecycle: construction, copy, disposal, and buffer resize
+ * ------------------------------------------------------------------- */
+
 /**
  * @brief Clears the given sparse map.
  *
@@ -3503,6 +3512,10 @@ sm_get_capacity(const sparsemap_t *map)
 {
 	return (map->m_capacity);
 }
+
+/* -------------------------------------------------------------------
+ * Single-bit operations: test, set, and clear
+ * ------------------------------------------------------------------- */
 
 /**
  * @brief Checks if a specific bit is set in the sparse map.
@@ -4072,6 +4085,10 @@ sm_assign(sparsemap_t *map, const uint64_t idx, const bool value)
 	return (value ? sm_add(map, idx) : sm_remove(map, idx));
 }
 
+/* -------------------------------------------------------------------
+ * Aggregate queries: minimum, maximum, fill factor, cardinality
+ * ------------------------------------------------------------------- */
+
 /**
  * @brief Retrieves the starting offset in a sparse map.
  *
@@ -4293,6 +4310,10 @@ sm_cardinality(sparsemap_t *map)
 	return (sm_rank(map, 0, SM_IDX_MAX, true));
 }
 
+/* -------------------------------------------------------------------
+ * Iteration: batched callback scan of set bits
+ * ------------------------------------------------------------------- */
+
 /**
  * @brief Scans through each chunk in a sparse map and applies a scanning function to each chunk.
  *
@@ -4344,6 +4365,11 @@ sm_scan(const sparsemap_t *map,
  * @return A newly allocated sparsemap (caller must free()), or NULL if all
  *         bits are shifted away or on allocation failure.
  */
+
+/* -------------------------------------------------------------------
+ * Set operations: scratch-word codec, append helpers, and the
+ * bitwise shift (sm_offset)
+ * ------------------------------------------------------------------- */
 
 /**
  * @brief Expand a sparse chunk's descriptor into 32 full 64-bit words.
@@ -5619,7 +5645,7 @@ sm_singleton_member(const sparsemap_t *map)
 }
 
 /* -------------------------------------------------------------------
- * Phase B: cardinality without allocation, bulk add, to_array
+ * Cardinality without allocation, bulk add, array conversion
  * ------------------------------------------------------------------- */
 
 /*
@@ -5795,8 +5821,8 @@ sm_to_array(const sparsemap_t *map, uint64_t *out, size_t *n_out)
 }
 
 /* -------------------------------------------------------------------
- * Phase B continued: range ops, XOR, constructors,
- *                    hash/compare, destructive iteration
+ * Range ops, symmetric difference, set-op synonyms, constructors,
+ * hashing and ordering, destructive iteration
  * ------------------------------------------------------------------- */
 
 bool
@@ -6194,7 +6220,8 @@ sm_difference_inplace(sparsemap_t *dst, const sparsemap_t *src)
 }
 
 /* -------------------------------------------------------------------
- * Range flip, validate, statistics, shrink_to_fit
+ * Maintenance and introspection: range flip, validate, statistics,
+ * shrink_to_fit
  * ------------------------------------------------------------------- */
 
 bool
@@ -6446,6 +6473,10 @@ __sm_copy_chunk_to_result(sparsemap_t **resultp, const uint8_t *chunk_ptr)
 	__sm_set_chunk_count(*resultp, __sm_get_chunk_count(*resultp) + 1);
 	return (true);
 }
+
+/* -------------------------------------------------------------------
+ * Set operations: chunk-merge intersection, difference, union
+ * ------------------------------------------------------------------- */
 
 /**
  * @brief Create a new sparsemap containing the intersection of a and b.
@@ -7417,6 +7448,10 @@ fail:
 	sm_free(result);
 	return (NULL);
 }
+
+/* -------------------------------------------------------------------
+ * Split, select, rank, and span
+ * ------------------------------------------------------------------- */
 
 uint64_t
 sm_split(sparsemap_t *map, uint64_t idx, sparsemap_t *other)
