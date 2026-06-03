@@ -2534,7 +2534,7 @@ sm_clear(sparsemap_t *map)
   }
   memset(map->m_data, 0, map->m_capacity);
   map->m_data_used = SM_SIZEOF_OVERHEAD;
-  map->m_cursor_valid = 0;
+  __sm_cursor_invalidate(map);
   __sm_set_chunk_count(map, 0);
 }
 
@@ -2738,7 +2738,7 @@ sm_init(sparsemap_t *map, uint8_t *data, const size_t size)
   map->m_data = data;
   map->m_data_used = 0;
   map->m_capacity = size;
-  map->m_cursor_valid = 0;
+  __sm_cursor_invalidate(map);
   /*
    * Caller-allocated struct + caller-allocated buffer.  The buffer is
    * not owned by the library; sm_set_data_size will treat any
@@ -2764,7 +2764,7 @@ void
 sm_open(sparsemap_t *map, uint8_t *data, const size_t size)
 {
   map->m_data = data;
-  map->m_cursor_valid = 0;
+  __sm_cursor_invalidate(map);
   /*
    * Set m_capacity and a temporary m_data_used = m_capacity *before*
    * calling __sm_get_size_impl.  __sm_get_size_impl walks chunks via
@@ -2868,7 +2868,7 @@ sm_set_data_size(sparsemap_t *map, uint8_t *data, const size_t size)
     map->m_capacity = size;
     map->m_alloc_kind = SM_WRAPPED;
     /* New buffer (caller-supplied) means cursor offsets are stale. */
-    map->m_cursor_valid = 0;
+    __sm_cursor_invalidate(map);
     return map;
   }
 
@@ -3251,7 +3251,7 @@ sm_remove(sparsemap_t *map, const uint64_t idx)
  * @return The index at which the bit was set.
  */
 static uint64_t
-__sparsemap_add(sparsemap_t *map, const uint64_t idx, uint8_t *p, size_t offset, const __sm_bitvec_t *v)
+__sparsemap_add(sparsemap_t *map, const uint64_t idx, uint8_t *p, size_t offset, const void *v)
 {
   /*
    * When v is non-NULL we've just added a new chunk, and we knew in advance that a
@@ -5408,7 +5408,7 @@ __sm_replace_buffer(sparsemap_t *dst, sparsemap_t *result)
   }
   memcpy(dst->m_data, result->m_data, result_size);
   dst->m_data_used = result_size;
-  dst->m_cursor_valid = 0;
+  __sm_cursor_invalidate(dst);
   sm_free(result);
   return dst;
 }
@@ -6677,8 +6677,8 @@ sm_split(sparsemap_t *map, uint64_t idx, sparsemap_t *other)
   map->m_data_used = split_offset;
   /* sm_split moves chunks across two maps; cursor caches on either
    * side are no longer trustworthy. */
-  map->m_cursor_valid = 0;
-  other->m_cursor_valid = 0;
+  __sm_cursor_invalidate(map);
+  __sm_cursor_invalidate(other);
 
   __sm_assert(sm_get_size(map) >= SM_SIZEOF_OVERHEAD);
   __sm_assert(sm_get_size(other) > SM_SIZEOF_OVERHEAD);
