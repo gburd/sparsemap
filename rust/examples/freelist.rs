@@ -9,7 +9,10 @@ fn main() {
     const SLOTS: u64 = 1_000_000;
     let mut free = SparseMap::new();
     free.insert_range(0, SLOTS);
-    println!("free slots: {} (stored compactly as one run)", free.cardinality());
+    println!(
+        "free slots: {} (stored compactly as one run)",
+        free.cardinality()
+    );
 
     // Allocate the first 200,000 slots (a contiguous span) ...
     let mut allocated = SparseMap::new();
