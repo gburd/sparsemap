@@ -160,12 +160,12 @@
 #define SM__P(name)    SM__CAT(SM_PREFIX, name)
 
 /* Public types (and the struct tag / deprecated noun constructor). */
-#define sparsemap                   SM__P(sparsemap)
-#define sparsemap_t                 SM__P(sparsemap_t)
-#define sm_allocator_t              SM__P(sm_allocator_t)
-#define sm_membership_t             SM__P(sm_membership_t)
-#define sm_stats_t                  SM__P(sm_stats_t)
-#define sm_subset_relation_t        SM__P(sm_subset_relation_t)
+#define sparsemap            SM__P(sparsemap)
+#define sparsemap_t          SM__P(sparsemap_t)
+#define sm_allocator_t       SM__P(sm_allocator_t)
+#define sm_membership_t      SM__P(sm_membership_t)
+#define sm_stats_t           SM__P(sm_stats_t)
+#define sm_subset_relation_t SM__P(sm_subset_relation_t)
 
 /* Public functions. */
 #define sm_add                      SM__P(sm_add)
@@ -309,7 +309,7 @@ typedef struct sm_allocator {
 	void *(*realloc)(void *p, size_t n, void *aux);
 	void (*free)(void *p, void *aux);
 	/* Aligned-allocation slots, reserved for future SIMD work.  Not
-	 * exercised by any 2.2.x code path — the regular alloc/realloc
+	 * exercised by any 2.2.x code path -- the regular alloc/realloc
 	 * already hand back 8-byte-aligned blocks, which is what every
 	 * current sparsemap operation needs.  Provide them now so the
 	 * struct shape is stable when SIMD lands; the scalar paths
@@ -371,7 +371,7 @@ sparsemap_t *sm_create(size_t size);
  * Use this when you want a specific allocator for one or a few maps
  * and the rest of the process can keep using the default.  Pass an
  * all-zero struct (e.g. `(sm_allocator_t){0}`) to fall back to the
- * global default (set via sm_set_allocator) — in that case the map
+ * global default (set via sm_set_allocator) -- in that case the map
  * snapshots the global allocator at creation time and uses it for
  * the lifetime of the map regardless of subsequent sm_set_allocator
  * calls.
@@ -385,8 +385,9 @@ sparsemap_t *sm_create_with_allocator(size_t size, sm_allocator_t a);
 /** @brief Deprecated alias for sm_create().
  *
  * Older callers used the noun-named sparsemap() constructor.  New code
- * should prefer the verb-named sm_create().  This alias will be
- * removed in v2.
+ * should prefer the verb-named sm_create().  Retained for source
+ * compatibility with existing consumers; slated for removal in a
+ * future major release.
  */
 sparsemap_t *sparsemap(size_t size);
 
@@ -523,7 +524,7 @@ void sm_clear(sparsemap_t *map);
  *
  * Behaviour depends on \a data and the map's allocation lineage:
  *
- *   sm_set_data_size(map, NULL, new_size) — library-managed
+ *   sm_set_data_size(map, NULL, new_size) -- library-managed
  *     resize.  Always succeeds (returning a possibly-relocated map
  *     pointer) or returns NULL on allocation failure.  Never silently
  *     no-ops.
@@ -544,7 +545,7 @@ void sm_clear(sparsemap_t *map);
  *         with sm_free().  The caller's original buffer is
  *         untouched.
  *
- *   sm_set_data_size(map, data, new_size) — caller-supplied
+ *   sm_set_data_size(map, data, new_size) -- caller-supplied
  *     buffer.  The map is re-pointed to \a data.  The caller is
  *     responsible for copying any existing bits before the call.
  *     Lineage transitions to wrapped: the library will not realloc or
@@ -933,7 +934,7 @@ bool sm_is_subset(const sparsemap_t *a, const sparsemap_t *b);
 
 /** @brief Test whether \a a's bits are a superset of \a b's bits.
  *
- * Equivalent to `sm_is_subset(b, a)` — included as a named function
+ * Equivalent to `sm_is_subset(b, a)` -- included as a named function
  * for readability of `sm_is_superset(haystack, needle)` style calls.
  *
  * @param[in] a  Candidate superset (NULL is the empty set).
@@ -1024,10 +1025,10 @@ uint64_t sm_prev_member(const sparsemap_t *map, uint64_t prev_idx);
  * hot paths where the caller only wants the size, not the bits.
  * ------------------------------------------------------------------- */
 
-/** @brief Compute |a ∪ b| without allocating the union. */
+/** @brief Compute the cardinality of (a union b) without allocating it. */
 size_t sm_union_cardinality(const sparsemap_t *a, const sparsemap_t *b);
 
-/** @brief Compute |a ∩ b| without allocating the intersection. */
+/** @brief Compute the cardinality of (a intersect b) without allocating it. */
 size_t sm_intersection_cardinality(const sparsemap_t *a, const sparsemap_t *b);
 
 /** @brief Compute |a \ b| without allocating the difference. */
@@ -1041,7 +1042,7 @@ size_t sm_difference_cardinality(const sparsemap_t *a, const sparsemap_t *b);
  */
 bool sm_nonempty_difference(const sparsemap_t *a, const sparsemap_t *b);
 
-/** @brief Jaccard similarity index: |a ∩ b| / |a ∪ b|.
+/** @brief Jaccard similarity index: |a intersect b| / |a union b|.
  *
  * @returns A value in [0.0, 1.0].  Returns 0.0 if both maps are empty
  *          (the standard convention for the indeterminate 0/0 case).
@@ -1056,7 +1057,7 @@ double sm_jaccard_index(const sparsemap_t *a, const sparsemap_t *b);
  *
  * Equivalent to a loop over `sm_add(map, arr[i])` but slightly more
  * efficient when `arr` is already sorted (no formal contract that it
- * must be — unsorted input still works, just slower).
+ * must be -- unsorted input still works, just slower).
  *
  * @param[in,out] map  Destination.
  * @param[in]     arr  Array of indices.

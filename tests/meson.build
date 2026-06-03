@@ -17,16 +17,17 @@ munit = static_library('sparsemap_munit',
 # qc + helpers used inside the main test binary; built directly into
 # the test executable so it can see SPARSEMAP_TESTING-only symbols.
 
-# Main exhaustive test binary.  Compiles its own copy of sparsemap.c
-# with -DSPARSEMAP_TESTING so QCC_genChunk, _tst_*, etc. are visible.
-# Main exhaustive test binary.  Compiles its own copy of sparsemap.c
-# with -DSPARSEMAP_TESTING so QCC_genChunk, _tst_*, etc. are visible.
+# Main exhaustive test binary.  sm_white.c #includes the whole of
+# ../sm.c so the property/unit tests can reach the file-static chunk
+# codec; it also carries the QCC generators and _tst_* checks that
+# test.c drives.  Compiled with -DSPARSEMAP_TESTING for the harness
+# helpers in common.c.
 test_main = executable('test_main',
   'test.c',
   'common.c',
   'qc.c',
   'midl.c',
-  '../sm.c',
+  'sm_white.c',
   c_args : [
     '-DSPARSEMAP_TESTING',
     '-Wno-unused-parameter',
