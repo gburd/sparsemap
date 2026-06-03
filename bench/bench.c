@@ -695,7 +695,7 @@ static void bench_one_pattern(pattern_t *pat, bool skip_bms, bool verify_only) {
 
     /* Populate */
     populate_ctx_t pop_ctx = { .bits = bits, .count = count };
-    benchmarks[num_benchmarks++] = (typeof(benchmarks[0])){
+    benchmarks[num_benchmarks++] = (__typeof__(benchmarks[0])){
         "populate",
         op_populate_sm, op_populate_rb, op_populate_bms,
         &pop_ctx, &pop_ctx, &pop_ctx,
@@ -706,7 +706,7 @@ static void bench_one_pattern(pattern_t *pat, bool skip_bms, bool verify_only) {
     contains_ctx_t cont_sm = { .handle = sm_handle, .bits = bits, .count = count < 1000 ? count : 1000 };
     contains_ctx_t cont_rb = { .handle = rb_handle, .bits = bits, .count = cont_sm.count };
     contains_ctx_t cont_bms = { .handle = bms_handle, .bits = bits, .count = cont_sm.count };
-    benchmarks[num_benchmarks++] = (typeof(benchmarks[0])){
+    benchmarks[num_benchmarks++] = (__typeof__(benchmarks[0])){
         "contains",
         op_contains_sm, op_contains_rb, op_contains_bms,
         &cont_sm, &cont_rb, &cont_bms,
@@ -717,7 +717,7 @@ static void bench_one_pattern(pattern_t *pat, bool skip_bms, bool verify_only) {
     card_ctx_t card_sm = { .handle = sm_handle };
     card_ctx_t card_rb = { .handle = rb_handle };
     card_ctx_t card_bms = { .handle = bms_handle };
-    benchmarks[num_benchmarks++] = (typeof(benchmarks[0])){
+    benchmarks[num_benchmarks++] = (__typeof__(benchmarks[0])){
         "cardinality",
         op_card_sm, op_card_rb, op_card_bms,
         &card_sm, &card_rb, &card_bms,
@@ -728,7 +728,7 @@ static void bench_one_pattern(pattern_t *pat, bool skip_bms, bool verify_only) {
     rank_ctx_t rank_sm_c = { .handle = sm_handle, .mid = midpoint };
     rank_ctx_t rank_rb_c = { .handle = rb_handle, .mid = midpoint };
     rank_ctx_t rank_bms_c = { .handle = bms_handle, .mid = midpoint };
-    benchmarks[num_benchmarks++] = (typeof(benchmarks[0])){
+    benchmarks[num_benchmarks++] = (__typeof__(benchmarks[0])){
         "rank",
         op_rank_sm, op_rank_rb, op_rank_bms,
         &rank_sm_c, &rank_rb_c, &rank_bms_c,
@@ -739,7 +739,7 @@ static void bench_one_pattern(pattern_t *pat, bool skip_bms, bool verify_only) {
     select_ctx_t sel_sm = { .handle = sm_handle, .n = sel_n };
     select_ctx_t sel_rb = { .handle = rb_handle, .n = sel_n };
     select_ctx_t sel_bms = { .handle = bms_handle, .n = sel_n };
-    benchmarks[num_benchmarks++] = (typeof(benchmarks[0])){
+    benchmarks[num_benchmarks++] = (__typeof__(benchmarks[0])){
         "select",
         op_select_sm, op_select_rb, op_select_bms,
         &sel_sm, &sel_rb, &sel_bms,
@@ -750,7 +750,7 @@ static void bench_one_pattern(pattern_t *pat, bool skip_bms, bool verify_only) {
     union_ctx_t union_sm_c = { .a = sm_handle, .b = sm_handle };
     union_ctx_t union_rb_c = { .a = rb_handle, .b = rb_handle };
     union_ctx_t union_bms_c = { .a = bms_handle, .b = bms_handle };
-    benchmarks[num_benchmarks++] = (typeof(benchmarks[0])){
+    benchmarks[num_benchmarks++] = (__typeof__(benchmarks[0])){
         "union",
         op_union_sm, op_union_rb, op_union_bms,
         &union_sm_c, &union_rb_c, &union_bms_c,
@@ -761,7 +761,7 @@ static void bench_one_pattern(pattern_t *pat, bool skip_bms, bool verify_only) {
     intersect_ctx_t isect_sm_c = { .a = sm_handle, .b = sm_handle };
     intersect_ctx_t isect_rb_c = { .a = rb_handle, .b = rb_handle };
     intersect_ctx_t isect_bms_c = { .a = bms_handle, .b = bms_handle };
-    benchmarks[num_benchmarks++] = (typeof(benchmarks[0])){
+    benchmarks[num_benchmarks++] = (__typeof__(benchmarks[0])){
         "intersection",
         op_intersect_sm, op_intersect_rb, op_intersect_bms,
         &isect_sm_c, &isect_rb_c, &isect_bms_c,
@@ -772,7 +772,7 @@ static void bench_one_pattern(pattern_t *pat, bool skip_bms, bool verify_only) {
     difference_ctx_t diff_sm_c = { .a = sm_handle, .b = sm_handle };
     difference_ctx_t diff_rb_c = { .a = rb_handle, .b = rb_handle };
     difference_ctx_t diff_bms_c = { .a = bms_handle, .b = bms_handle };
-    benchmarks[num_benchmarks++] = (typeof(benchmarks[0])){
+    benchmarks[num_benchmarks++] = (__typeof__(benchmarks[0])){
         "difference",
         op_difference_sm, op_difference_rb, op_difference_bms,
         &diff_sm_c, &diff_rb_c, &diff_bms_c,
@@ -783,7 +783,7 @@ static void bench_one_pattern(pattern_t *pat, bool skip_bms, bool verify_only) {
     iter_ctx_t iter_sm_c = { .handle = sm_handle };
     iter_ctx_t iter_rb_c = { .handle = rb_handle };
     iter_ctx_t iter_bms_c = { .handle = bms_handle };
-    benchmarks[num_benchmarks++] = (typeof(benchmarks[0])){
+    benchmarks[num_benchmarks++] = (__typeof__(benchmarks[0])){
         "iterate",
         op_iter_sm, op_iter_rb, op_iter_bms,
         &iter_sm_c, &iter_rb_c, &iter_bms_c,
@@ -794,7 +794,7 @@ static void bench_one_pattern(pattern_t *pat, bool skip_bms, bool verify_only) {
     offset_ctx_t off_sm = { .handle = sm_handle, .offset = 64 };
     offset_ctx_t off_rb = { .handle = rb_handle, .offset = 64 };
     offset_ctx_t off_bms = { .handle = bms_handle, .offset = 64 };
-    benchmarks[num_benchmarks++] = (typeof(benchmarks[0])){
+    benchmarks[num_benchmarks++] = (__typeof__(benchmarks[0])){
         "offset",
         op_offset_sm, op_offset_rb, op_offset_bms,
         &off_sm, &off_rb, &off_bms,
@@ -805,7 +805,7 @@ static void bench_one_pattern(pattern_t *pat, bool skip_bms, bool verify_only) {
     minmax_ctx_t min_sm = { .handle = sm_handle };
     minmax_ctx_t min_rb = { .handle = rb_handle };
     minmax_ctx_t min_bms = { .handle = bms_handle };
-    benchmarks[num_benchmarks++] = (typeof(benchmarks[0])){
+    benchmarks[num_benchmarks++] = (__typeof__(benchmarks[0])){
         "minimum",
         op_min_sm, op_min_rb, op_min_bms,
         &min_sm, &min_rb, &min_bms,
@@ -816,7 +816,7 @@ static void bench_one_pattern(pattern_t *pat, bool skip_bms, bool verify_only) {
     minmax_ctx_t max_sm = { .handle = sm_handle };
     minmax_ctx_t max_rb = { .handle = rb_handle };
     minmax_ctx_t max_bms = { .handle = bms_handle };
-    benchmarks[num_benchmarks++] = (typeof(benchmarks[0])){
+    benchmarks[num_benchmarks++] = (__typeof__(benchmarks[0])){
         "maximum",
         op_max_sm, op_max_rb, op_max_bms,
         &max_sm, &max_rb, &max_bms,
