@@ -1,0 +1,54 @@
+name: Deploy Docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'include/**'
+      - 'src/**'
+      - 'docs/**'
+      - 'man/**'
+      - '.forgejo/workflows/pages.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: codeberg-medium
+    steps:
+      - name: Checkout
+        uses: https://code.forgejo.org/actions/checkout@v4
+
+      - name: Install doxygen
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y doxygen graphviz
+
+      - name: Generate API docs
+        working-directory: docs
+        run: doxygen Doxyfile 2>../doxygen-warnings.txt
+
+      - name: Report doxygen warning count
+        # Surfaces the count without failing the build.  Tighten to a
+        # hard fail once the warning baseline reaches zero.
+        run: |
+          count=$(wc -l < doxygen-warnings.txt)
+          echo "Doxygen produced ${count} warning lines"
+          if [ "${count}" -gt 0 ]; then
+            echo "First 20:"
+            head -20 doxygen-warnings.txt
+          fi
+
+      - name: Stage site
+        run: |
+          mkdir -p _site
+          cp -r docs/api/html/* _site/
+          cp README.md _site/
+
+      - name: Publish to Codeberg Pages
+        uses: https://codeberg.org/jolheiser/cb-pages-action@v1
+        with:
+          folder: _site
+        # Codeberg Pages picks up the `pages` branch automatically.
+        # If this action is unavailable the falback is to push _site
+        # to a `pages` branch via plain git.
+        continue-on-error: true

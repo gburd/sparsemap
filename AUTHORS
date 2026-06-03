@@ -1,0 +1,14 @@
+Sparsemap Authors
+==================
+
+Original Author:
+  Christoph Rupp <chris@crupp.de>
+
+Current Maintainer:
+  Gregory Burd <greg@burd.me>
+
+Contributors:
+  (Add contributors here as they contribute)
+
+The complete list of contributors can be found in the git history:
+  git log --format='%aN <%aE>' | sort -u

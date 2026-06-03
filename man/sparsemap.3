@@ -1,0 +1,158 @@
+.\" SPDX-License-Identifier: MIT
+.\"
+.TH sparsemap 3 "2026-06-03" "sparsemap 3.0.0" "Sparsemap Library"
+.SH NAME
+sm_create, sm_free, sm_add, sm_contains, sm_remove, sm_cardinality,
+sm_union, sm_intersection, sm_difference \- sparse compressed bitmap
+.SH SYNOPSIS
+.nf
+.B #include <sparsemap/sm.h>
+.PP
+Lifecycle:
+.RS
+.BI "sm_t *sm_create(size_t " size );
+.BI "sm_t *sm_copy(const sm_t *" other );
+.BI "sm_t *sm_owned_copy(const sm_t *" map );
+.BI "sm_t *sm_wrap(uint8_t *" data ", size_t " size );
+.BI "void sm_init(sm_t *" map ", uint8_t *" data ", size_t " size );
+.BI "void sm_open(sm_t *" map ", uint8_t *" data ", size_t " size );
+.BI "void sm_clear(sm_t *" map );
+.BI "void sm_free(sm_t *" map );
+.BI "sm_t *sm_set_data_size(sm_t *" map ", uint8_t *" data ", size_t " size );
+.RE
+.PP
+Single-bit:
+.RS
+.BI "bool sm_contains(sm_t *" map ", uint64_t " idx );
+.BI "uint64_t sm_add(sm_t *" map ", uint64_t " idx );
+.BI "uint64_t sm_remove(sm_t *" map ", uint64_t " idx );
+.BI "uint64_t sm_assign(sm_t *" map ", uint64_t " idx ", bool " value );
+.RE
+.PP
+Aggregates and queries:
+.RS
+.BI "size_t sm_cardinality(sm_t *" map );
+.BI "uint64_t sm_minimum(const sm_t *" map );
+.BI "uint64_t sm_maximum(const sm_t *" map );
+.BI "size_t sm_rank(sm_t *" map ", uint64_t " x ", uint64_t " y ", bool " value );
+.BI "uint64_t sm_select(sm_t *" map ", uint64_t " n ", bool " value );
+.BI "uint64_t sm_span(sm_t *" map ", uint64_t " start ", size_t " len ", bool " value );
+.RE
+.PP
+Bulk:
+.RS
+.BI "sm_t *sm_union(const sm_t *" a ", const sm_t *" b );
+.BI "sm_t *sm_intersection(const sm_t *" a ", const sm_t *" b );
+.BI "sm_t *sm_difference(const sm_t *" a ", const sm_t *" b );
+.BI "uint64_t sm_split(sm_t *" map ", uint64_t " idx ", sm_t *" other );
+.BI "sm_t *sm_offset(const sm_t *" map ", ssize_t " offset );
+.fi
+.SH DESCRIPTION
+Sparsemap is a mutable, resizable, run-length-encoded compressed
+bitmap.  Best case stores 16 KB of consecutive set bits in 8 bytes;
+worst case is uncompressed (2048 bits + 8 bytes overhead per chunk).
+See
+.BR sparsemap (7)
+for the architecture and the project's
+.IR docs/API.md
+for the full reference.
+.PP
+The library is single-threaded.  Concurrent reads of an immutable map
+are safe; any writer must hold an external lock.
+.SH ALLOCATION LINEAGE
+Every sparsemap has an internal allocation-lineage tag controlling
+how its data buffer can be resized and freed.  Three lineages exist:
+.TP
+.B SM_OWNED_CONTIGUOUS
+.IR sm_create (),
+.IR sm_copy (),
+.IR sm_owned_copy ().
+The struct and buffer are one heap block.  Free with
+.IR sm_free ()
+or libc
+.IR free ().
+.TP
+.B SM_WRAPPED
+.IR sm_wrap (),
+.IR sm_init (),
+.IR sm_open ().
+The library does not own the data buffer.  Free with
+.IR sm_free ()
+(frees the struct only); the caller frees their buffer
+independently.
+.TP
+.B SM_OWNED_SPLIT
+Produced when
+.IR sm_set_data_size ()
+grows a wrapped map: the library allocates a fresh buffer.  Must be
+freed with
+.IR sm_free ()
+\(em libc
+.IR free ()
+will leak the buffer.
+.PP
+.IR sm_set_data_size (
+.I map
+, NULL,
+.I new_size
+)
+never silently no-ops: it grows the buffer (relocating the map for the
+contiguous lineage, or promoting a wrapped map to owned-split) or
+returns
+.B NULL
+on allocation failure.
+.SH ERRORS
+Mutating functions return
+.B SM_IDX_MAX
+and set
+.I errno
+to
+.B ENOSPC
+when the backing buffer is full.  The caller can grow with
+.IR sm_set_data_size ()
+and retry.  Allocation functions return
+.B NULL
+on allocation failure.
+.SH EMBEDDING
+The library is two files,
+.I sm.h
+and
+.IR sm.c ,
+so it can be vendored by copying them into another source tree.  To
+let two independently-vendored copies coexist in one binary, define
+.B SPARSEMAP_PREFIX
+before including the header:
+.PP
+.RS
+.nf
+.B #define SPARSEMAP_PREFIX myapp_
+.B #include <sparsemap/sm.h>
+.fi
+.RE
+.PP
+Every public function and type then carries the prefix
+.RB ( sm_create
+becomes
+.IR myapp_sm_create ,
+.B sm_t
+becomes
+.IR myapp_sm_t ).
+Compile-time macros
+.RB ( SM_IDX_MAX ,
+the
+.B SM_VERSION_*
+values, the enum constants) are not renamed, and the serialized wire
+format is unchanged.
+.PP
+The wire format produced by
+.IR sm_serialize ()
+and read by
+.IR sm_deserialize ()/ sm_open ()
+is stable across releases within a major version.  The in-memory
+.B struct sparsemap
+layout is not stable: always allocate via the constructors and treat
+the type as opaque.
+.SH SEE ALSO
+.BR sparsemap (7)
+.SH AUTHOR
+Gregory Burd <greg@burd.me>.

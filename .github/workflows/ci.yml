@@ -1,0 +1,163 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [ubuntu-latest]
+        compiler: [gcc, clang]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y meson ninja-build pkg-config valgrind
+          if [ "${{ matrix.compiler }}" = "clang" ]; then
+            sudo apt-get install -y clang
+          fi
+
+      - name: Setup meson
+        env:
+          CC: ${{ matrix.compiler }}
+        run: meson setup builddir
+
+      - name: Build
+        run: ninja -C builddir
+
+      - name: Test
+        run: meson test -C builddir --print-errorlogs
+
+  sanitizers:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [address, undefined]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y meson ninja-build pkg-config
+
+      - name: Build with ${{ matrix.sanitizer }} sanitizer
+        run: |
+          meson setup builddir-${{ matrix.sanitizer }} \
+            -Db_sanitize=${{ matrix.sanitizer }} \
+            -Ddiagnostic=true
+          ninja -C builddir-${{ matrix.sanitizer }}
+
+      - name: Test
+        run: meson test -C builddir-${{ matrix.sanitizer }} --print-errorlogs
+
+  valgrind:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y meson ninja-build pkg-config valgrind
+
+      - name: Build
+        run: |
+          meson setup builddir -Ddiagnostic=true
+          ninja -C builddir
+
+      - name: Valgrind check
+        run: scripts/check_memory.sh builddir
+
+  # Cross-architecture builds via qemu-user-static.
+  cross-arch:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: aarch64
+            triplet: aarch64-linux-gnu
+            qemu: qemu-aarch64-static
+            endian: little
+          - arch: riscv64
+            triplet: riscv64-linux-gnu
+            qemu: qemu-riscv64-static
+            endian: little
+          - arch: s390x
+            triplet: s390x-linux-gnu
+            qemu: qemu-s390x-static
+            endian: big
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cross toolchain + qemu
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+              gcc-${{ matrix.triplet }} \
+              meson ninja-build pkg-config \
+              qemu-user-static binfmt-support
+
+      - name: Write meson cross file
+        run: |
+          mkdir -p .ci
+          cat > .ci/cross-${{ matrix.arch }}.ini <<EOF
+          [binaries]
+          c = '${{ matrix.triplet }}-gcc'
+          ar = '${{ matrix.triplet }}-ar'
+          strip = '${{ matrix.triplet }}-strip'
+          exe_wrapper = '${{ matrix.qemu }}'
+
+          [host_machine]
+          system = 'linux'
+          cpu_family = '${{ matrix.arch }}'
+          cpu = '${{ matrix.arch }}'
+          endian = '${{ matrix.endian }}'
+          EOF
+
+      - name: Setup meson (cross)
+        run: meson setup builddir --cross-file .ci/cross-${{ matrix.arch }}.ini
+
+      - name: Build
+        run: ninja -C builddir
+
+      - name: Test (under qemu)
+        run: meson test -C builddir --print-errorlogs --timeout-multiplier 5
+
+  version-consistency:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check all version sources agree
+        run: scripts/check_version_consistency.sh
+      - name: Check chunk_vector_size_table in sync with generator
+        run: scripts/check_chunk_vector_size_table.sh
+
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang meson ninja-build pkg-config
+      - name: Setup meson with libFuzzer
+        env:
+          CC: clang
+        run: meson setup builddir-fuzz -Dfuzz=enabled
+      - name: Build
+        run: ninja -C builddir-fuzz
+      - name: Smoke fuzz (60s)
+        run: |
+          builddir-fuzz/tests/fuzz_deserialize tests/fuzz-corpus \
+              -max_total_time=60 -print_final_stats=1

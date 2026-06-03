@@ -1,0 +1,35 @@
+option('testing',
+  type : 'boolean',
+  value : true,
+  description : 'Build the unit / regression test suite.',
+)
+
+option('benchmarks',
+  type : 'boolean',
+  value : true,
+  description : 'Build the bench/ comparative benchmark executables.',
+)
+
+option('examples',
+  type : 'boolean',
+  value : true,
+  description : 'Build the examples/ programs.',
+)
+
+option('diagnostic',
+  type : 'boolean',
+  value : false,
+  description : 'Enable SPARSEMAP_DIAGNOSTIC: __sm_assert, invariant checks, and __sm_diag() debug output.',
+)
+
+option('fuzz',
+  type : 'feature',
+  value : 'disabled',
+  description : 'Build the libFuzzer harnesses (requires clang with -fsanitize=fuzzer).',
+)
+
+option('hegel',
+  type : 'feature',
+  value : 'auto',
+  description : 'Build the hegel-c property tests (auto: build only if the hegel-c library and headers are found).',
+)
