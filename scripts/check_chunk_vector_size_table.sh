@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 #
 # scripts/check_chunk_vector_size_table.sh — fail if the static lookup
-# table inlined at src/sparsemap.c:__sm_chunk_calc_vector_size has
+# table inlined at sm.c:__sm_chunk_calc_vector_size has
 # drifted from what scripts/gen_chunk_vector_size_table.py produces.
 #
 # We compare the integer sequences only; whitespace and indent differ.
@@ -15,7 +15,7 @@ regen=$(python3 scripts/gen_chunk_vector_size_table.py \
         | tr -s ' ,' ',' \
         | sed 's/^,*//; s/,*$//')
 
-inlined=$(awk '/static int lookup\[\] = \{/,/};/' src/sparsemap.c \
+inlined=$(awk '/static int lookup\[\] = \{/,/};/' sm.c \
           | tr -dc '0-9, ' \
           | tr -s ' ,' ',' \
           | sed 's/^,*//; s/,*$//')

@@ -15,7 +15,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include <sparsemap.h>
+#include <sm.h>
 
 static int g_failures = 0;
 static int g_total = 0;

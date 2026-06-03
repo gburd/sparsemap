@@ -39,7 +39,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include <sparsemap.h>
+#include <sm.h>
 
 /*
  * Local macros — no munit dependency.  Standalone test, intended to

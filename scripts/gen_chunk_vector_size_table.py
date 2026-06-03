@@ -53,7 +53,7 @@ def create_lookup_table_c_format():
 
   A byte has FOUR two-bit pairs (positions 0-1, 2-3, 4-5, 6-7).  An
   earlier version of this script used range(3) and undercounted the
-  high pair; the inlined table in src/sparsemap.c is the correct
+  high pair; the inlined table in sm.c is the correct
   one.  scripts/check_chunk_vector_size_table.sh enforces the match.
   """
   lookup_table = []

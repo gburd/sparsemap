@@ -7,7 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <assert.h>
-#include <sparsemap.h>
+#include <sm.h>
 
 /* Test counter for scan */
 static size_t scan_count = 0;

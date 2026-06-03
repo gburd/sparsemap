@@ -6,10 +6,11 @@
 #
 # postgres/undo vendors:
 #
-#   src/backend/lib/sparsemap.c             <- src/sparsemap.c
-#   src/include/lib/sparsemap.h             <- include/sparsemap.h
-#   src/include/lib/sparsemap_internal.h    <- include/sparsemap_internal.h
-#                                              (planned for v1.1)
+#   src/backend/lib/sparsemap.c             <- sm.c
+#   src/include/lib/sparsemap.h             <- sm.h
+#
+# The vendored filenames stay sparsemap.{c,h}; only the upstream
+# source filenames moved to sm.{c,h}.
 #
 # Postgres has its own typedefs (uint64, not uint64_t) and macros
 # (pg_attribute_always_inline instead of __attribute__((always_inline))),
@@ -39,8 +40,8 @@ DEST_H="$DEST/src/include/lib/sparsemap.h"
 
 printf 'Syncing %s -> postgres tree at %s\n' "$SRC" "$DEST"
 
-cp "$SRC/src/sparsemap.c"     "$DEST_C"
-cp "$SRC/include/sparsemap.h" "$DEST_H"
+cp "$SRC/sm.c" "$DEST_C"
+cp "$SRC/sm.h" "$DEST_H"
 
 # postgres/undo uses postgres.h instead of <stdint.h> for the integer
 # typedefs.
@@ -58,15 +59,11 @@ for f in "$DEST_C" "$DEST_H"; do
     sed -i 's|__attribute__((always_inline))|pg_attribute_always_inline|g' "$f"
 
     # Switch include path for sparsemap.h within sparsemap.c.
-    sed -i 's|#include "sparsemap.h"|#include "lib/sparsemap.h"|' "$f"
-    sed -i 's|#include "popcount.h"|#include "port/pg_bitutils.h"|' "$f"
+    sed -i 's|#include "sm.h"|#include "lib/sparsemap.h"|' "$f"
 done
 
-# Postgres tree carries its own popcount in port/pg_bitutils.h, so we
-# don't ship include/popcount.h.
+# Postgres tree carries its own popcount in port/pg_bitutils.h; the
+# sparsemap portability shims are scalar fallbacks folded into sm.c.
 
 printf '\nSync complete.  Diff against postgres HEAD:\n'
 git -C "$DEST" diff --stat -- "${DEST_C#$DEST/}" "${DEST_H#$DEST/}"
-
-printf '\nReminder: postgres/undo also vendors src/include/lib/sparsemap_internal.h.\n'
-printf 'That will be synced via the chunk-codec promotion in v1.1.\n'

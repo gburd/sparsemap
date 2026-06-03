@@ -4,18 +4,14 @@
 # contrib/pg_tre_sync.sh — sync the canonical sparsemap into pg_tre's
 # vendored layout.
 #
-# pg_tre vendors three files:
+# pg_tre vendors two files:
 #
-#   src/util/sparsemap.c           <- src/sparsemap.c
-#   include/pg_tre/sparsemap.h     <- include/sparsemap.h
-#   include/pg_tre/chunk_codec.h   <- include/sparsemap_internal.h
-#                                     (renamed; chunk-codec inlines
-#                                      will be promoted out of
-#                                      sparsemap.c in v1.1)
+#   src/util/sparsemap.c           <- sm.c
+#   include/pg_tre/sparsemap.h     <- sm.h
 #
-# Phase 3b note: the chunk-codec extraction (sparsemap_internal.h) is
-# planned for v1.1; until then this script syncs only sparsemap.{c,h}
-# and reminds the operator to keep their existing chunk_codec.h.
+# The vendored filenames stay sparsemap.{c,h} so pg_tre's own #include
+# lines don't change; only the upstream source filenames moved to
+# sm.{c,h}.
 #
 # Usage:  contrib/pg_tre_sync.sh PATH/TO/pg_tre
 #
@@ -41,26 +37,17 @@ printf 'Syncing %s -> %s ...\n' "$SRC" "$DEST"
 
 # Plain copy: pg_tre's sparsemap.c has the same struct layout, same
 # function signatures, and uses uint64_t / standard __attribute__.
-cp "$SRC/src/sparsemap.c"      "$DEST/src/util/sparsemap.c"
-cp "$SRC/include/sparsemap.h"  "$DEST/include/pg_tre/sparsemap.h"
+cp "$SRC/sm.c"  "$DEST/src/util/sparsemap.c"
+cp "$SRC/sm.h"  "$DEST/include/pg_tre/sparsemap.h"
 
-# Rewrite the include of sparsemap.h inside sparsemap.c to use the
-# pg_tre subdirectory layout.
-sed -i 's|#include "sparsemap.h"|#include "pg_tre/sparsemap.h"|' \
+# Rewrite the include of sm.h inside the copied implementation to use
+# the pg_tre subdirectory layout and the vendored filename.
+sed -i 's|#include "sm.h"|#include "pg_tre/sparsemap.h"|' \
     "$DEST/src/util/sparsemap.c"
-
-# Rewrite popcount.h include path similarly.
-sed -i 's|#include "popcount.h"|#include "pg_tre/popcount.h"|' \
-    "$DEST/src/util/sparsemap.c"
-
-# Copy popcount.h too.
-cp "$SRC/include/popcount.h"   "$DEST/include/pg_tre/popcount.h"
 
 printf '\nSync complete.  Diff against pg_tre HEAD:\n'
 git -C "$DEST" diff --stat -- src/util/sparsemap.c include/pg_tre/
 
-printf '\nReminder: the chunk-codec extraction (sparsemap_internal.h)\n'
-printf 'is planned for v1.1.  Until then keep your existing\n'
-printf 'include/pg_tre/chunk_codec.h.  Once v1.1 ships, this script\n'
-printf 'will sync the upstream sparsemap_internal.h into chunk_codec.h\n'
-printf 'with the necessary header-guard rewrite.\n'
+printf '\nNote: sparsemap is now a two-file library (sm.h + sm.c); the\n'
+printf 'portability shims that used to live in popcount.h / sm_portability.h\n'
+printf 'are folded into the implementation, so no extra header is needed.\n'

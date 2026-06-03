@@ -15,7 +15,7 @@
 #include <errno.h>
 #include <munit.h>
 #include <qc.h>
-#include <sparsemap.h>
+#include <sm.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>

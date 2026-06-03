@@ -20,8 +20,10 @@ cc = meson.get_compiler('c')
 # strdup, etc.).
 add_project_arguments('-D_GNU_SOURCE', language : 'c')
 
-# Project-wide include directory.
-inc = include_directories('include')
+# The library and its public header live at the repository root, BSD
+# single-directory style.  sm.h is the public API; sm.c is the entire
+# implementation (the portability shims are folded in).
+inc = include_directories('.')
 
 # Optional diagnostic mode: enables __sm_diag() / __sm_assert() /
 # __sm_check_invariants under SPARSEMAP_DIAGNOSTIC.  Off by default;
@@ -30,8 +32,33 @@ if get_option('diagnostic')
   add_project_arguments('-DSPARSEMAP_DIAGNOSTIC=1', language : 'c')
 endif
 
-# Build the library, headers, and pkg-config from src/.
-subdir('src')
+libsparsemap = both_libraries('sparsemap',
+  'sm.c',
+  include_directories : inc,
+  install : true,
+  version : meson.project_version(),
+  soversion : '1',
+)
+
+libsparsemap_dep = declare_dependency(
+  link_with : libsparsemap.get_static_lib(),
+  include_directories : inc,
+)
+
+# Public header.  Installed under <prefix>/include/sparsemap/sm.h so a
+# system consumer writes #include <sparsemap/sm.h>; a vendoring
+# consumer just copies sm.h and sm.c into its tree.
+install_headers('sm.h', subdir : 'sparsemap')
+
+# pkg-config .pc file generation.
+pkg = import('pkgconfig')
+pkg.generate(libsparsemap,
+  name : 'sparsemap',
+  description : 'Sparse, compressed bitmap with run-length encoding',
+  version : meson.project_version(),
+  url : 'https://codeberg.org/gregburd/sparsemap',
+  subdirs : ['sparsemap'],
+)
 
 # Build tests (controlled by -Dtesting=true|false; on by default).
 if get_option('testing')

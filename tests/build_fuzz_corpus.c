@@ -7,7 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sparsemap.h>
+#include <sm.h>
 
 static void
 emit(const char *path, const uint8_t *data, size_t n)

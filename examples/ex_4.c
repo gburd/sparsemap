@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #include <assert.h>
 #include <common.h>
-#include <sparsemap.h>
+#include <sm.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>

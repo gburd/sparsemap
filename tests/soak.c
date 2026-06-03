@@ -12,7 +12,7 @@
 
 #include <common.h>
 #include <roaring.h>
-#include <sparsemap.h>
+#include <sm.h>
 #include <tdigest.h>
 
 #include "midl.c"

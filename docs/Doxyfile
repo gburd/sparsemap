@@ -16,7 +16,7 @@ ALWAYS_DETAILED_SEC    = NO
 INLINE_INHERITED_MEMB  = NO
 FULL_PATH_NAMES        = YES
 STRIP_FROM_PATH        = ../
-STRIP_FROM_INC_PATH    = ../include
+STRIP_FROM_INC_PATH    = ..
 SHORT_NAMES            = NO
 
 # -- Build options --
@@ -59,7 +59,7 @@ WARN_AS_ERROR          = NO
 WARN_FORMAT            = "$file:$line: $text"
 
 # -- Input --
-INPUT                  = ../include
+INPUT                  = ../sm.h
 INPUT_ENCODING         = UTF-8
 FILE_PATTERNS          = *.h
 RECURSIVE              = YES

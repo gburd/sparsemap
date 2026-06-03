@@ -25,7 +25,7 @@
 #include <sys/resource.h>
 #include <time.h>
 
-#include <sparsemap.h>
+#include <sm.h>
 #include <roaring.h>
 #include <tdigest.h>
 

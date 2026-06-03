@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 
-#include <sparsemap.h>
+#include <sm.h>
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wvariadic-macros"

@@ -15,7 +15,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include <sparsemap.h>
+#include <sm.h>
 
 static void
 demo_predicates(void)

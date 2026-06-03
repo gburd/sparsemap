@@ -21,7 +21,7 @@
 #endif
 
 #include <common.h>
-#include <sparsemap.h>
+#include <sm.h>
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wvariadic-macros"

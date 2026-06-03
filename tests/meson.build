@@ -26,7 +26,7 @@ test_main = executable('test_main',
   'common.c',
   'qc.c',
   'midl.c',
-  '../src/sparsemap.c',
+  '../sm.c',
   c_args : [
     '-DSPARSEMAP_TESTING',
     '-Wno-unused-parameter',

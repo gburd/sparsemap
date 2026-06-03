@@ -44,7 +44,7 @@ geninfo -o coverage/coverage.info \
 
 # Strip system / test / generated paths from the report — we only
 # care about the library implementation.
-lcov --extract coverage/coverage.info '*src/sparsemap.c' \
+lcov --extract coverage/coverage.info '*sm.c' \
      --output-file coverage/coverage.info \
      --rc lcov_branch_coverage=1 2>/dev/null
 

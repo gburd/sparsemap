@@ -30,7 +30,7 @@
 #include <string.h>
 #include <stdio.h>
 
-#include <sparsemap.h>
+#include <sm.h>
 
 /* Reasonable input cap: refuse buffers that exceed it.  Real
  * sparsemaps in pg_tre top out around 16 KiB; 64 KiB is a generous
