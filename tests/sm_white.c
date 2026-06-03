@@ -23,7 +23,7 @@ static char *_qcc_format_chunk(__sm_idx_t start, const __sm_chunk_t *chunk,
     bool none);
 
 static void __attribute__((format(printf, 2, 3), unused))
-__sm_diag_map(sparsemap_t *map, const char *fmt, ...)
+__sm_diag_map(sm_t *map, const char *fmt, ...)
 {
 	va_list args = { 0 };
 	va_start(args, fmt);
@@ -132,7 +132,7 @@ QCC_showSparsemap(void *value, int len)
 {
 	(void)len;
 	char *buf = NULL;
-	const sparsemap_t *map = (sparsemap_t *)value;
+	const sm_t *map = (sm_t *)value;
 	const size_t count = __sm_get_chunk_count(map);
 
 	if (count > 0) {
@@ -271,12 +271,12 @@ QCC_genChunk()
 	return QCC_initGenValue(p, 1, QCC_showChunk, QCC_freeChunkValue);
 }
 
-extern void populate_map(sparsemap_t *map, int size, int max_value);
+extern void populate_map(sm_t *map, int size, int max_value);
 
 QCC_GenValue *
 QCC_genSparsemap()
 {
-	sparsemap_t *map = sparsemap(1024);
+	sm_t *map = sparsemap(1024);
 	return QCC_initGenValue(map, 1, QCC_showSparsemap,
 	    QCC_freeSparsemapValue);
 }
@@ -395,7 +395,7 @@ QCC_TestStatus
 _tst_get_chunk_offset(QCC_GenValue **vals, int len, QCC_Stamp **stamp)
 {
 	const unsigned int idx = *QCC_getValue(vals, 0, unsigned int *);
-	sparsemap_t *map = QCC_getValue(vals, 1, sparsemap_t *);
+	sm_t *map = QCC_getValue(vals, 1, sm_t *);
 	const unsigned int max_offset =
 	    (SM_FLAGS_PER_INDEX - 1) * sizeof(__sm_bitvec_t);
 	const unsigned int rnd_offset =
@@ -710,7 +710,7 @@ _tst_rle_select_rank_consistency(QCC_GenValue **vals, int len,
 	(void)len;
 	(void)stamp;
 
-	sparsemap_t *map = QCC_getValue(vals, 0, sparsemap_t *);
+	sm_t *map = QCC_getValue(vals, 0, sm_t *);
 	if (!map || !map->m_data) {
 		return QCC_OK;
 	}
@@ -770,7 +770,7 @@ _tst_rle_scan_completeness(QCC_GenValue **vals, int len, QCC_Stamp **stamp)
 	(void)len;
 	(void)stamp;
 
-	sparsemap_t *map = QCC_getValue(vals, 0, sparsemap_t *);
+	sm_t *map = QCC_getValue(vals, 0, sm_t *);
 	if (!map || !map->m_data) {
 		return QCC_OK;
 	}

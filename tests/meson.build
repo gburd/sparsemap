@@ -56,13 +56,13 @@ endforeach
 test('main', test_main, timeout : 600)
 
 # Symbol-prefix regression: compile a private copy of the library with
-# -DSM_PREFIX and link a consumer that uses the renamed API.  Guards
-# against the SM_PREFIX list in sm.h drifting out of sync with the
+# -DSPARSEMAP_PREFIX and link a consumer that uses the renamed API.  Guards
+# against the SPARSEMAP_PREFIX list in sm.h drifting out of sync with the
 # exported symbol set.
 test_prefix = executable('test_prefix',
   'test_prefix.c',
   '../sm.c',
-  c_args : ['-DSM_PREFIX=smtest_'],
+  c_args : ['-DSPARSEMAP_PREFIX=smtest_'],
   include_directories : inc,
 )
 test('prefix', test_prefix, timeout : 60)

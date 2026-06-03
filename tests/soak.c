@@ -348,7 +348,7 @@ static void
 record_merge_mutation(FILE *out, void *handle)
 {
   if (recording) {
-    sparsemap_t *map = (sparsemap_t *)handle;
+    sm_t *map = (sm_t *)handle;
     fprintf(out, "merge %zu ", sm_maximum(map));
     sm_scan(map, __scan_record_offsets, 0, (void *)out);
     fprintf(out, "\n");
@@ -359,7 +359,7 @@ static void
 record_checkpoint(FILE *out, void *handle)
 {
   if (recording) {
-    sparsemap_t *map = (sparsemap_t *)handle;
+    sm_t *map = (sm_t *)handle;
     size_t capacity = sm_get_capacity(map);
     size_t buffer_size = sm_get_size(map);
     size_t encoded_size = b64_encoded_size(buffer_size);
@@ -373,9 +373,9 @@ record_checkpoint(FILE *out, void *handle)
 /* sparsemap ------------------------------------------------------------- */
 
 static uint64_t
-_sparsemap_set(sparsemap_t **_map, uint64_t idx, bool value)
+_sparsemap_set(sm_t **_map, uint64_t idx, bool value)
 {
-  sparsemap_t *map = *_map, *new_map = NULL;
+  sm_t *map = *_map, *new_map = NULL;
   do {
     uint64_t l = sm_assign(map, idx, value);
     if (l != idx) {
@@ -397,7 +397,7 @@ _sparsemap_set(sparsemap_t **_map, uint64_t idx, bool value)
 static void *
 __sm_alloc(size_t capacity)
 {
-  sparsemap_t *map = sparsemap(capacity);
+  sm_t *map = sparsemap(capacity);
   assert(map != NULL);
   return map;
 }
@@ -405,35 +405,35 @@ __sm_alloc(size_t capacity)
 static void
 __sm_free(void *handle)
 {
-  sparsemap_t *map = (sparsemap_t *)handle;
+  sm_t *map = (sm_t *)handle;
   free(map);
 }
 
 static pgno_t
 __sm_set(void **handle, pgno_t pg)
 {
-  sparsemap_t **map = (sparsemap_t **)handle;
+  sm_t **map = (sm_t **)handle;
   return (pgno_t)_sparsemap_set(map, pg, true);
 }
 
 static bool
 __sm_is_set(void *handle, pgno_t pg)
 {
-  sparsemap_t *map = (sparsemap_t *)handle;
+  sm_t *map = (sm_t *)handle;
   return sm_contains(map, pg);
 }
 
 static pgno_t
 __sm_clear(void **handle, pgno_t pg)
 {
-  sparsemap_t **map = (sparsemap_t **)handle;
+  sm_t **map = (sm_t **)handle;
   return (pgno_t)_sparsemap_set(map, pg, false);
 }
 
 static pgno_t
 __sm_find_span(void *handle, unsigned len)
 {
-  sparsemap_t *map = (sparsemap_t *)handle;
+  sm_t *map = (sm_t *)handle;
   pgno_t pgno = (pgno_t)sm_span(map, 0, len, true);
   return SM_NOT_FOUND(pgno) ? (pgno_t)-1 : pgno;
 }
@@ -441,7 +441,7 @@ __sm_find_span(void *handle, unsigned len)
 static bool
 __sm_take_span(void **handle, pgno_t pg, unsigned len)
 {
-  sparsemap_t **map = (sparsemap_t **)handle;
+  sm_t **map = (sm_t **)handle;
   for (pgno_t i = pg; i < pg + len; i++) {
     assert(_sparsemap_set(map, i, false) == i);
   }
@@ -451,7 +451,7 @@ __sm_take_span(void **handle, pgno_t pg, unsigned len)
 static bool
 __sm_release_span(void **handle, pgno_t pg, unsigned len)
 {
-  sparsemap_t **map = (sparsemap_t **)handle;
+  sm_t **map = (sm_t **)handle;
   for (pgno_t i = pg; i < pg + len; i++) {
     assert(_sparsemap_set(map, i, true) == i);
   }
@@ -461,7 +461,7 @@ __sm_release_span(void **handle, pgno_t pg, unsigned len)
 static bool
 __sm_is_span(void *handle, pgno_t pg, unsigned len)
 {
-  sparsemap_t *map = (sparsemap_t *)handle;
+  sm_t *map = (sm_t *)handle;
   for (pgno_t i = pg; i < pg + len; i++) {
     if (sm_contains(map, i) != true) {
       return false;
@@ -473,7 +473,7 @@ __sm_is_span(void *handle, pgno_t pg, unsigned len)
 static bool
 __sm_is_empty(void *handle, pgno_t pg, unsigned len)
 {
-  sparsemap_t *map = (sparsemap_t *)handle;
+  sm_t *map = (sm_t *)handle;
   for (pgno_t i = 0; i < len; i++) {
     if (sm_contains(map, pg + i) != false) {
       return false;
@@ -485,7 +485,7 @@ __sm_is_empty(void *handle, pgno_t pg, unsigned len)
 static bool
 __sm_is_first(void *handle, pgno_t pg, unsigned len)
 {
-  sparsemap_t *map = (sparsemap_t *)handle;
+  sm_t *map = (sm_t *)handle;
   for (uint64_t i = 0; i < pg + len; i++) {
     uint64_t j = 0;
     while (sm_contains(map, i + j) == true && j < len) {
@@ -501,9 +501,9 @@ __sm_is_first(void *handle, pgno_t pg, unsigned len)
 static bool
 __sm_merge(void **handle, void *other_handle)
 {
-  sparsemap_t **map = (sparsemap_t **)handle;
-  sparsemap_t *other = (sparsemap_t *)other_handle;
-  sparsemap_t *merged = sm_union(*map, other);
+  sm_t **map = (sm_t **)handle;
+  sm_t *other = (sm_t *)other_handle;
+  sm_t *merged = sm_union(*map, other);
   if (merged == NULL) {
     /* Both empty — nothing to merge, that's fine. */
     return true;
@@ -516,14 +516,14 @@ __sm_merge(void **handle, void *other_handle)
 static size_t
 __sm_size(void *handle)
 {
-  sparsemap_t *map = (sparsemap_t *)handle;
+  sm_t *map = (sm_t *)handle;
   return sm_get_size(map);
 }
 
 static size_t
 __sm_count(void *handle)
 {
-  sparsemap_t *map = (sparsemap_t *)handle;
+  sm_t *map = (sm_t *)handle;
   return sm_rank(map, 0, SM_IDX_MAX, true);
 }
 
@@ -1106,7 +1106,7 @@ FILE *stats_fp;
   record_checkpoint(record_fp, handles[0])
 
 bool
-verify_sm_eq_rb(sparsemap_t *map, roaring_bitmap_t *rbm)
+verify_sm_eq_rb(sm_t *map, roaring_bitmap_t *rbm)
 {
   bool ret = true;
   uint64_t max = roaring_bitmap_maximum(rbm);
@@ -1130,7 +1130,7 @@ verify_sm_eq_rb(sparsemap_t *map, roaring_bitmap_t *rbm)
 }
 
 bool
-verify_sm_eq_ml(sparsemap_t *map, MDB_IDL list)
+verify_sm_eq_ml(sm_t *map, MDB_IDL list)
 {
   bool ret = true;
   for (MDB_ID i = 1; i <= list[0]; i++) {
@@ -1161,10 +1161,10 @@ verify_eq(unsigned a, void *ad, unsigned b, void *bd)
   assert(a == SM);
   switch (b) {
   case ML:
-    assert((ret = verify_sm_eq_ml((sparsemap_t *)ad, (MDB_IDL)bd)) == true);
+    assert((ret = verify_sm_eq_ml((sm_t *)ad, (MDB_IDL)bd)) == true);
     break;
   case RB:
-    assert((ret = verify_sm_eq_rb((sparsemap_t *)ad, (roaring_bitmap_t *)bd)) == true);
+    assert((ret = verify_sm_eq_rb((sm_t *)ad, (roaring_bitmap_t *)bd)) == true);
     break;
   default:
     break;

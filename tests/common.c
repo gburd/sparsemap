@@ -211,7 +211,7 @@ print_array(int *array, int l)
 }
 
 bool
-has_span(sparsemap_t *map, int *array, int l, int n)
+has_span(sm_t *map, int *array, int l, int n)
 {
   if (n == 0 || l == 0 || n > l) {
     return false;
@@ -351,7 +351,7 @@ setup_test_array(int a[], int l, int max_value)
 }
 
 void
-bitmap_from_uint32(sparsemap_t *map, uint32_t number)
+bitmap_from_uint32(sm_t *map, uint32_t number)
 {
   for (int i = 0; i < 32; i++) {
     bool bit = number & (1 << i);
@@ -402,7 +402,7 @@ print_bits(char *name, uint64_t value)
 }
 
 void
-sm_bitmap_from_uint64(sparsemap_t *map, int offset, uint64_t number)
+sm_bitmap_from_uint64(sm_t *map, int offset, uint64_t number)
 {
   for (int i = offset; i < 64; i++) {
     bool bit = number & ((uint64_t)1 << i);
@@ -411,7 +411,7 @@ sm_bitmap_from_uint64(sparsemap_t *map, int offset, uint64_t number)
 }
 
 uint64_t
-sm_add_span(sparsemap_t *map, int map_size, int span_length)
+sm_add_span(sm_t *map, int map_size, int span_length)
 {
   int attempts = map_size / span_length;
   uint64_t placed_at;
@@ -432,7 +432,7 @@ sm_add_span(sparsemap_t *map, int map_size, int span_length)
 }
 
 void
-sm_whats_set(sparsemap_t *map, int off, int len)
+sm_whats_set(sm_t *map, int off, int len)
 {
   printf("what's set in the range [%d, %d): ", off, off + len);
   for (int i = off; i < off + len; i++) {
@@ -444,7 +444,7 @@ sm_whats_set(sparsemap_t *map, int off, int len)
 }
 
 bool
-sm_is_span(sparsemap_t *map, uint64_t m, int len, bool value)
+sm_is_span(sm_t *map, uint64_t m, int len, bool value)
 {
   for (uint64_t i = m; i < m + len; i++) {
     if (sm_contains(map, i) != value) {
@@ -455,7 +455,7 @@ sm_is_span(sparsemap_t *map, uint64_t m, int len, bool value)
 }
 
 bool
-sm_occupied(sparsemap_t *map, uint64_t m, int len, bool value)
+sm_occupied(sm_t *map, uint64_t m, int len, bool value)
 {
   for (uint64_t i = m; i < (uint64_t)len; i++) {
     if (sm_contains(map, i) == value) {

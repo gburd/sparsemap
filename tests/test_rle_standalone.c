@@ -33,7 +33,7 @@ main(void)
   assert(buf != NULL);
 
   /* Create sparsemap */
-  sparsemap_t *map = sparsemap(0);
+  sm_t *map = sparsemap(0);
   assert(map != NULL);
   sm_init(map, buf, 16384);
 

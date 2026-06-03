@@ -93,7 +93,7 @@ CASE(test_wrap_then_grow_via_set_data_size_null)
 {
     _Alignas(uint64_t) uint8_t small[256];
     memset(small, 0, sizeof(small));
-    sparsemap_t *map = sm_wrap(small, sizeof(small));
+    sm_t *map = sm_wrap(small, sizeof(small));
     EXPECT(map != NULL, "wrap allocates handle");
 
     /*
@@ -111,7 +111,7 @@ CASE(test_wrap_then_grow_via_set_data_size_null)
      *     promoted to owned-split or owned-contiguous), or
      *   - return NULL with m_capacity unchanged at 256.
      */
-    sparsemap_t *grown = sm_set_data_size(map, NULL, 4096);
+    sm_t *grown = sm_set_data_size(map, NULL, 4096);
 
     if (grown == NULL) {
         /* Acceptable failure mode: caller's buffer is intact. */
@@ -174,7 +174,7 @@ CASE(test_wrap_then_swap_buffer)
 {
     _Alignas(uint64_t) uint8_t small[256];
     memset(small, 0, sizeof(small));
-    sparsemap_t *map = sm_wrap(small, sizeof(small));
+    sm_t *map = sm_wrap(small, sizeof(small));
     EXPECT(map != NULL, "wrap allocates handle");
 
     sm_clear(map);
@@ -184,7 +184,7 @@ CASE(test_wrap_then_swap_buffer)
     memset(big, 0, sizeof(big));
     memcpy(big, small, sizeof(small));
 
-    sparsemap_t *grown = sm_set_data_size(map, big, sizeof(big));
+    sm_t *grown = sm_set_data_size(map, big, sizeof(big));
     EXPECT(grown != NULL, "swap-buffer grow succeeds");
     EXPECT(sm_get_capacity(grown) == sizeof(big),
            "post-swap capacity equals new buffer size");
@@ -235,14 +235,14 @@ CASE(test_owned_copy_normalizes_lineage)
     /* Make a wrap'd input. */
     _Alignas(uint64_t) uint8_t buf[1024];
     memset(buf, 0, sizeof(buf));
-    sparsemap_t *wrapped = sm_wrap(buf, sizeof(buf));
+    sm_t *wrapped = sm_wrap(buf, sizeof(buf));
     sm_clear(wrapped);
     for (uint64_t i = 0; i < 50; i++) {
         sm_add(wrapped, i * 16);
     }
 
     /* Copy with normalized lineage. */
-    sparsemap_t *owned = sm_owned_copy(wrapped);
+    sm_t *owned = sm_owned_copy(wrapped);
     EXPECT(owned != NULL, "owned_copy succeeds");
 
     /* Same observable state. */
@@ -254,7 +254,7 @@ CASE(test_owned_copy_normalizes_lineage)
     }
 
     /* The copy can be grown. */
-    sparsemap_t *grown = sm_set_data_size(owned, NULL, 4096);
+    sm_t *grown = sm_set_data_size(owned, NULL, 4096);
     EXPECT(grown != NULL, "owned_copy result is growable");
     EXPECT(sm_get_capacity(grown) >= 4096,
            "grown capacity reflects requested size");
@@ -279,7 +279,7 @@ CASE(test_union_with_wrapped_input_grows_result)
     /* Input A: wrap'd, populated densely.  We'll drive the result. */
     _Alignas(uint64_t) uint8_t a_buf[2048];
     memset(a_buf, 0, sizeof(a_buf));
-    sparsemap_t *a = sm_wrap(a_buf, sizeof(a_buf));
+    sm_t *a = sm_wrap(a_buf, sizeof(a_buf));
     sm_clear(a);
     for (uint64_t i = 0; i < 256; i++) {
         if (sm_add(a, i * 64) != i * 64) {
@@ -288,7 +288,7 @@ CASE(test_union_with_wrapped_input_grows_result)
     }
 
     /* Input B: owned-contiguous, populated with disjoint bits. */
-    sparsemap_t *b = sparsemap(2048);
+    sm_t *b = sparsemap(2048);
     EXPECT(b != NULL, "owned input allocates");
     sm_clear(b);
     for (uint64_t i = 0; i < 256; i++) {
@@ -302,7 +302,7 @@ CASE(test_union_with_wrapped_input_grows_result)
      * contiguous and must contain the union of bits without
      * corrupting either input's buffer.
      */
-    sparsemap_t *u = sm_union(a, b);
+    sm_t *u = sm_union(a, b);
     EXPECT(u != NULL, "union returns a non-NULL result");
 
     /* Spot-check a few bits from each side. */
@@ -328,8 +328,8 @@ CASE(test_intersection_difference_with_wrapped)
     _Alignas(uint64_t) uint8_t b_buf[2048];
     memset(a_buf, 0, sizeof(a_buf));
     memset(b_buf, 0, sizeof(b_buf));
-    sparsemap_t *a = sm_wrap(a_buf, sizeof(a_buf));
-    sparsemap_t *b = sm_wrap(b_buf, sizeof(b_buf));
+    sm_t *a = sm_wrap(a_buf, sizeof(a_buf));
+    sm_t *b = sm_wrap(b_buf, sizeof(b_buf));
     sm_clear(a);
     sm_clear(b);
 
@@ -339,8 +339,8 @@ CASE(test_intersection_difference_with_wrapped)
         sm_add(b, i * 100 + (i % 2));
     }
 
-    sparsemap_t *intr = sm_intersection(a, b);
-    sparsemap_t *diff = sm_difference(a, b);
+    sm_t *intr = sm_intersection(a, b);
+    sm_t *diff = sm_difference(a, b);
 
     /* Even-index bits are in both (i*100 == i*100 + 0); odd-index aren't. */
     EXPECT(sm_contains(intr, 0), "even index in intersection");

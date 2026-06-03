@@ -78,7 +78,7 @@ CASE(test_max_on_zero_used_with_dirty_buffer)
 {
     _Alignas(uint64_t) uint8_t buf[256];
     memset(buf, 0xFF, sizeof(buf)); /* every byte non-zero */
-    sparsemap_t *map = sm_wrap(buf, sizeof(buf));
+    sm_t *map = sm_wrap(buf, sizeof(buf));
     EXPECT(map != NULL, "wrap succeeds");
 
     /*
@@ -97,7 +97,7 @@ CASE(test_rank_on_zero_used_with_dirty_buffer)
 {
     _Alignas(uint64_t) uint8_t buf[256];
     memset(buf, 0xAB, sizeof(buf));
-    sparsemap_t *map = sm_wrap(buf, sizeof(buf));
+    sm_t *map = sm_wrap(buf, sizeof(buf));
     EXPECT(map != NULL, "wrap succeeds");
 
     /* Rank of "set bits" in any range of an empty map must be 0. */
@@ -112,9 +112,9 @@ CASE(test_union_with_zero_used_input)
 {
     _Alignas(uint64_t) uint8_t bad[256];
     memset(bad, 0x55, sizeof(bad));
-    sparsemap_t *a = sm_wrap(bad, sizeof(bad));
+    sm_t *a = sm_wrap(bad, sizeof(bad));
 
-    sparsemap_t *b = sparsemap(2048);
+    sm_t *b = sparsemap(2048);
     sm_clear(b);
     sm_add(b, 42);
     sm_add(b, 4242);
@@ -124,7 +124,7 @@ CASE(test_union_with_zero_used_input)
      * equivalent to the populated map — it must not iterate `a`'s
      * garbage chunk metadata.
      */
-    sparsemap_t *u = sm_union(a, b);
+    sm_t *u = sm_union(a, b);
     EXPECT(u != NULL, "union returns non-NULL");
     EXPECT(sm_contains(u, 42), "bit from b present in union");
     EXPECT(sm_contains(u, 4242), "bit from b present in union");
@@ -139,14 +139,14 @@ CASE(test_intersection_with_zero_used_input)
 {
     _Alignas(uint64_t) uint8_t bad[256];
     memset(bad, 0x77, sizeof(bad));
-    sparsemap_t *a = sm_wrap(bad, sizeof(bad));
+    sm_t *a = sm_wrap(bad, sizeof(bad));
 
-    sparsemap_t *b = sparsemap(2048);
+    sm_t *b = sparsemap(2048);
     sm_clear(b);
     sm_add(b, 42);
 
     /* Intersection of zero-used and anything must be empty (no crash). */
-    sparsemap_t *i = sm_intersection(a, b);
+    sm_t *i = sm_intersection(a, b);
 
     /*
      * Some implementations return NULL for an empty intersection.
@@ -179,7 +179,7 @@ CASE(test_intersection_with_zero_used_input)
  */
 CASE(test_fresh_map_is_empty)
 {
-    sparsemap_t *m = sparsemap(2048);
+    sm_t *m = sparsemap(2048);
     EXPECT(m != NULL, "fresh allocation succeeds");
 
     EXPECT(sm_cardinality(m) == 0, "fresh cardinality is 0");
@@ -194,7 +194,7 @@ CASE(test_fresh_map_is_empty)
 
 CASE(test_cleared_map_is_empty)
 {
-    sparsemap_t *m = sparsemap(2048);
+    sm_t *m = sparsemap(2048);
     sm_add(m, 100);
     sm_add(m, 1000);
     EXPECT(sm_cardinality(m) == 2, "populated cardinality 2");

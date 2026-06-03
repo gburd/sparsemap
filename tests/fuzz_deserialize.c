@@ -41,7 +41,7 @@
  * don't add bits here (that would create new SM_IDX_MAX paths the
  * fuzzer can't distinguish from corruption); we only read. */
 static void
-exercise_readonly(sparsemap_t *m)
+exercise_readonly(sm_t *m)
 {
     /* Cardinality + a popcount walk through every chunk. */
     (void)sm_cardinality(m);
@@ -97,7 +97,7 @@ LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
      * postgres/undo and pg_tre take when they read a serialized
      * sparsemap from disk and don't trust the bytes. */
     {
-        sparsemap_t *m = sm_create(size + 64);
+        sm_t *m = sm_create(size + 64);
         if (m != NULL) {
             uint8_t *buf = sm_get_data(m);
             memcpy(buf, data, size);
@@ -113,7 +113,7 @@ LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
      * its own buffer.  Fuzz it separately because the slack
      * arithmetic is the kind of thing that integer-overflows. */
     {
-        sparsemap_t *m = sm_open_copy(data, size, 64);
+        sm_t *m = sm_open_copy(data, size, 64);
         if (m != NULL) {
             exercise_readonly(m);
             sm_free(m);
@@ -126,7 +126,7 @@ LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
      * everything but properly-formed bytes; we want to ensure no
      * malformed header smuggles through to the chunk-stream walker. */
     {
-        sparsemap_t *m = sm_deserialize(data, size);
+        sm_t *m = sm_deserialize(data, size);
         if (m != NULL) {
             exercise_readonly(m);
             sm_free(m);

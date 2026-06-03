@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 /*
- * test_prefix.c - verify the SM_PREFIX symbol-renaming mechanism.
+ * test_prefix.c - verify the SPARSEMAP_PREFIX symbol-renaming mechanism.
  *
  * This translation unit is compiled with -DSM_PREFIX=smtest_ and
  * linked against a private copy of sm.c built with the same define
@@ -32,7 +32,7 @@
 int
 main(void)
 {
-	smtest_sparsemap_t *m;
+	smtest_sm_t *m;
 	smtest_sm_stats_t st;
 	smtest_sm_membership_t mb;
 	uint64_t arr[3] = { 5, 9, 100000 };
@@ -67,7 +67,7 @@ main(void)
 
 	smtest_sm_free(m);
 
-	printf("test_prefix: SM_PREFIX renaming OK (version %s)\n",
+	printf("test_prefix: SPARSEMAP_PREFIX renaming OK (version %s)\n",
 	    SM_VERSION_STRING);
 	return (0);
 }

@@ -19,7 +19,7 @@ emit(const char *path, const uint8_t *data, size_t n)
 }
 
 static void
-emit_map(const char *path, const sparsemap_t *m)
+emit_map(const char *path, const sm_t *m)
 {
     size_t n = sm_get_size(m);
     emit(path, sm_get_data(m), n);
@@ -33,7 +33,7 @@ main(int argc, char *argv[])
 
     /* Empty map. */
     {
-        sparsemap_t *m = sm_create(1024);
+        sm_t *m = sm_create(1024);
         snprintf(buf, sizeof(buf), "%s/empty", out);
         emit_map(buf, m);
         sm_free(m);
@@ -41,7 +41,7 @@ main(int argc, char *argv[])
 
     /* Single bit. */
     {
-        sparsemap_t *m = sm_create(1024);
+        sm_t *m = sm_create(1024);
         sm_add(m, 42);
         snprintf(buf, sizeof(buf), "%s/single-bit", out);
         emit_map(buf, m);
@@ -50,7 +50,7 @@ main(int argc, char *argv[])
 
     /* Small dense (all bits in first chunk). */
     {
-        sparsemap_t *m = sm_create(1024);
+        sm_t *m = sm_create(1024);
         for (uint64_t i = 0; i < 64; i++) sm_add(m, i);
         snprintf(buf, sizeof(buf), "%s/dense-64", out);
         emit_map(buf, m);
@@ -59,7 +59,7 @@ main(int argc, char *argv[])
 
     /* Sparse, scattered. */
     {
-        sparsemap_t *m = sm_create(4096);
+        sm_t *m = sm_create(4096);
         for (uint64_t i = 0; i < 50; i++) sm_add(m, i * 1000);
         snprintf(buf, sizeof(buf), "%s/sparse-scattered", out);
         emit_map(buf, m);
@@ -68,7 +68,7 @@ main(int argc, char *argv[])
 
     /* Run-length encoded zeros. */
     {
-        sparsemap_t *m = sm_create(4096);
+        sm_t *m = sm_create(4096);
         sm_add(m, 0);
         sm_add(m, 1000000);
         snprintf(buf, sizeof(buf), "%s/rle-zeros", out);
@@ -78,7 +78,7 @@ main(int argc, char *argv[])
 
     /* Run-length encoded ones. */
     {
-        sparsemap_t *m = sm_create(8192);
+        sm_t *m = sm_create(8192);
         for (uint64_t i = 0; i < 10000; i++) sm_add(m, i);
         snprintf(buf, sizeof(buf), "%s/rle-ones", out);
         emit_map(buf, m);
@@ -87,7 +87,7 @@ main(int argc, char *argv[])
 
     /* sm_serialize output (with header magic). */
     {
-        sparsemap_t *m = sm_create(2048);
+        sm_t *m = sm_create(2048);
         for (int i = 0; i < 100; i++) sm_add(m, i * 17 + 3);
         size_t n = sm_serialized_size(m);
         uint8_t *out_buf = malloc(n);
@@ -100,7 +100,7 @@ main(int argc, char *argv[])
 
     /* Mixed payloads. */
     {
-        sparsemap_t *m = sm_create(8192);
+        sm_t *m = sm_create(8192);
         for (uint64_t i = 0; i < 64; i++)   sm_add(m, i);              /* dense */
         for (uint64_t i = 1000; i < 1010; i++) sm_add(m, i);          /* mixed */
         for (uint64_t i = 10000; i < 11000; i++) sm_add(m, i);        /* dense run */

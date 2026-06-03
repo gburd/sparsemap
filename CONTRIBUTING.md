@@ -92,7 +92,7 @@ parsing path should be exercised against the fuzzer for at least
 - Functions ≤ 100 lines, cyclomatic complexity ≤ 8.
 - Public symbols are `sm_*` (functions) and `SM_*` (macros).
 - Internal helpers are `__sm_*`.  Static where possible.
-- The type `sparsemap_t` stays — do not rename.
+- The type `sm_t` stays — do not rename.
 - 2-space indentation, no tabs in C source.
 - One commit per logical change.  Imperative-mood subject line
   ≤ 72 chars.  No "WIP" or "fix typo" commits in the history of

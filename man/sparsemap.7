@@ -1,6 +1,6 @@
 .\" SPDX-License-Identifier: MIT
 .\"
-.TH sparsemap 7 "2026-06-03" "sparsemap 2.3.0" "Sparsemap Concepts"
+.TH sparsemap 7 "2026-06-03" "sparsemap 3.0.0" "Sparsemap Concepts"
 .SH NAME
 sparsemap \- conceptual overview of the compressed bitmap library
 .SH DESCRIPTION
@@ -30,7 +30,7 @@ regardless of run length, up to about 2 billion bits.
 .TP
 .B Tier 2 \(em map
 The top-level
-.B sparsemap_t
+.B sm_t
 manages an ordered sequence of chunks plus a 4-byte chunk count.
 The map grows and shrinks the underlying byte buffer as chunks are
 added or removed.

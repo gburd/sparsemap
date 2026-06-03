@@ -58,7 +58,7 @@ main(void)
   uint8_t *buf = calloc(1024, sizeof(uint8_t));
 
   // create the sparse bitmap
-  sparsemap_t *map = sm_wrap(buf, sizeof(uint8_t) * 1024);
+  sm_t *map = sm_wrap(buf, sizeof(uint8_t) * 1024);
 
   // set all the bits on in a random order
   for (i = 0; i < 1024; i++) {

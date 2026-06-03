@@ -66,7 +66,7 @@ Use it from C:
 ```c
 #include <sparsemap/sm.h>
 
-sparsemap_t *map = sm_create(4096);
+sm_t *map = sm_create(4096);
 sm_add(map, 42);
 sm_add(map, 1024);
 assert(sm_contains(map, 42));
@@ -114,13 +114,13 @@ vendored copies in sync with upstream.
 The library is exactly two files, `sm.h` and `sm.c`; vendoring is a
 two-file copy.  If you need two independently-vendored copies of
 sparsemap to coexist in one binary, rename every public symbol by
-defining `SM_PREFIX` before including the header:
+defining `SPARSEMAP_PREFIX` before including the header:
 
 ```c
-#define SM_PREFIX myapp_
+#define SPARSEMAP_PREFIX myapp_
 #include <sparsemap/sm.h>
 
-myapp_sparsemap_t *m = myapp_sm_create(4096);   /* renamed */
+myapp_sm_t *m = myapp_sm_create(4096);   /* renamed */
 myapp_sm_add(m, 42);
 ```
 
@@ -131,13 +131,11 @@ the serialized wire format are unaffected.
 
 ## Versioning and history
 
-Releases follow [SemVer](https://semver.org).  See `git log` for the
-full commit-by-commit history; tags `v1.0.0` through the current
-release list every shipping point.  Breaking changes between
-major versions are summarized in the tag annotation messages
-(`git show v2.0.0`).
-
-Major breaking changes so far:
+Releases follow [SemVer](https://semver.org).  **3.0.0 is the first
+formal public release.**  The pre-3.0 development history (the library
+grew up vendored inside other projects) is preserved on the
+`archive/v2.3.0` tag for archaeology; the published history starts
+clean at 3.0.0.
 
 ### API stability vs ABI stability
 
@@ -146,57 +144,34 @@ version: function signatures, macro names, and behavior of public
 `sm_*` symbols do not change in a way that breaks compiling
 consumer code.
 
-Sparsemap **does not** promise ABI stability of the
-`struct sparsemap` layout.  `sizeof(struct sparsemap)` and the
-offsets of its fields may change in any minor release.  Consumers
-must:
+Sparsemap **does not** promise ABI stability of the `struct sparsemap`
+layout.  `sizeof(sm_t)` and the offsets of its fields may change in any
+minor release.  Consumers must:
 
-- Always allocate `sparsemap_t` via `sm_create()`,
-  `sm_create_with_allocator()`, or `sm_wrap()` — never embed it
-  inline in another struct, never `sizeof(sparsemap_t)` for an
-  on-disk format, never `memcpy(struct, ...)` it.
+- Always allocate `sm_t` via `sm_create()`,
+  `sm_create_with_allocator()`, or `sm_wrap()` -- never embed it
+  inline in another struct, never `sizeof(sm_t)` for an on-disk
+  format, never `memcpy(struct, ...)` it.
 - Treat the type as opaque: access only via `sm_*` accessors.
 - Recompile (not just relink) after upgrading sparsemap.
 
 The **wire format** produced by `sm_serialize` and consumed by
-`sm_open`/`sm_deserialize` *is* stable.  Bytes serialized by v1.0
-deserialize correctly under v2.x.  This is the contract that
-matters for on-disk consumers.
+`sm_open`/`sm_deserialize` *is* stable and is preserved across the
+3.x series.  This is the contract that matters for on-disk consumers.
 
-### Breaking changes by version
+### Migrating from a pre-3.0 vendored copy
 
-- **v1.1.0** — public API prefix renamed `sparsemap_*` → `sm_*`.
-  Macro aliases for the old names were kept under
-  `SM_NO_LEGACY_ALIASES`.
-- **v2.0.0** — macro aliases removed.  Migrate with
-  `sed -i 's/\bsparsemap_/sm_/g; s/\bSPARSEMAP_/SM_/g' your_files.c`
-  (the type itself stays `sparsemap_t`).
-- **v2.1.0** — added per-map `m_allocator` field to `sparsemap_t`.
-  Code that duplicates the struct definition (test harnesses,
-  vendored copies that don't include `<sm.h>`) must keep
-  it in sync.  No source-level API breakage.
-- **v2.2.0** — the `sm_allocator_t` is now passed by value, not by
-  pointer.  `sm_set_allocator(hooks)` and
-  `sm_create_with_allocator(n, hooks)` instead of the v2.1 spellings.
-  Reset the global with `(sm_allocator_t){0}` instead of `NULL`.
-  Two new (optional) fields: `alloc_zero` (let your allocator deliver
-  pre-zeroed memory cheaply) and `aligned_alloc` / `aligned_free`
-  (reserved for future SIMD; ignored in 2.2.x).  Per-map struct grew
-  by ~32 bytes; consumers that embed `struct sparsemap` directly
-  (vendored test harnesses) must update the duplicate.
-- **v2.3.0** — production-grade hardening release.  No source-level
-  API changes.  Internally:
-  * `sm_open` / `sm_open_copy` / `sm_deserialize` now bounds-check
-    every chunk against the buffer; corrupt or attacker-controlled
-    inputs no longer cause out-of-bounds reads.
-  * `sm_contains(NULL, ...)` returns `false` instead of
-    dereferencing NULL (defensive, lets consumers feed unchecked
-    set-op results through).
-  * Several latent uninitialized-memory and shift-overflow bugs
-    fixed via fuzz and stress testing.  See the v2.3.0 tag for
-    the catalogue.
-  Cross-architecture (aarch64, riscv64, s390x big-endian) and
-  libFuzzer harnesses now run in CI on every push.
+3.0.0 makes two source-level breaks, both mechanical:
+
+- **The opaque type is now `sm_t`, not `sparsemap_t`.**  Migrate with
+  `sed -i 's/\\bsparsemap_t\\b/sm_t/g' your_files.c`.
+- **The vendoring prefix macro is `SPARSEMAP_PREFIX`, not `SM_PREFIX`.**
+  Rename it if you set it.
+
+Everything else -- the `sm_*` function names, their signatures and
+behavior, and the serialized wire format -- is unchanged from the
+latest pre-3.0 vendored copies.  See `docs/MIGRATION.md` for the full
+checklist.
 
 ## Future work: SIMD
 

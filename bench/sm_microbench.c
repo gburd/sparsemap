@@ -97,10 +97,10 @@ run_bench(const char *name, bench_fn fn, void *aux)
 
 /* ---- dataset builders ---- */
 
-static sparsemap_t *
+static sm_t *
 build_random(uint64_t n, uint64_t span, unsigned seed)
 {
-	sparsemap_t *m = sm_create(1024);
+	sm_t *m = sm_create(1024);
 	srand(seed);
 	for (uint64_t i = 0; i < n; i++) {
 		uint64_t idx = (uint64_t)rand() % span;
@@ -110,11 +110,11 @@ build_random(uint64_t n, uint64_t span, unsigned seed)
 	return (m);
 }
 
-static sparsemap_t *
+static sm_t *
 build_dense(uint64_t lo, uint64_t hi)
 {
 	/* One long run -> mostly RLE chunks. */
-	sparsemap_t *m = sm_create(1024);
+	sm_t *m = sm_create(1024);
 	for (uint64_t i = lo; i < hi; i++) {
 		if (sm_add_grow(&m, i) == SM_IDX_MAX)
 			break;
@@ -130,7 +130,7 @@ b_add_sequential(uint64_t iters, void *aux)
 	(void)aux;
 	uint64_t sum = 0;
 	for (uint64_t r = 0; r < iters; r += 4096) {
-		sparsemap_t *m = sm_create(1024);
+		sm_t *m = sm_create(1024);
 		uint64_t lim = (iters - r < 4096) ? iters - r : 4096;
 		for (uint64_t i = 0; i < lim; i++)
 			sum += sm_add_grow(&m, i);
@@ -146,7 +146,7 @@ b_add_random(uint64_t iters, void *aux)
 	uint64_t sum = 0;
 	srand(12345);
 	for (uint64_t r = 0; r < iters; r += 4096) {
-		sparsemap_t *m = sm_create(1024);
+		sm_t *m = sm_create(1024);
 		uint64_t lim = (iters - r < 4096) ? iters - r : 4096;
 		for (uint64_t i = 0; i < lim; i++)
 			sum += sm_add_grow(&m, (uint64_t)rand() % (1u << 20));
@@ -158,7 +158,7 @@ b_add_random(uint64_t iters, void *aux)
 static uint64_t
 b_contains_hit(uint64_t iters, void *aux)
 {
-	sparsemap_t *m = aux;
+	sm_t *m = aux;
 	uint64_t hi = sm_maximum(m), sum = 0;
 	for (uint64_t i = 0; i < iters; i++)
 		sum += sm_contains(m, (i * 2654435761u) % (hi + 1)) ? 1 : 0;
@@ -168,7 +168,7 @@ b_contains_hit(uint64_t iters, void *aux)
 static uint64_t
 b_next_member(uint64_t iters, void *aux)
 {
-	sparsemap_t *m = aux;
+	sm_t *m = aux;
 	uint64_t sum = 0, done = 0;
 	while (done < iters) {
 		uint64_t i = SM_IDX_MAX;
@@ -186,7 +186,7 @@ b_next_member(uint64_t iters, void *aux)
 static uint64_t
 b_rank(uint64_t iters, void *aux)
 {
-	sparsemap_t *m = aux;
+	sm_t *m = aux;
 	uint64_t hi = sm_maximum(m), sum = 0;
 	for (uint64_t i = 0; i < iters; i++)
 		sum += sm_rank(m, 0, (i * 40503u) % (hi + 1), true);
@@ -196,7 +196,7 @@ b_rank(uint64_t iters, void *aux)
 static uint64_t
 b_select(uint64_t iters, void *aux)
 {
-	sparsemap_t *m = aux;
+	sm_t *m = aux;
 	uint64_t card = sm_cardinality(m), sum = 0;
 	if (card == 0)
 		return (0);
@@ -206,7 +206,7 @@ b_select(uint64_t iters, void *aux)
 }
 
 struct pair {
-	const sparsemap_t *a, *b;
+	const sm_t *a, *b;
 };
 
 static uint64_t
@@ -215,7 +215,7 @@ b_union(uint64_t iters, void *aux)
 	struct pair *p = aux;
 	uint64_t sum = 0;
 	for (uint64_t i = 0; i < iters; i++) {
-		sparsemap_t *r = sm_union(p->a, p->b);
+		sm_t *r = sm_union(p->a, p->b);
 		if (r) {
 			sum += sm_get_size(r);
 			sm_free(r);
@@ -230,7 +230,7 @@ b_intersection(uint64_t iters, void *aux)
 	struct pair *p = aux;
 	uint64_t sum = 0;
 	for (uint64_t i = 0; i < iters; i++) {
-		sparsemap_t *r = sm_intersection(p->a, p->b);
+		sm_t *r = sm_intersection(p->a, p->b);
 		if (r) {
 			sum += sm_get_size(r);
 			sm_free(r);
@@ -242,7 +242,7 @@ b_intersection(uint64_t iters, void *aux)
 static uint64_t
 b_serialize(uint64_t iters, void *aux)
 {
-	sparsemap_t *m = aux;
+	sm_t *m = aux;
 	size_t sz = sm_serialized_size(m);
 	uint8_t *buf = malloc(sz);
 	uint64_t sum = 0;
@@ -258,9 +258,9 @@ main(void)
 	printf("sparsemap micro-benchmarks (version %s)\n", SM_VERSION_STRING);
 	printf("lower is better; min is the least-perturbed sample\n\n");
 
-	sparsemap_t *rnd = build_random(50000, 1u << 20, 1);
-	sparsemap_t *dense = build_dense(0, 200000);
-	sparsemap_t *rnd2 = build_random(50000, 1u << 20, 2);
+	sm_t *rnd = build_random(50000, 1u << 20, 1);
+	sm_t *dense = build_dense(0, 200000);
+	sm_t *rnd2 = build_random(50000, 1u << 20, 2);
 	struct pair rr = { rnd, rnd2 };
 	struct pair rd = { rnd, dense };
 

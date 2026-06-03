@@ -56,7 +56,7 @@ Best case for the whole library is a single RLE chunk encoding
 
 ## Tier 2 — map
 
-The top-level `sparsemap_t` manages an ordered sequence of chunks.
+The top-level `sm_t` manages an ordered sequence of chunks.
 Layout in the data buffer:
 
 ```
@@ -84,7 +84,7 @@ order so binary search and merge-style algorithms work.
 
 ## Lifecycle / allocation lineage
 
-Every `sparsemap_t` carries an internal `m_alloc_kind` tag that
+Every `sm_t` carries an internal `m_alloc_kind` tag that
 records how its data buffer was provisioned:
 
 | Lineage              | How it's set                                  | How to dispose                               |

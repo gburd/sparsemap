@@ -22,8 +22,8 @@ demo_predicates(void)
 {
     printf("=== predicates and comparisons ===\n");
 
-    sparsemap_t *a = sm_create_from_range(0, 100);   /* {0..99} */
-    sparsemap_t *b = sm_create_from_range(50, 150);  /* {50..149} */
+    sm_t *a = sm_create_from_range(0, 100);   /* {0..99} */
+    sm_t *b = sm_create_from_range(50, 150);  /* {50..149} */
 
     printf("|a|             = %zu\n", sm_cardinality(a));
     printf("|b|             = %zu\n", sm_cardinality(b));
@@ -46,7 +46,7 @@ demo_iteration(void)
 {
     printf("\n=== forward and backward iteration ===\n");
 
-    sparsemap_t *m = sm_create(8192);
+    sm_t *m = sm_create(8192);
     const uint64_t bits[] = { 7, 64, 100, 1500, 4096, 5000 };
     for (size_t i = 0; i < sizeof(bits) / sizeof(bits[0]); i++) {
         sm_add(m, bits[i]);
@@ -77,8 +77,8 @@ demo_inplace_setops(void)
 {
     printf("\n=== in-place set operations ===\n");
 
-    sparsemap_t *dst = sm_create_from_range(0, 100);
-    sparsemap_t *src = sm_create_from_range(50, 150);
+    sm_t *dst = sm_create_from_range(0, 100);
+    sm_t *src = sm_create_from_range(50, 150);
 
     printf("before: |dst| = %zu, |src| = %zu\n",
            sm_cardinality(dst), sm_cardinality(src));
@@ -104,7 +104,7 @@ demo_range_and_flip(void)
 {
     printf("\n=== range manipulation ===\n");
 
-    sparsemap_t *m = sm_create(2048);
+    sm_t *m = sm_create(2048);
     sm_add_range(m, 0, 1000);
     printf("after add_range(0, 1000):    |m| = %zu\n", sm_cardinality(m));
 
@@ -123,7 +123,7 @@ demo_statistics(void)
 {
     printf("\n=== statistics ===\n");
 
-    sparsemap_t *m = sm_create(8192);
+    sm_t *m = sm_create(8192);
     /* Mix dense (RLE) and sparse chunks. */
     sm_add_range(m, 0, 4096);     /* one RLE chunk worth */
     sm_add(m, 100000);
@@ -147,7 +147,7 @@ demo_serialize(void)
 {
     printf("\n=== serialize / deserialize ===\n");
 
-    sparsemap_t *m = sm_create_from_range(0, 1000);
+    sm_t *m = sm_create_from_range(0, 1000);
     sm_add(m, 99999);
 
     const size_t need = sm_serialized_size(m);
@@ -155,7 +155,7 @@ demo_serialize(void)
     const size_t wrote = sm_serialize(m, buf, need);
     printf("serialized %zu bytes\n", wrote);
 
-    sparsemap_t *r = sm_deserialize(buf, wrote);
+    sm_t *r = sm_deserialize(buf, wrote);
     assert(r != NULL);
     printf("deserialized: |r| = %zu, equals original? %d\n",
            sm_cardinality(r), sm_equals(m, r));

@@ -33,7 +33,7 @@ main()
   setvbuf(stderr, NULL, _IONBF, 0); // Disable buffering for stdout
 
   __diag("Please wait a moment...");
-  sparsemap_t mmap, *map = &mmap;
+  sm_t mmap, *map = &mmap;
   uint8_t buffer[1024];
   uint8_t buffer2[1024];
   sm_init(map, buffer, sizeof(buffer));
@@ -100,7 +100,7 @@ main()
   }
 
   // open and compare
-  sparsemap_t _sm3, *sm3 = &_sm3;
+  sm_t _sm3, *sm3 = &_sm3;
   sm_open(sm3, buffer, sizeof(buffer));
   for (int i = 0; i < 10000; i++) {
     assert(sm_contains(sm3, i) == sm_contains(map, i));
@@ -167,7 +167,7 @@ main()
   }
 
   // split and move, aligned to MiniMap capacity
-  sparsemap_t _sm2, *sm2 = &_sm2;
+  sm_t _sm2, *sm2 = &_sm2;
   sm_init(sm2, buffer2, sizeof(buffer2));
   sm_clear(sm2);
   for (int i = 0; i < 2048 * 2; i++) {

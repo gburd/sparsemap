@@ -95,7 +95,7 @@ main(void)
     printf("=== process-wide allocator ===\n");
     sm_set_allocator(hooks);
 
-    sparsemap_t *m = sm_create(2048);
+    sm_t *m = sm_create(2048);
     sm_add(m, 42);
     sm_add(m, 1000);
     printf("after sm_create + 2 sm_add: |m| = %zu, arena used = %zu, alloc_count = %zu\n",
@@ -112,8 +112,8 @@ main(void)
     arena.free_count = 0;
 
     printf("\n=== per-map allocator ===\n");
-    sparsemap_t *libc_map  = sm_create(2048);
-    sparsemap_t *arena_map = sm_create_with_allocator(2048, hooks);
+    sm_t *libc_map  = sm_create(2048);
+    sm_t *arena_map = sm_create_with_allocator(2048, hooks);
 
     sm_add(libc_map,  100);
     sm_add(arena_map, 200);

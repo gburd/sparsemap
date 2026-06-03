@@ -28,7 +28,7 @@ main(void)
   uint8_t *buf = calloc(1024, sizeof(uint8_t));
 
   // create the sparse bitmap
-  sparsemap_t *map = sm_wrap(buf, sizeof(uint8_t) * 1024);
+  sm_t *map = sm_wrap(buf, sizeof(uint8_t) * 1024);
 
   // Set every other bit (pathologically worst case) to see what happens
   // when the map is full.

@@ -8,7 +8,7 @@ and how it interacts with the lifetime contract.  See
 
 ## Conventions
 
-- All functions taking a `sparsemap_t *` accept NULL only where
+- All functions taking a `sm_t *` accept NULL only where
   documented; otherwise NULL inputs are undefined.
 - Functions that mutate the map return `SM_IDX_MAX` and set
   `errno` to `ENOSPC` when the backing buffer is full.  Grow the
@@ -19,11 +19,11 @@ and how it interacts with the lifetime contract.  See
 
 | Function                 | Returns         | Lineage of result      |
 |--------------------------|-----------------|------------------------|
-| `sm_create(size)` | `sparsemap_t *` | `SM_OWNED_CONTIGUOUS`  |
+| `sm_create(size)` | `sm_t *` | `SM_OWNED_CONTIGUOUS`  |
 | `sparsemap()`            | (alias)         | `SM_OWNED_CONTIGUOUS`  |
-| `sm_copy(other)`  | `sparsemap_t *` | `SM_OWNED_CONTIGUOUS`  |
-| `sm_owned_copy(map)` | `sparsemap_t *` | `SM_OWNED_CONTIGUOUS`  |
-| `sm_wrap(buf,sz)` | `sparsemap_t *` | `SM_WRAPPED`           |
+| `sm_copy(other)`  | `sm_t *` | `SM_OWNED_CONTIGUOUS`  |
+| `sm_owned_copy(map)` | `sm_t *` | `SM_OWNED_CONTIGUOUS`  |
+| `sm_wrap(buf,sz)` | `sm_t *` | `SM_WRAPPED`           |
 | `sm_init(map,buf,sz)` | `void`      | `SM_WRAPPED`           |
 | `sm_open(map,buf,sz)` | `void`      | `SM_WRAPPED`           |
 | `sm_free(map)`    | `void`          | (disposes any lineage) |
@@ -41,8 +41,8 @@ and dispose.
 ## Resize contract
 
 ```c
-sparsemap_t *
-sm_set_data_size(sparsemap_t *map, uint8_t *data, size_t size);
+sm_t *
+sm_set_data_size(sm_t *map, uint8_t *data, size_t size);
 ```
 
 Two calling forms.  See [HEISENBUG_REPORT.md](../HEISENBUG_REPORT.md)
@@ -125,7 +125,7 @@ exist; `span` does the same if no run of the requested length exists.
 
 ```c
 void
-sm_scan(const sparsemap_t *m,
+sm_scan(const sm_t *m,
                void (*scanner)(uint32_t vec[], size_t n, void *aux),
                size_t skip, void *aux);
 ```

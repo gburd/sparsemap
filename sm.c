@@ -699,10 +699,10 @@ struct __attribute__((aligned(8))) sparsemap {
 };
 
 /*
- * Allocation lineage.  Tracked per sparsemap_t so the grow / dispose
+ * Allocation lineage.  Tracked per sm_t so the grow / dispose
  * paths know what they may safely realloc or free.
  *
- * SM_OWNED_CONTIGUOUS  Single calloc(1, sizeof(sparsemap_t) + size).
+ * SM_OWNED_CONTIGUOUS  Single calloc(1, sizeof(sm_t) + size).
  *                      Both the struct and m_data live in one heap
  *                      block; m_data sits immediately after the struct.
  *                      Set by sparsemap() and sm_copy().  May be
@@ -1736,7 +1736,7 @@ __sm_chunk_scan(const __sm_chunk_t *chunk, const __sm_idx_t start,
  * @return The number of chunks in the sparse map.
  */
 static size_t
-__sm_get_chunk_count(const sparsemap_t *map)
+__sm_get_chunk_count(const sm_t *map)
 {
 	/*
 	 * The chunk-count slot lives in the first SM_SIZEOF_OVERHEAD bytes of
@@ -1770,7 +1770,7 @@ __sm_get_chunk_count(const sparsemap_t *map)
  * @return A pointer to the data at the specified offset within the sparse map.
  */
 static uint8_t *
-__sm_get_chunk_data(const sparsemap_t *map, const size_t offset)
+__sm_get_chunk_data(const sm_t *map, const size_t offset)
 {
 	return (&map->m_data[SM_SIZEOF_OVERHEAD + offset]);
 }
@@ -1787,7 +1787,7 @@ __sm_get_chunk_data(const sparsemap_t *map, const size_t offset)
  * @return The capacity limit of the RLE chunk.
  */
 static size_t
-__sm_chunk_rle_capacity_limit(const sparsemap_t *map, const __sm_idx_t start,
+__sm_chunk_rle_capacity_limit(const sm_t *map, const __sm_idx_t start,
     const size_t length, const size_t offset)
 {
 	/* Calculate where the data extends to */
@@ -1838,7 +1838,7 @@ __sm_chunk_rle_capacity_limit(const sparsemap_t *map, const __sm_idx_t start,
  * @return A pointer to the end of the chunk data in the sparse map.
  */
 static uint8_t *
-__sm_get_chunk_end(const sparsemap_t *map)
+__sm_get_chunk_end(const sm_t *map)
 {
 	uint8_t *p = __sm_get_chunk_data(map, 0);
 	const size_t count = __sm_get_chunk_count(map);
@@ -1887,10 +1887,10 @@ __sm_get_chunk_aligned_offset(const size_t idx)
  * largest valid chunk-stream prefix; if the input is
  * well-formed, behavior is unchanged.
  */
-static void __sm_set_chunk_count(const sparsemap_t *map, size_t new_count);
+static void __sm_set_chunk_count(const sm_t *map, size_t new_count);
 
 static size_t
-__sm_get_size_impl(const sparsemap_t *map)
+__sm_get_size_impl(const sm_t *map)
 {
 	uint8_t *start = __sm_get_chunk_data(map, 0);
 	uint8_t *p = start;
@@ -1941,7 +1941,7 @@ __sm_get_size_impl(const sparsemap_t *map)
 	 * (we're correcting attacker-controlled corruption to a
 	 * consistent, harmless state). */
 	if (valid_count != count) {
-		__sm_set_chunk_count((sparsemap_t *)map, valid_count);
+		__sm_set_chunk_count((sm_t *)map, valid_count);
 	}
 	return (SM_SIZEOF_OVERHEAD + (p - start));
 }
@@ -1964,7 +1964,7 @@ __sm_get_size_impl(const sparsemap_t *map)
  * that call sm_set for every index in ascending order are then
  * O(N^2), which dominates large-cardinality builds.  We cache
  * the (offset, chunk_index, start) of the most-recently-returned
- * chunk in three in-memory-only fields on the sparsemap_t struct,
+ * chunk in three in-memory-only fields on the sm_t struct,
  * and resume the walk from there when the new idx is at or after
  * the cursor's chunk start.  For random-order inserts the cursor's
  * preconditions don't hold and we fall back to a full walk.
@@ -1980,20 +1980,20 @@ __sm_get_size_impl(const sparsemap_t *map)
  * invalid cursor and rebuilds it on first use.
  */
 static inline void
-__sm_cursor_invalidate(const sparsemap_t *map_ro)
+__sm_cursor_invalidate(const sm_t *map_ro)
 {
 	/* Cursor lives on the in-memory struct only; const-cast is safe
 	 * because we never publish a const pointer that aliases the
 	 * mutable fields outside the library. */
-	sparsemap_t *m = (sparsemap_t *)map_ro;
+	sm_t *m = (sm_t *)map_ro;
 	m->m_cursor_valid = 0;
 }
 
 static inline void
-__sm_cursor_record(const sparsemap_t *map_ro, size_t offset, size_t chunk_index,
+__sm_cursor_record(const sm_t *map_ro, size_t offset, size_t chunk_index,
     __sm_idx_t start)
 {
-	sparsemap_t *m = (sparsemap_t *)map_ro;
+	sm_t *m = (sm_t *)map_ro;
 	m->m_cursor_offset = offset;
 	m->m_cursor_chunk_index = chunk_index;
 	m->m_cursor_start_idx = start;
@@ -2001,7 +2001,7 @@ __sm_cursor_record(const sparsemap_t *map_ro, size_t offset, size_t chunk_index,
 }
 
 static ssize_t
-__sm_get_chunk_offset(const sparsemap_t *map, const uint64_t idx)
+__sm_get_chunk_offset(const sm_t *map, const uint64_t idx)
 {
 	const size_t count = __sm_get_chunk_count(map);
 
@@ -2057,7 +2057,7 @@ __sm_get_chunk_offset(const sparsemap_t *map, const uint64_t idx)
  * @param[in] new_count The new chunk count to set.
  */
 static void
-__sm_set_chunk_count(const sparsemap_t *map, const size_t new_count)
+__sm_set_chunk_count(const sm_t *map, const size_t new_count)
 {
 	__sm_store_u32((uint8_t *)&map->m_data[0], (uint32_t)new_count);
 }
@@ -2074,8 +2074,7 @@ __sm_set_chunk_count(const sparsemap_t *map, const size_t new_count)
  * @param[in] buffer_size Size of the data buffer to be appended.
  */
 static void
-__sm_append_data(sparsemap_t *map, const uint8_t *buffer,
-    const size_t buffer_size)
+__sm_append_data(sm_t *map, const uint8_t *buffer, const size_t buffer_size)
 {
 	__sm_assert(map->m_data_used + buffer_size <= map->m_capacity);
 
@@ -2097,7 +2096,7 @@ __sm_append_data(sparsemap_t *map, const uint8_t *buffer,
  * @param[in] buffer_size Size of the buffer in bytes.
  */
 static void
-__sm_insert_data(sparsemap_t *map, const size_t offset, const uint8_t *buffer,
+__sm_insert_data(sm_t *map, const size_t offset, const uint8_t *buffer,
     const size_t buffer_size)
 {
 	__sm_assert(map->m_data_used + buffer_size <= map->m_capacity);
@@ -2133,7 +2132,7 @@ __sm_insert_data(sparsemap_t *map, const size_t offset, const uint8_t *buffer,
  * @param[in] gap_size The size of the block to be removed.
  */
 static void
-__sm_remove_data(sparsemap_t *map, const size_t offset, const size_t gap_size)
+__sm_remove_data(sm_t *map, const size_t offset, const size_t gap_size)
 {
 	__sm_assert(map->m_data_used >= gap_size);
 	/*
@@ -2166,7 +2165,7 @@ __sm_remove_data(sparsemap_t *map, const size_t offset, const size_t gap_size)
  * @return The number of chunks that were removed during the coalescing process.
  */
 static int
-__sm_coalesce_chunk(sparsemap_t *map, __sm_chunk_t *chunk, size_t offset,
+__sm_coalesce_chunk(sm_t *map, __sm_chunk_t *chunk, size_t offset,
     __sm_idx_t start, uint8_t *p, uint64_t idx, bool is_set_op)
 {
 	/*
@@ -2505,7 +2504,7 @@ __sm_coalesce_chunk(sparsemap_t *map, __sm_chunk_t *chunk, size_t offset,
  * @return The number of bytes coalesced during the operation.
  */
 static size_t
-__sm_coalesce_map(sparsemap_t *map)
+__sm_coalesce_map(sm_t *map)
 {
 	__sm_chunk_t chunk;
 	size_t n = 0, count = __sm_get_chunk_count(map);
@@ -2552,8 +2551,8 @@ __sm_coalesce_map(sparsemap_t *map)
  *         an error code otherwise.
  */
 static int
-__sm_separate_rle_chunk(sparsemap_t *map, __sm_chunk_sep_t *sep,
-    const uint64_t idx, const int state)
+__sm_separate_rle_chunk(sm_t *map, __sm_chunk_sep_t *sep, const uint64_t idx,
+    const int state)
 {
 	/*
 	 * This is called from __sm_chunk_set/unset/merge/split functions when a
@@ -3009,7 +3008,7 @@ __sm_separate_rle_chunk(sparsemap_t *map, __sm_chunk_sep_t *sep,
  * @param[in] map The sparse map to clear.
  */
 void
-sm_clear(sparsemap_t *map)
+sm_clear(sm_t *map)
 {
 	if (map == NULL) {
 		return;
@@ -3031,7 +3030,7 @@ sm_clear(sparsemap_t *map)
  * @param[in] size The size of the sparsemap to allocate.
  * @return A pointer to the allocated sparsemap structure, or NULL if allocation fails.
  */
-sparsemap_t *
+sm_t *
 sparsemap(size_t size)
 {
 	return (sm_create(size));
@@ -3048,13 +3047,13 @@ sparsemap(size_t size)
  * @param[in] size The size of the sparsemap to allocate.
  * @return A pointer to the allocated sparsemap structure, or NULL if allocation fails.
  */
-sparsemap_t *
+sm_t *
 sm_create(size_t size)
 {
 	return (sm_create_with_allocator(size, (sm_allocator_t) { 0 }));
 }
 
-sparsemap_t *
+sm_t *
 sm_create_with_allocator(size_t size, sm_allocator_t a)
 {
 	if (size == 0) {
@@ -3064,7 +3063,7 @@ sm_create_with_allocator(size_t size, sm_allocator_t a)
 	const size_t data_size = size * sizeof(uint8_t);
 
 	/* Ensure that m_data is 8-byte aligned. */
-	size_t total_size = sizeof(sparsemap_t) + data_size;
+	size_t total_size = sizeof(sm_t) + data_size;
 	const size_t padding = total_size % 8 == 0 ? 0 : 8 - (total_size % 8);
 	total_size += padding;
 
@@ -3080,11 +3079,10 @@ sm_create_with_allocator(size_t size, sm_allocator_t a)
 		a = __sm_g_allocator;
 	}
 
-	sparsemap_t *map = (sparsemap_t *)__sm_alloc_zero(&a, total_size);
+	sm_t *map = (sm_t *)__sm_alloc_zero(&a, total_size);
 	if (map) {
-		uint8_t *data =
-		    (uint8_t *)(((uintptr_t)map + sizeof(sparsemap_t)) &
-		        ~(uintptr_t)7);
+		uint8_t *data = (uint8_t *)(((uintptr_t)map + sizeof(sm_t)) &
+		    ~(uintptr_t)7);
 		sm_init(map, data, size);
 		/*
 		 * sm_init tags the map as SM_WRAPPED (caller-supplied
@@ -3110,7 +3108,7 @@ sm_create_with_allocator(size_t size, sm_allocator_t a)
  * Calling with NULL is a no-op.
  */
 void
-sm_free(sparsemap_t *map)
+sm_free(sm_t *map)
 {
 	if (map == NULL) {
 		return;
@@ -3136,14 +3134,14 @@ sm_free(sparsemap_t *map)
  * lineage you don't trust and need a self-contained copy that's safe to
  * grow and dispose with sm_free() or libc free().
  */
-sparsemap_t *
-sm_owned_copy(const sparsemap_t *map)
+sm_t *
+sm_owned_copy(const sm_t *map)
 {
 	if (map == NULL) {
 		return (NULL);
 	}
 	const size_t cap = sm_get_capacity(map);
-	sparsemap_t *out = sm_create(cap);
+	sm_t *out = sm_create(cap);
 	if (out == NULL) {
 		return (NULL);
 	}
@@ -3166,11 +3164,11 @@ sm_owned_copy(const sparsemap_t *map)
  * @return A pointer to the newly created sparse map that is a copy of the input,
  *         or NULL if the memory allocation fails.
  */
-sparsemap_t *
-sm_copy(const sparsemap_t *other)
+sm_t *
+sm_copy(const sm_t *other)
 {
 	const size_t cap = sm_get_capacity(other);
-	sparsemap_t *map = sparsemap(cap);
+	sm_t *map = sparsemap(cap);
 	if (map) {
 		map->m_capacity = other->m_capacity;
 		map->m_data_used = other->m_data_used;
@@ -3184,20 +3182,19 @@ sm_copy(const sparsemap_t *other)
 /**
  * @brief Wraps a given data array into a sparsemap structure.
  *
- * Allocates and initializes a sparsemap_t structure to manage a provided data array.
+ * Allocates and initializes a sm_t structure to manage a provided data array.
  * The sparsemap structure will point to the data array and will track its capacity.
  *
  * @param[in] data Pointer to the data array to be managed by the sparsemap.
  * @param[in] size The size of the data array.
- * @return A pointer to the initialized sparsemap_t structure, or NULL if allocation fails.
+ * @return A pointer to the initialized sm_t structure, or NULL if allocation fails.
  */
-sparsemap_t *
+sm_t *
 sm_wrap(uint8_t *data, const size_t size)
 {
 	/* Wrap allocates only the struct (caller owns the data buffer);
 	 * route through the global allocator so sm_free works correctly. */
-	sparsemap_t *map = (sparsemap_t *)__sm_alloc_zero(&__sm_g_allocator,
-	    sizeof(sparsemap_t));
+	sm_t *map = (sm_t *)__sm_alloc_zero(&__sm_g_allocator, sizeof(sm_t));
 	if (map) {
 		map->m_data = data;
 		map->m_data_used = 0;
@@ -3219,7 +3216,7 @@ sm_wrap(uint8_t *data, const size_t size)
  * @param[in] size The size of the data buffer in bytes.
  */
 void
-sm_init(sparsemap_t *map, uint8_t *data, const size_t size)
+sm_init(sm_t *map, uint8_t *data, const size_t size)
 {
 	map->m_data = data;
 	map->m_data_used = 0;
@@ -3247,7 +3244,7 @@ sm_init(sparsemap_t *map, uint8_t *data, const size_t size)
  * @param[in] size The capacity of the data array.
  */
 void
-sm_open(sparsemap_t *map, uint8_t *data, const size_t size)
+sm_open(sm_t *map, uint8_t *data, const size_t size)
 {
 	map->m_data = data;
 	__sm_cursor_invalidate(map);
@@ -3272,7 +3269,7 @@ sm_open(sparsemap_t *map, uint8_t *data, const size_t size)
 	map->m_alloc_kind = SM_WRAPPED;
 }
 
-sparsemap_t *
+sm_t *
 sm_open_copy(const uint8_t *data, size_t n, size_t slack)
 {
 	if (data == NULL && n > 0)
@@ -3282,7 +3279,7 @@ sm_open_copy(const uint8_t *data, size_t n, size_t slack)
 	size_t cap = n + slack;
 	if (cap < SM_SIZEOF_OVERHEAD)
 		cap = SM_SIZEOF_OVERHEAD;
-	sparsemap_t *m = sm_create(cap);
+	sm_t *m = sm_create(cap);
 	if (m == NULL)
 		return (NULL);
 	if (n > 0) {
@@ -3341,8 +3338,8 @@ sm_open_copy(const uint8_t *data, size_t n, size_t slack)
  * @return The (possibly relocated) sparsemap pointer on success,
  *         or NULL on allocation failure.
  */
-sparsemap_t *
-sm_set_data_size(sparsemap_t *map, uint8_t *data, const size_t size)
+sm_t *
+sm_set_data_size(sm_t *map, uint8_t *data, const size_t size)
 {
 	if (map == NULL) {
 		return (NULL);
@@ -3374,20 +3371,19 @@ sm_set_data_size(sparsemap_t *map, uint8_t *data, const size_t size)
 		 * new data buffer + alignment padding so m_data lands on an 8-byte
 		 * boundary.
 		 */
-		size_t total_size = sizeof(sparsemap_t) + size;
+		size_t total_size = sizeof(sm_t) + size;
 		const size_t padding =
 		    total_size % 8 == 0 ? 0 : 8 - (total_size % 8);
 		total_size += padding;
 
 		const size_t old_capacity = map->m_capacity;
-		sparsemap_t *m =
-		    (sparsemap_t *)__sm_realloc(eff, map, total_size);
+		sm_t *m = (sm_t *)__sm_realloc(eff, map, total_size);
 		if (!m) {
 			/* Original block still valid; leave map untouched. */
 			return (NULL);
 		}
-		m->m_data = (uint8_t *)(((uintptr_t)m + sizeof(sparsemap_t)) &
-		    ~(uintptr_t)7);
+		m->m_data =
+		    (uint8_t *)(((uintptr_t)m + sizeof(sm_t)) & ~(uintptr_t)7);
 		if (size > old_capacity) {
 			/* Zero the newly-acquired tail so chunk metadata stays clean. */
 			memset(m->m_data + old_capacity, 0,
@@ -3496,7 +3492,7 @@ sm_set_data_size(sparsemap_t *map, uint8_t *data, const size_t size)
  * @return The percentage of remaining capacity in the sparsemap.
  */
 double
-sm_capacity_remaining(const sparsemap_t *map)
+sm_capacity_remaining(const sm_t *map)
 {
 	if (map->m_data_used >= map->m_capacity) {
 		return (0);
@@ -3517,7 +3513,7 @@ sm_capacity_remaining(const sparsemap_t *map)
  * @return The capacity of the sparse map.
  */
 size_t
-sm_get_capacity(const sparsemap_t *map)
+sm_get_capacity(const sm_t *map)
 {
 	return (map->m_capacity);
 }
@@ -3538,7 +3534,7 @@ sm_get_capacity(const sparsemap_t *map)
  * @return True if the bit is set, false otherwise.
  */
 __attribute__((hot)) bool
-sm_contains(sparsemap_t *map, uint64_t idx)
+sm_contains(sm_t *map, uint64_t idx)
 {
 	/* Defensive: NULL or empty maps contain nothing.  Accepting NULL is
 	 * cheap insurance for consumers that pass the result of
@@ -3591,7 +3587,7 @@ sm_contains(sparsemap_t *map, uint64_t idx)
  * @return The index of the bit that was unset.
  */
 static uint64_t
-__sm_map_unset(sparsemap_t *map, uint64_t idx, const bool coalesce)
+__sm_map_unset(sm_t *map, uint64_t idx, const bool coalesce)
 {
 	const uint64_t ret_idx = idx;
 	__sm_assert(sm_get_size(map) >= SM_SIZEOF_OVERHEAD);
@@ -3743,7 +3739,7 @@ done:;
  * @return The index that was unset.
  */
 __attribute__((hot)) uint64_t
-sm_remove(sparsemap_t *map, const uint64_t idx)
+sm_remove(sm_t *map, const uint64_t idx)
 {
 	return (__sm_map_unset(map, idx, true));
 }
@@ -3765,7 +3761,7 @@ sm_remove(sparsemap_t *map, const uint64_t idx)
  * @return The index at which the bit was set.
  */
 static uint64_t
-__sparsemap_add(sparsemap_t *map, const uint64_t idx, uint8_t *p, size_t offset,
+__sparsemap_add(sm_t *map, const uint64_t idx, uint8_t *p, size_t offset,
     const void *v)
 {
 	/*
@@ -3833,7 +3829,7 @@ __sparsemap_add(sparsemap_t *map, const uint64_t idx, uint8_t *p, size_t offset,
  * @return Returns the adjusted index within the sparse bit map or the given index.
  */
 static uint64_t
-__sm_map_set(sparsemap_t *map, uint64_t idx, const bool coalesce)
+__sm_map_set(sm_t *map, uint64_t idx, const bool coalesce)
 {
 	__sm_chunk_t chunk;
 	uint64_t ret_idx = idx;
@@ -4049,17 +4045,17 @@ done:;
  * @return The index that was set in the sparsemap.
  */
 __attribute__((hot)) uint64_t
-sm_add(sparsemap_t *map, const uint64_t idx)
+sm_add(sm_t *map, const uint64_t idx)
 {
 	return (__sm_map_set(map, idx, true));
 }
 
 uint64_t
-sm_add_grow(sparsemap_t **mapp, uint64_t idx)
+sm_add_grow(sm_t **mapp, uint64_t idx)
 {
 	if (mapp == NULL || *mapp == NULL)
 		return (SM_IDX_MAX);
-	sparsemap_t *m = *mapp;
+	sm_t *m = *mapp;
 	uint64_t rc = sm_add(m, idx);
 	if (rc != SM_IDX_MAX)
 		return (rc);
@@ -4068,7 +4064,7 @@ sm_add_grow(sparsemap_t **mapp, uint64_t idx)
 	size_t new_cap = sm_get_capacity(m) * 2;
 	if (new_cap < 4096)
 		new_cap = 4096;
-	sparsemap_t *grown = sm_set_data_size(m, NULL, new_cap);
+	sm_t *grown = sm_set_data_size(m, NULL, new_cap);
 	if (grown == NULL)
 		return (SM_IDX_MAX);
 	*mapp = grown;
@@ -4088,7 +4084,7 @@ sm_add_grow(sparsemap_t **mapp, uint64_t idx)
  * @return The index at which the operation was performed.
  */
 uint64_t
-sm_assign(sparsemap_t *map, const uint64_t idx, const bool value)
+sm_assign(sm_t *map, const uint64_t idx, const bool value)
 {
 	__sm_check_invariants(map);
 	return (value ? sm_add(map, idx) : sm_remove(map, idx));
@@ -4110,7 +4106,7 @@ sm_assign(sparsemap_t *map, const uint64_t idx, const bool value)
  * @return The starting offset within the sparse map.
  */
 uint64_t
-sm_minimum(const sparsemap_t *map)
+sm_minimum(const sm_t *map)
 {
 	__sm_check_invariants(map);
 	uint64_t offset = 0;
@@ -4167,7 +4163,7 @@ done:;
  * @return The calculated ending offset of the map.
  */
 uint64_t
-sm_maximum(const sparsemap_t *map)
+sm_maximum(const sm_t *map)
 {
 	__sm_check_invariants(map);
 	const size_t count = __sm_get_chunk_count(map);
@@ -4246,7 +4242,7 @@ sm_maximum(const sparsemap_t *map)
  * @return The fill factor of the map as a percentage.
  */
 double
-sm_fill_factor(sparsemap_t *map)
+sm_fill_factor(sm_t *map)
 {
 	__sm_check_invariants(map);
 	const size_t rank = sm_rank(map, 0, SM_IDX_MAX, true);
@@ -4273,7 +4269,7 @@ sm_fill_factor(sparsemap_t *map)
  * @return Pointer to the serialized bitmap data.
  */
 void *
-sm_get_data(const sparsemap_t *map)
+sm_get_data(const sm_t *map)
 {
 	return (map->m_data);
 }
@@ -4288,7 +4284,7 @@ sm_get_data(const sparsemap_t *map)
  * @return The size of the sparse map.
  */
 size_t
-sm_get_size(sparsemap_t *map)
+sm_get_size(sm_t *map)
 {
 	if (map->m_data_used) {
 		const size_t size = __sm_get_size_impl(map);
@@ -4308,13 +4304,13 @@ sm_get_size(sparsemap_t *map)
  * @brief Counts the number of elements in a sparse map.
  *
  * This function returns the total count of elements stored in a given
- * sparsemap_t instance by invoking the sm_rank function.
+ * sm_t instance by invoking the sm_rank function.
  *
- * @param[in] map A pointer to the sparsemap_t instance to be counted.
+ * @param[in] map A pointer to the sm_t instance to be counted.
  * @return The total number of elements in the sparse map.
  */
 size_t
-sm_cardinality(sparsemap_t *map)
+sm_cardinality(sm_t *map)
 {
 	return (sm_rank(map, 0, SM_IDX_MAX, true));
 }
@@ -4336,8 +4332,8 @@ sm_cardinality(sparsemap_t *map)
  * @param[in] aux Auxiliary data to pass to the scanning function.
  */
 void
-sm_scan(const sparsemap_t *map,
-    void (*scanner)(__sm_idx_t[], size_t, void *aux), size_t skip, void *aux)
+sm_scan(const sm_t *map, void (*scanner)(__sm_idx_t[], size_t, void *aux),
+    size_t skip, void *aux)
 {
 	uint8_t *p = __sm_get_chunk_data(map, 0);
 	const size_t count = __sm_get_chunk_count(map);
@@ -4682,9 +4678,9 @@ __sm_words_andnot(__sm_bitvec_t dst[32], const __sm_bitvec_t a[32],
  * @return true on success, false on allocation failure.
  */
 static bool
-__sm_ensure_capacity(sparsemap_t **resultp, size_t needed)
+__sm_ensure_capacity(sm_t **resultp, size_t needed)
 {
-	sparsemap_t *result = *resultp;
+	sm_t *result = *resultp;
 	/*
 	 * Defense in depth: the only callers of __sm_ensure_capacity are
 	 * sm_union / _intersection / _difference, which all allocate
@@ -4702,7 +4698,7 @@ __sm_ensure_capacity(sparsemap_t **resultp, size_t needed)
 	}
 	size_t cap = result->m_capacity;
 	size_t new_cap = cap + (cap / 2 > needed ? cap / 2 : needed + 256);
-	sparsemap_t *grown = sm_set_data_size(result, NULL, new_cap);
+	sm_t *grown = sm_set_data_size(result, NULL, new_cap);
 	if (grown == NULL) {
 		return (false);
 	}
@@ -4721,15 +4717,15 @@ __sm_ensure_capacity(sparsemap_t **resultp, size_t needed)
  * @return true on success, false on allocation failure.
  */
 static bool
-__sm_append_sparse_chunk(sparsemap_t **resultp, __sm_idx_t start,
-    __sm_bitvec_t desc, __sm_bitvec_t vecs[], int nvecs)
+__sm_append_sparse_chunk(sm_t **resultp, __sm_idx_t start, __sm_bitvec_t desc,
+    __sm_bitvec_t vecs[], int nvecs)
 {
 	const size_t chunk_size = SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) +
 	    (size_t)nvecs * sizeof(__sm_bitvec_t);
 	if (!__sm_ensure_capacity(resultp, chunk_size)) {
 		return (false);
 	}
-	sparsemap_t *result = *resultp;
+	sm_t *result = *resultp;
 
 	/* Write start offset */
 	__sm_append_data(result, (const uint8_t *)&start, SM_SIZEOF_OVERHEAD);
@@ -4755,10 +4751,10 @@ __sm_append_sparse_chunk(sparsemap_t **resultp, __sm_idx_t start,
  * @return true on success, false on allocation failure.
  */
 static bool
-__sm_append_rle_chunk(sparsemap_t **resultp, __sm_idx_t start, size_t capacity,
+__sm_append_rle_chunk(sm_t **resultp, __sm_idx_t start, size_t capacity,
     size_t length)
 {
-	sparsemap_t *result = *resultp;
+	sm_t *result = *resultp;
 
 	/* Inline coalescing: try to merge with the last emitted chunk. */
 	const size_t count = __sm_get_chunk_count(result);
@@ -4883,7 +4879,7 @@ __sm_append_rle_chunk(sparsemap_t **resultp, __sm_idx_t start, size_t capacity,
  * @brief Helper: flush carry buffer as a sparse chunk into the result.
  */
 static bool
-__sm_flush_carry(sparsemap_t **resultp, __sm_bitvec_t carry_words[32],
+__sm_flush_carry(sm_t **resultp, __sm_bitvec_t carry_words[32],
     int carry_cap[32], __sm_idx_t carry_start)
 {
 	__sm_bitvec_t cd;
@@ -4898,8 +4894,8 @@ __sm_flush_carry(sparsemap_t **resultp, __sm_bitvec_t carry_words[32],
 	return (true);
 }
 
-sparsemap_t *
-sm_offset(const sparsemap_t *map, ssize_t offset)
+sm_t *
+sm_offset(const sm_t *map, ssize_t offset)
 {
 	__sm_check_invariants(map);
 	if (map == NULL) {
@@ -4935,7 +4931,7 @@ sm_offset(const sparsemap_t *map, ssize_t offset)
 
 	/* Allocate result */
 	size_t cap = map->m_data_used;
-	sparsemap_t *result = sparsemap(cap > 0 ? cap : 1024);
+	sm_t *result = sparsemap(cap > 0 ? cap : 1024);
 	if (result == NULL) {
 		return (NULL);
 	}
@@ -5332,7 +5328,7 @@ sm_offset(const sparsemap_t *map, ssize_t offset)
  * ------------------------------------------------------------------- */
 
 bool
-sm_is_empty(const sparsemap_t *map)
+sm_is_empty(const sm_t *map)
 {
 	if (map == NULL) {
 		return (true);
@@ -5454,7 +5450,7 @@ __sm_chunk_prev_set(const __sm_chunk_t *chunk, uint64_t start,
 }
 
 uint64_t
-sm_next_member(const sparsemap_t *map, uint64_t prev_idx)
+sm_next_member(const sm_t *map, uint64_t prev_idx)
 {
 	if (map == NULL)
 		return (SM_IDX_MAX);
@@ -5504,7 +5500,7 @@ sm_next_member(const sparsemap_t *map, uint64_t prev_idx)
 }
 
 uint64_t
-sm_prev_member(const sparsemap_t *map, uint64_t prev_idx)
+sm_prev_member(const sm_t *map, uint64_t prev_idx)
 {
 	if (map == NULL)
 		return (SM_IDX_MAX);
@@ -5561,7 +5557,7 @@ sm_prev_member(const sparsemap_t *map, uint64_t prev_idx)
 }
 
 bool
-sm_equals(const sparsemap_t *a, const sparsemap_t *b)
+sm_equals(const sm_t *a, const sm_t *b)
 {
 	const bool a_empty = (a == NULL) || sm_is_empty(a);
 	const bool b_empty = (b == NULL) || sm_is_empty(b);
@@ -5582,7 +5578,7 @@ sm_equals(const sparsemap_t *a, const sparsemap_t *b)
 }
 
 bool
-sm_is_subset(const sparsemap_t *a, const sparsemap_t *b)
+sm_is_subset(const sm_t *a, const sm_t *b)
 {
 	if (a == NULL || sm_is_empty(a))
 		return (true);
@@ -5603,13 +5599,13 @@ sm_is_subset(const sparsemap_t *a, const sparsemap_t *b)
 }
 
 bool
-sm_is_superset(const sparsemap_t *a, const sparsemap_t *b)
+sm_is_superset(const sm_t *a, const sm_t *b)
 {
 	return (sm_is_subset(b, a));
 }
 
 bool
-sm_overlap(const sparsemap_t *a, const sparsemap_t *b)
+sm_overlap(const sm_t *a, const sm_t *b)
 {
 	if (a == NULL || b == NULL)
 		return (false);
@@ -5630,7 +5626,7 @@ sm_overlap(const sparsemap_t *a, const sparsemap_t *b)
 }
 
 sm_membership_t
-sm_membership(const sparsemap_t *map)
+sm_membership(const sm_t *map)
 {
 	if (map == NULL || sm_is_empty(map))
 		return (SM_EMPTY);
@@ -5642,7 +5638,7 @@ sm_membership(const sparsemap_t *map)
 }
 
 uint64_t
-sm_singleton_member(const sparsemap_t *map)
+sm_singleton_member(const sm_t *map)
 {
 	if (map == NULL || sm_is_empty(map))
 		return (SM_IDX_MAX);
@@ -5667,12 +5663,12 @@ sm_singleton_member(const sparsemap_t *map)
  */
 
 size_t
-sm_union_cardinality(const sparsemap_t *a, const sparsemap_t *b)
+sm_union_cardinality(const sm_t *a, const sm_t *b)
 {
 	if (sm_is_empty(a))
-		return (b ? sm_cardinality((sparsemap_t *)b) : 0);
+		return (b ? sm_cardinality((sm_t *)b) : 0);
 	if (sm_is_empty(b))
-		return (sm_cardinality((sparsemap_t *)a));
+		return (sm_cardinality((sm_t *)a));
 
 	size_t count = 0;
 	uint64_t ia = sm_next_member(a, SM_IDX_MAX);
@@ -5694,7 +5690,7 @@ sm_union_cardinality(const sparsemap_t *a, const sparsemap_t *b)
 }
 
 size_t
-sm_intersection_cardinality(const sparsemap_t *a, const sparsemap_t *b)
+sm_intersection_cardinality(const sm_t *a, const sm_t *b)
 {
 	if (sm_is_empty(a) || sm_is_empty(b))
 		return (0);
@@ -5716,12 +5712,12 @@ sm_intersection_cardinality(const sparsemap_t *a, const sparsemap_t *b)
 }
 
 size_t
-sm_difference_cardinality(const sparsemap_t *a, const sparsemap_t *b)
+sm_difference_cardinality(const sm_t *a, const sm_t *b)
 {
 	if (sm_is_empty(a))
 		return (0);
 	if (sm_is_empty(b))
-		return (sm_cardinality((sparsemap_t *)a));
+		return (sm_cardinality((sm_t *)a));
 
 	size_t count = 0;
 	uint64_t ia = sm_next_member(a, SM_IDX_MAX);
@@ -5743,7 +5739,7 @@ sm_difference_cardinality(const sparsemap_t *a, const sparsemap_t *b)
 }
 
 bool
-sm_nonempty_difference(const sparsemap_t *a, const sparsemap_t *b)
+sm_nonempty_difference(const sm_t *a, const sm_t *b)
 {
 	if (sm_is_empty(a))
 		return (false);
@@ -5766,7 +5762,7 @@ sm_nonempty_difference(const sparsemap_t *a, const sparsemap_t *b)
 }
 
 double
-sm_jaccard_index(const sparsemap_t *a, const sparsemap_t *b)
+sm_jaccard_index(const sm_t *a, const sm_t *b)
 {
 	/* Walk both lockstep, accumulating intersection and union counts
 	 * in a single pass. */
@@ -5793,7 +5789,7 @@ sm_jaccard_index(const sparsemap_t *a, const sparsemap_t *b)
 }
 
 bool
-sm_add_many(sparsemap_t *map, const uint64_t *arr, size_t n)
+sm_add_many(sm_t *map, const uint64_t *arr, size_t n)
 {
 	if (map == NULL || (arr == NULL && n > 0))
 		return (false);
@@ -5806,7 +5802,7 @@ sm_add_many(sparsemap_t *map, const uint64_t *arr, size_t n)
 }
 
 void
-sm_to_array(const sparsemap_t *map, uint64_t *out, size_t *n_out)
+sm_to_array(const sm_t *map, uint64_t *out, size_t *n_out)
 {
 	if (n_out == NULL)
 		return;
@@ -5815,8 +5811,7 @@ sm_to_array(const sparsemap_t *map, uint64_t *out, size_t *n_out)
 
 	if (out == NULL) {
 		/* Query: just count. */
-		*n_out =
-		    sm_is_empty(map) ? 0 : sm_cardinality((sparsemap_t *)map);
+		*n_out = sm_is_empty(map) ? 0 : sm_cardinality((sm_t *)map);
 		return;
 	}
 
@@ -5835,7 +5830,7 @@ sm_to_array(const sparsemap_t *map, uint64_t *out, size_t *n_out)
  * ------------------------------------------------------------------- */
 
 bool
-sm_add_range(sparsemap_t *map, uint64_t lo, uint64_t hi)
+sm_add_range(sm_t *map, uint64_t lo, uint64_t hi)
 {
 	if (map == NULL || lo >= hi)
 		return (lo >= hi); /* empty range = OK */
@@ -5848,7 +5843,7 @@ sm_add_range(sparsemap_t *map, uint64_t lo, uint64_t hi)
 }
 
 bool
-sm_remove_range(sparsemap_t *map, uint64_t lo, uint64_t hi)
+sm_remove_range(sm_t *map, uint64_t lo, uint64_t hi)
 {
 	if (map == NULL || lo >= hi)
 		return (lo >= hi);
@@ -5860,8 +5855,8 @@ sm_remove_range(sparsemap_t *map, uint64_t lo, uint64_t hi)
 	return (true);
 }
 
-sparsemap_t *
-sm_xor(const sparsemap_t *a, const sparsemap_t *b)
+sm_t *
+sm_xor(const sm_t *a, const sm_t *b)
 {
 	if (sm_is_empty(a) && sm_is_empty(b))
 		return (NULL);
@@ -5872,7 +5867,7 @@ sm_xor(const sparsemap_t *a, const sparsemap_t *b)
 
 	/* Allocate a result big enough for the union (upper bound). */
 	const size_t cap = sm_get_capacity(a) + sm_get_capacity(b);
-	sparsemap_t *r = sm_create(cap > 1024 ? cap : 1024);
+	sm_t *r = sm_create(cap > 1024 ? cap : 1024);
 	if (r == NULL)
 		return (NULL);
 
@@ -5905,36 +5900,36 @@ sm_xor(const sparsemap_t *a, const sparsemap_t *b)
 	return (r);
 }
 
-sparsemap_t *
-sm_or(const sparsemap_t *a, const sparsemap_t *b)
+sm_t *
+sm_or(const sm_t *a, const sm_t *b)
 {
 	return (sm_union(a, b));
 }
 
-sparsemap_t *
-sm_and(const sparsemap_t *a, const sparsemap_t *b)
+sm_t *
+sm_and(const sm_t *a, const sm_t *b)
 {
 	return (sm_intersection(a, b));
 }
 
-sparsemap_t *
-sm_andnot(const sparsemap_t *a, const sparsemap_t *b)
+sm_t *
+sm_andnot(const sm_t *a, const sm_t *b)
 {
 	return (sm_difference(a, b));
 }
 
-sparsemap_t *
-sm_extract_range(const sparsemap_t *map, uint64_t lo, uint64_t hi)
+sm_t *
+sm_extract_range(const sm_t *map, uint64_t lo, uint64_t hi)
 {
 	if (map == NULL || sm_is_empty(map) || lo >= hi)
 		return (NULL);
 
 	/* Estimate result capacity from the input -- worst case is the same
 	 * shape, capped to the requested range size. */
-	size_t cap = sm_get_size((sparsemap_t *)map) + 64;
+	size_t cap = sm_get_size((sm_t *)map) + 64;
 	if (cap < 1024)
 		cap = 1024;
-	sparsemap_t *r = sm_create(cap);
+	sm_t *r = sm_create(cap);
 	if (r == NULL)
 		return (NULL);
 
@@ -5946,7 +5941,7 @@ sm_extract_range(const sparsemap_t *map, uint64_t lo, uint64_t hi)
 	    cursor < hi) {
 		if (sm_add(r, cursor) == SM_IDX_MAX) {
 			/* Grow and retry once. */
-			sparsemap_t *grown = sm_set_data_size(r, NULL,
+			sm_t *grown = sm_set_data_size(r, NULL,
 			    sm_get_capacity(r) * 2 + 256);
 			if (grown == NULL) {
 				sm_free(r);
@@ -5968,14 +5963,14 @@ sm_extract_range(const sparsemap_t *map, uint64_t lo, uint64_t hi)
 }
 
 size_t
-sm_xor_cardinality(const sparsemap_t *a, const sparsemap_t *b)
+sm_xor_cardinality(const sm_t *a, const sm_t *b)
 {
 	if (sm_is_empty(a) && sm_is_empty(b))
 		return (0);
 	if (sm_is_empty(a))
-		return (sm_cardinality((sparsemap_t *)b));
+		return (sm_cardinality((sm_t *)b));
 	if (sm_is_empty(b))
-		return (sm_cardinality((sparsemap_t *)a));
+		return (sm_cardinality((sm_t *)a));
 
 	size_t count = 0;
 	uint64_t ia = sm_next_member(a, SM_IDX_MAX);
@@ -5995,10 +5990,10 @@ sm_xor_cardinality(const sparsemap_t *a, const sparsemap_t *b)
 	return (count);
 }
 
-sparsemap_t *
+sm_t *
 sm_create_singleton(uint64_t idx)
 {
-	sparsemap_t *m = sm_create(1024);
+	sm_t *m = sm_create(1024);
 	if (m && sm_add(m, idx) == SM_IDX_MAX) {
 		sm_free(m);
 		return (NULL);
@@ -6006,19 +6001,19 @@ sm_create_singleton(uint64_t idx)
 	return (m);
 }
 
-sparsemap_t *
+sm_t *
 sm_create_from_range(uint64_t lo, uint64_t hi)
 {
 	/* Estimate buffer size: each chunk is at most ~24 bytes; range
 	 * spans (hi-lo)/2048 chunks plus partial-edge chunks. */
 	size_t chunks = (hi - lo) / 2048 + 2;
 	size_t bytes = 32 + chunks * 24;
-	sparsemap_t *m = sm_create(bytes < 1024 ? 1024 : bytes);
+	sm_t *m = sm_create(bytes < 1024 ? 1024 : bytes);
 	if (m == NULL)
 		return (NULL);
 	if (!sm_add_range(m, lo, hi)) {
 		/* Try once with a bigger buffer. */
-		sparsemap_t *grown = sm_set_data_size(m, NULL, bytes * 4);
+		sm_t *grown = sm_set_data_size(m, NULL, bytes * 4);
 		if (grown == NULL) {
 			sm_free(m);
 			return (NULL);
@@ -6033,10 +6028,10 @@ sm_create_from_range(uint64_t lo, uint64_t hi)
 	return (m);
 }
 
-sparsemap_t *
+sm_t *
 sm_create_from_array(const uint64_t *arr, size_t n)
 {
-	sparsemap_t *m = sm_create(1024);
+	sm_t *m = sm_create(1024);
 	if (m == NULL)
 		return (NULL);
 	if (!sm_add_many(m, arr, n)) {
@@ -6047,7 +6042,7 @@ sm_create_from_array(const uint64_t *arr, size_t n)
 }
 
 uint64_t
-sm_hash(const sparsemap_t *map)
+sm_hash(const sm_t *map)
 {
 	/* FNV-1a 64-bit over the sequence of set bits.  Content-based
 	 * (encoding-independent): two maps that compare equal under
@@ -6067,7 +6062,7 @@ sm_hash(const sparsemap_t *map)
 }
 
 int
-sm_compare(const sparsemap_t *a, const sparsemap_t *b)
+sm_compare(const sm_t *a, const sm_t *b)
 {
 	/* Lexicographic: walk both lockstep and return the difference at
 	 * the first point of divergence. */
@@ -6087,7 +6082,7 @@ sm_compare(const sparsemap_t *a, const sparsemap_t *b)
 }
 
 sm_subset_relation_t
-sm_subset_compare(const sparsemap_t *a, const sparsemap_t *b)
+sm_subset_compare(const sm_t *a, const sm_t *b)
 {
 	bool a_subset_b = true; /* every bit in a is in b */
 	bool b_subset_a = true; /* every bit in b is in a */
@@ -6119,7 +6114,7 @@ sm_subset_compare(const sparsemap_t *a, const sparsemap_t *b)
 }
 
 uint64_t
-sm_pop_first(sparsemap_t *map)
+sm_pop_first(sm_t *map)
 {
 	if (sm_is_empty(map))
 		return (SM_IDX_MAX);
@@ -6135,7 +6130,7 @@ sm_pop_first(sparsemap_t *map)
 }
 
 uint64_t
-sm_pop_last(sparsemap_t *map)
+sm_pop_last(sm_t *map)
 {
 	if (sm_is_empty(map))
 		return (SM_IDX_MAX);
@@ -6162,8 +6157,8 @@ sm_pop_last(sparsemap_t *map)
  * with minimal speedup over the current approach (sm_union's own walk
  * is already chunk-aware and the memcpy is a single block copy).
  */
-static sparsemap_t *
-__sm_replace_buffer(sparsemap_t *dst, sparsemap_t *result)
+static sm_t *
+__sm_replace_buffer(sm_t *dst, sm_t *result)
 {
 	if (result == NULL) {
 		/* Empty result -- clear dst. */
@@ -6172,8 +6167,7 @@ __sm_replace_buffer(sparsemap_t *dst, sparsemap_t *result)
 	}
 	const size_t result_size = result->m_data_used;
 	if (dst->m_capacity < result_size) {
-		sparsemap_t *grown =
-		    sm_set_data_size(dst, NULL, result_size + 64);
+		sm_t *grown = sm_set_data_size(dst, NULL, result_size + 64);
 		if (grown == NULL) {
 			sm_free(result);
 			return (NULL);
@@ -6187,8 +6181,8 @@ __sm_replace_buffer(sparsemap_t *dst, sparsemap_t *result)
 	return (dst);
 }
 
-sparsemap_t *
-sm_union_inplace(sparsemap_t *dst, const sparsemap_t *src)
+sm_t *
+sm_union_inplace(sm_t *dst, const sm_t *src)
 {
 	if (dst == NULL)
 		return (NULL);
@@ -6196,7 +6190,7 @@ sm_union_inplace(sparsemap_t *dst, const sparsemap_t *src)
 		return (dst);
 	if (sm_is_empty(dst)) {
 		/* dst becomes a copy of src.  Use the chunk-aware copy path. */
-		sparsemap_t *copy = sm_copy(src);
+		sm_t *copy = sm_copy(src);
 		if (copy == NULL)
 			return (NULL);
 		return (__sm_replace_buffer(dst, copy));
@@ -6204,8 +6198,8 @@ sm_union_inplace(sparsemap_t *dst, const sparsemap_t *src)
 	return (__sm_replace_buffer(dst, sm_union(dst, src)));
 }
 
-sparsemap_t *
-sm_intersection_inplace(sparsemap_t *dst, const sparsemap_t *src)
+sm_t *
+sm_intersection_inplace(sm_t *dst, const sm_t *src)
 {
 	if (dst == NULL)
 		return (NULL);
@@ -6218,8 +6212,8 @@ sm_intersection_inplace(sparsemap_t *dst, const sparsemap_t *src)
 	return (__sm_replace_buffer(dst, sm_intersection(dst, src)));
 }
 
-sparsemap_t *
-sm_difference_inplace(sparsemap_t *dst, const sparsemap_t *src)
+sm_t *
+sm_difference_inplace(sm_t *dst, const sm_t *src)
 {
 	if (dst == NULL)
 		return (NULL);
@@ -6234,7 +6228,7 @@ sm_difference_inplace(sparsemap_t *dst, const sparsemap_t *src)
  * ------------------------------------------------------------------- */
 
 bool
-sm_flip_range(sparsemap_t *map, uint64_t lo, uint64_t hi)
+sm_flip_range(sm_t *map, uint64_t lo, uint64_t hi)
 {
 	if (map == NULL || lo >= hi)
 		return (lo >= hi);
@@ -6248,7 +6242,7 @@ sm_flip_range(sparsemap_t *map, uint64_t lo, uint64_t hi)
 }
 
 bool
-sm_validate(const sparsemap_t *map)
+sm_validate(const sm_t *map)
 {
 	if (map == NULL)
 		return (true);
@@ -6293,7 +6287,7 @@ sm_validate(const sparsemap_t *map)
 }
 
 void
-sm_statistics(const sparsemap_t *map, sm_stats_t *stats)
+sm_statistics(const sm_t *map, sm_stats_t *stats)
 {
 	if (stats == NULL)
 		return;
@@ -6301,7 +6295,7 @@ sm_statistics(const sparsemap_t *map, sm_stats_t *stats)
 	if (map == NULL)
 		return;
 
-	stats->bytes_used = sm_get_size((sparsemap_t *)map);
+	stats->bytes_used = sm_get_size((sm_t *)map);
 	stats->bytes_capacity = sm_get_capacity(map);
 
 	const size_t count = __sm_get_chunk_count(map);
@@ -6343,8 +6337,8 @@ sm_statistics(const sparsemap_t *map, sm_stats_t *stats)
 	    (double)stats->bytes_used / (double)stats->bits_set;
 }
 
-sparsemap_t *
-sm_shrink_to_fit(sparsemap_t *map)
+sm_t *
+sm_shrink_to_fit(sm_t *map)
 {
 	if (map == NULL)
 		return (NULL);
@@ -6376,15 +6370,15 @@ __sm_host_is_little_endian(void)
 }
 
 size_t
-sm_serialized_size(const sparsemap_t *map)
+sm_serialized_size(const sm_t *map)
 {
 	if (map == NULL)
 		return (SM_WIRE_HEADER_LEN + SM_SIZEOF_OVERHEAD);
-	return (SM_WIRE_HEADER_LEN + sm_get_size((sparsemap_t *)map));
+	return (SM_WIRE_HEADER_LEN + sm_get_size((sm_t *)map));
 }
 
 size_t
-sm_serialize(const sparsemap_t *map, uint8_t *out, size_t out_size)
+sm_serialize(const sm_t *map, uint8_t *out, size_t out_size)
 {
 	if (out == NULL)
 		return (0);
@@ -6392,9 +6386,8 @@ sm_serialize(const sparsemap_t *map, uint8_t *out, size_t out_size)
 	if (out_size < needed)
 		return (0);
 
-	const uint64_t cardinality = (map == NULL || sm_is_empty(map)) ?
-	    0 :
-	    sm_cardinality((sparsemap_t *)map);
+	const uint64_t cardinality =
+	    (map == NULL || sm_is_empty(map)) ? 0 : sm_cardinality((sm_t *)map);
 	const uint8_t flags =
 	    __sm_host_is_little_endian() ? SM_WIRE_FLAG_LE : 0;
 
@@ -6412,14 +6405,13 @@ sm_serialize(const sparsemap_t *map, uint8_t *out, size_t out_size)
 	if (map == NULL || sm_is_empty(map)) {
 		memset(out + SM_WIRE_HEADER_LEN, 0, SM_SIZEOF_OVERHEAD);
 	} else {
-		memcpy(out + SM_WIRE_HEADER_LEN,
-		    sm_get_data((sparsemap_t *)map),
-		    sm_get_size((sparsemap_t *)map));
+		memcpy(out + SM_WIRE_HEADER_LEN, sm_get_data((sm_t *)map),
+		    sm_get_size((sm_t *)map));
 	}
 	return (needed);
 }
 
-sparsemap_t *
+sm_t *
 sm_deserialize(const uint8_t *in, size_t n)
 {
 	if (in == NULL || n < SM_WIRE_HEADER_LEN + SM_SIZEOF_OVERHEAD) {
@@ -6444,7 +6436,7 @@ sm_deserialize(const uint8_t *in, size_t n)
 
 	/* Body: starts at offset SM_WIRE_HEADER_LEN. */
 	const size_t body_len = n - SM_WIRE_HEADER_LEN;
-	sparsemap_t *map = sm_create(body_len + 64);
+	sm_t *map = sm_create(body_len + 64);
 	if (map == NULL)
 		return (NULL);
 
@@ -6468,7 +6460,7 @@ sm_deserialize(const uint8_t *in, size_t n)
  * @brief Copy a raw chunk (start offset + descriptor + vectors) into result.
  */
 static bool
-__sm_copy_chunk_to_result(sparsemap_t **resultp, const uint8_t *chunk_ptr)
+__sm_copy_chunk_to_result(sm_t **resultp, const uint8_t *chunk_ptr)
 {
 	const __sm_chunk_t chunk = { .m_data =
 		                         (__sm_bitvec_unaligned_t *)(chunk_ptr +
@@ -6493,8 +6485,8 @@ __sm_copy_chunk_to_result(sparsemap_t **resultp, const uint8_t *chunk_ptr)
  * Uses a two-pointer chunk merge walk for O(chunks) performance instead
  * of the previous O(cardinality x chunks) bit-by-bit scan+contains.
  */
-sparsemap_t *
-sm_intersection(const sparsemap_t *a, const sparsemap_t *b)
+sm_t *
+sm_intersection(const sm_t *a, const sm_t *b)
 {
 	__sm_check_invariants(a);
 	__sm_check_invariants(b);
@@ -6518,7 +6510,7 @@ sm_intersection(const sparsemap_t *a, const sparsemap_t *b)
 	if (cap < 1024)
 		cap = 1024;
 
-	sparsemap_t *result = sparsemap(cap);
+	sm_t *result = sparsemap(cap);
 	if (result == NULL) {
 		return (NULL);
 	}
@@ -6705,8 +6697,8 @@ sm_intersection(const sparsemap_t *a, const sparsemap_t *b)
  * For RLE chunks, emits a single RLE chunk covering the set bit range.
  */
 static bool
-__sm_emit_chunk_bits(sparsemap_t **resultp, const __sm_chunk_t *chunk,
-    bool is_rle, __sm_idx_t chunk_start, size_t from, size_t to)
+__sm_emit_chunk_bits(sm_t **resultp, const __sm_chunk_t *chunk, bool is_rle,
+    __sm_idx_t chunk_start, size_t from, size_t to)
 {
 	if (from >= to)
 		return (true);
@@ -6785,8 +6777,8 @@ __sm_emit_chunk_bits(sparsemap_t **resultp, const __sm_chunk_t *chunk,
  * through each a chunk, preventing double-counting when one a chunk
  * overlaps with multiple b chunks.
  */
-sparsemap_t *
-sm_difference(const sparsemap_t *a, const sparsemap_t *b)
+sm_t *
+sm_difference(const sm_t *a, const sm_t *b)
 {
 	__sm_check_invariants(a);
 	__sm_check_invariants(b);
@@ -6810,7 +6802,7 @@ sm_difference(const sparsemap_t *a, const sparsemap_t *b)
 	if (cap < 1024)
 		cap = 1024;
 
-	sparsemap_t *result = sparsemap(cap);
+	sm_t *result = sparsemap(cap);
 	if (result == NULL) {
 		return (NULL);
 	}
@@ -7048,8 +7040,8 @@ sm_difference(const sparsemap_t *a, const sparsemap_t *b)
  * @returns A newly allocated sparsemap (caller must free()), or NULL on
  *          allocation failure or if both inputs are empty/NULL.
  */
-sparsemap_t *
-sm_union(const sparsemap_t *a, const sparsemap_t *b)
+sm_t *
+sm_union(const sm_t *a, const sm_t *b)
 {
 	__sm_check_invariants(a);
 	__sm_check_invariants(b);
@@ -7075,7 +7067,7 @@ sm_union(const sparsemap_t *a, const sparsemap_t *b)
 	if (cap < 1024)
 		cap = 1024;
 
-	sparsemap_t *result = sparsemap(cap);
+	sm_t *result = sparsemap(cap);
 	if (result == NULL) {
 		return (NULL);
 	}
@@ -7463,7 +7455,7 @@ fail:
  * ------------------------------------------------------------------- */
 
 uint64_t
-sm_split(sparsemap_t *map, uint64_t idx, sparsemap_t *other)
+sm_split(sm_t *map, uint64_t idx, sm_t *other)
 {
 	__sm_check_invariants(map);
 	__sm_check_invariants(other);
@@ -7548,7 +7540,7 @@ sm_split(sparsemap_t *map, uint64_t idx, sparsemap_t *other)
 			 * that separates the RLE chunk at the index.
 			 */
 
-			sparsemap_t stunt;
+			sm_t stunt;
 			__sm_chunk_t chunk;
 			_Alignas(__sm_bitvec_t) uint8_t
 			    buf[(SM_SIZEOF_OVERHEAD * (unsigned long)3) +
@@ -7683,7 +7675,7 @@ sm_split(sparsemap_t *map, uint64_t idx, sparsemap_t *other)
 }
 
 uint64_t
-sm_select(sparsemap_t *map, uint64_t n, bool value)
+sm_select(sm_t *map, uint64_t n, bool value)
 {
 	__sm_check_invariants(map);
 	__sm_assert(sm_get_size(map) >= SM_SIZEOF_OVERHEAD);
@@ -7720,7 +7712,7 @@ sm_select(sparsemap_t *map, uint64_t n, bool value)
 }
 
 static size_t
-__sm_rank_vec(sparsemap_t *map, uint64_t begin, uint64_t end, bool value,
+__sm_rank_vec(sm_t *map, uint64_t begin, uint64_t end, bool value,
     __sm_bitvec_t *vec)
 {
 	(void)vec; /* unused parameter */
@@ -7831,7 +7823,7 @@ __sm_rank_vec(sparsemap_t *map, uint64_t begin, uint64_t end, bool value,
 }
 
 size_t
-sm_rank(sparsemap_t *map, uint64_t begin, uint64_t end, bool value)
+sm_rank(sm_t *map, uint64_t begin, uint64_t end, bool value)
 {
 	__sm_check_invariants(map);
 	__sm_bitvec_t vec;
@@ -7839,7 +7831,7 @@ sm_rank(sparsemap_t *map, uint64_t begin, uint64_t end, bool value)
 }
 
 uint64_t
-sm_span(sparsemap_t *map, uint64_t idx, size_t len, bool value)
+sm_span(sm_t *map, uint64_t idx, size_t len, bool value)
 {
 	__sm_check_invariants(map);
 	__sm_bitvec_t vec = 0;

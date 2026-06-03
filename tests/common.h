@@ -38,24 +38,24 @@ void print_spans(int *array, int n);
 
 bool is_span(int *array, int n, int x, int l);
 bool is_set(const int array[], int bit);
-bool has_span(sparsemap_t *map, int *array, int l, int n);
+bool has_span(sm_t *map, int *array, int l, int n);
 int is_unique(int a[], int l, int value);
 
 void setup_test_array(int a[], int l, int max_value);
 void shuffle(int *array, size_t n);
 int ensure_sequential_set(int a[], int l, int r);
-uint64_t sm_add_span(sparsemap_t *map, int map_size, int span_length);
+uint64_t sm_add_span(sm_t *map, int map_size, int span_length);
 
 void print_bits(char *name, uint64_t value);
 
-void bitmap_from_uint32(sparsemap_t *map, uint32_t number);
-void sm_bitmap_from_uint64(sparsemap_t *map, int offset, uint64_t number);
+void bitmap_from_uint32(sm_t *map, uint32_t number);
+void sm_bitmap_from_uint64(sm_t *map, int offset, uint64_t number);
 uint32_t rank_uint64(uint64_t number, int n, int p);
 int whats_set_uint64(uint64_t number, int bitPositions[64]);
 
-void sm_whats_set(sparsemap_t *map, int off, int len);
+void sm_whats_set(sm_t *map, int off, int len);
 
-bool sm_is_span(sparsemap_t *map, uint64_t m, int len, bool value);
-bool sm_occupied(sparsemap_t *map, uint64_t m, int len, bool value);
+bool sm_is_span(sm_t *map, uint64_t m, int len, bool value);
+bool sm_occupied(sm_t *map, uint64_t m, int len, bool value);
 
 char *bytes_as(double bytes, char *s, size_t size);
