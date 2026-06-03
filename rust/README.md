@@ -63,17 +63,19 @@ assert_eq!(SparseMap::from_bytes(&bytes).unwrap(), m);
 
 ## Highlights
 
-- **Safe.** `#![forbid(unsafe_code)]` in the library; no `unsafe`, no raw
-  pointers.
+- **100% safe Rust.** `#![forbid(unsafe_code)]`; no `unsafe`, no raw
+  pointers, no build script, and **zero dependencies** (`cargo add
+  sparsemap` pulls nothing else).
 - **`no_std`.** Depends only on `alloc`.  Disable the default `std`
   feature for embedded targets (you lose only the `std::error::Error`
   impls on the error types).
-- **Zero runtime dependencies.**
 - **Idiomatic.** `FromIterator`, `Extend`, `IntoIterator`, `Debug`,
   `Default`, `Clone`, `PartialEq`/`Eq`/`Hash`, and the `|`, `&`, `-`,
   `^` operators (plus their `*=` assigning forms).
-- **Wire-compatible** with the C library's `sm_serialize` /
-  `sm_deserialize`, addressing the same `[0, 2^32)` universe.
+- **Reads the C library's format.** `from_bytes` decodes buffers written
+  by the C `sm_serialize`, addressing the same `[0, 2^32)` universe;
+  verified in-crate against checked-in C-produced fixtures, and in CI
+  the reverse direction (C reading Rust's `to_bytes`).
 
 ## Comparison with the C library
 

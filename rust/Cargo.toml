@@ -1,9 +1,9 @@
 [package]
 name = "sparsemap"
-version = "3.0.0"
+version = "3.0.1"
 edition = "2021"
 rust-version = "1.77"
-description = "A sparse, compressed bitmap with run-length encoding, optimized for long runs of consecutive bits. Wire-compatible with the C sparsemap library."
+description = "A sparse, compressed bitmap with run-length encoding, optimized for long runs of consecutive bits.  100% safe Rust, no_std, zero dependencies; reads the C sparsemap library's serialized format."
 authors = ["Gregory Burd <greg@burd.me>"]
 license = "MIT"
 repository = "https://codeberg.org/gregburd/sparsemap"
@@ -12,6 +12,9 @@ documentation = "https://docs.rs/sparsemap"
 readme = "README.md"
 keywords = ["bitmap", "bitset", "compressed", "rle", "roaring"]
 categories = ["data-structures", "compression", "no-std"]
+# CI-only cross-language wire harness (contains C); never part of the
+# published, 100%-Rust crate.
+exclude = ["ci", "examples/wire_emit.rs"]
 
 [features]
 default = ["std"]
@@ -30,9 +33,6 @@ pedantic = "warn"
 [dev-dependencies]
 proptest = "1"
 criterion = { version = "0.5", default-features = false }
-
-[build-dependencies]
-cc = "1"
 
 [[bench]]
 name = "bench"

@@ -12,7 +12,8 @@ maintainer's to run.
 cd rust
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo test                      # unit + proptest + C wire-compat FFI
+cargo test                      # unit + proptest + read-direction wire fixtures
+sh ci/wire_compat.sh            # write-direction: C reads Rust's bytes (needs a C toolchain)
 cargo build --no-default-features   # no_std
 cargo publish --dry-run
 ```
@@ -40,8 +41,8 @@ cargo publish
 ```
 
 `docs.rs` builds the documentation automatically after publish.  The
-build there has no C source alongside it, so the `c_ffi` cfg stays off
-and the crate documents as pure safe Rust.
+crate is pure Rust with no build script, so the docs.rs build needs no
+C toolchain.
 
 ## 4. Release packages on GitHub and Codeberg
 

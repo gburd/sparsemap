@@ -39,6 +39,17 @@ jobs:
       - name: Build without default features (no_std)
         run: cargo build --no-default-features
 
+  wire-compat:
+    runs-on: codeberg-small
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: C reads Rust-produced buffers
+        run: sh ci/wire_compat.sh
+
   msrv:
     runs-on: codeberg-small
     steps:
