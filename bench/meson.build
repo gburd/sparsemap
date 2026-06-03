@@ -24,3 +24,16 @@ executable('sparsemap_bench',
   c_args : ['-Wno-unused-parameter', '-Wno-unused-function'],
   build_by_default : false,
 )
+
+# Dependency-free micro-benchmarks for individual operations.  Links
+# only libsparsemap, so the numbers are stable and reviewable; built
+# by default.  Run pinned for best repeatability:
+#   taskset -c 2 nice -n -5 ./builddir/bench/sm_microbench
+executable('sm_microbench',
+  'sm_microbench.c',
+  dependencies : [
+    libsparsemap_dep,
+    cc.find_library('rt', required : false),
+  ],
+  build_by_default : true,
+)
