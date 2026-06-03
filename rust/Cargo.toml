@@ -1,0 +1,43 @@
+[package]
+name = "sparsemap"
+version = "3.0.0"
+edition = "2021"
+rust-version = "1.77"
+description = "A sparse, compressed bitmap with run-length encoding, optimized for long runs of consecutive bits. Wire-compatible with the C sparsemap library."
+authors = ["Gregory Burd <greg@burd.me>"]
+license = "MIT"
+repository = "https://codeberg.org/gregburd/sparsemap"
+homepage = "https://codeberg.org/gregburd/sparsemap"
+documentation = "https://docs.rs/sparsemap"
+readme = "README.md"
+keywords = ["bitmap", "bitset", "compressed", "rle", "roaring"]
+categories = ["data-structures", "compression", "no-std"]
+
+[features]
+default = ["std"]
+# Enables std::error::Error impls for the error types.
+std = []
+
+[lints.rust]
+missing_docs = "warn"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"
+
+[dependencies]
+
+[dev-dependencies]
+proptest = "1"
+criterion = { version = "0.5", default-features = false }
+
+[build-dependencies]
+cc = "1"
+
+[[bench]]
+name = "bench"
+harness = false
+
+[profile.bench]
+lto = true
+codegen-units = 1
