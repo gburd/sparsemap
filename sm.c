@@ -2119,7 +2119,7 @@ __sm_append_data(sparsemap_t *map, const uint8_t *buffer,
  * @param[in] buffer Pointer to the buffer containing the data to be inserted.
  * @param[in] buffer_size Size of the buffer in bytes.
  */
-void
+static void
 __sm_insert_data(sparsemap_t *map, const size_t offset, const uint8_t *buffer,
     const size_t buffer_size)
 {
@@ -2527,7 +2527,7 @@ __sm_coalesce_chunk(sparsemap_t *map, __sm_chunk_t *chunk, size_t offset,
  * @param[in] map The sparse map to coalesce.
  * @return The number of bytes coalesced during the operation.
  */
-size_t
+static size_t
 __sm_coalesce_map(sparsemap_t *map)
 {
 	__sm_chunk_t chunk;
@@ -3606,7 +3606,7 @@ sm_contains(sparsemap_t *map, uint64_t idx)
  * @param[in] coalesce A flag indicating whether to perform chunk coalescing.
  * @return The index of the bit that was unset.
  */
-uint64_t
+static uint64_t
 __sm_map_unset(sparsemap_t *map, uint64_t idx, const bool coalesce)
 {
 	const uint64_t ret_idx = idx;
@@ -3848,7 +3848,7 @@ __sparsemap_add(sparsemap_t *map, const uint64_t idx, uint8_t *p, size_t offset,
  * @param[in] coalesce A flag indicating whether to attempt chunk coalescing.
  * @return Returns the adjusted index within the sparse bit map or the given index.
  */
-uint64_t
+static uint64_t
 __sm_map_set(sparsemap_t *map, uint64_t idx, const bool coalesce)
 {
 	__sm_chunk_t chunk;

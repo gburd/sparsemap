@@ -54,6 +54,18 @@ endforeach
 # The big munit-driven suite.  Long-running scale/perf cases live here.
 test('main', test_main, timeout : 600)
 
+# Symbol-prefix regression: compile a private copy of the library with
+# -DSM_PREFIX and link a consumer that uses the renamed API.  Guards
+# against the SM_PREFIX list in sm.h drifting out of sync with the
+# exported symbol set.
+test_prefix = executable('test_prefix',
+  'test_prefix.c',
+  '../sm.c',
+  c_args : ['-DSM_PREFIX=smtest_'],
+  include_directories : inc,
+)
+test('prefix', test_prefix, timeout : 60)
+
 # Soak is a stochastic stress harness, not a pass/fail gate.  Build it
 # (so it stays compiling) but don't add it to `meson test`; run on
 # demand with `ninja -C build sparsemap_soak && ./build/tests/soak`.

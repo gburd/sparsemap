@@ -135,6 +135,117 @@
 #include <stdint.h>
 #include <sys/types.h>
 
+/*
+ * Symbol prefixing for embedding (Berkeley DB --with-uniquename
+ * style).  A program that vendors sparsemap into a larger library
+ * can rename every public symbol by defining SM_PREFIX before
+ * including <sm.h>:
+ *
+ *	#define SM_PREFIX	myapp_
+ *	#include <sm.h>
+ *
+ * turns sm_create() into myapp_sm_create(), sparsemap_t into
+ * myapp_sparsemap_t, and so on, at both declaration and call sites,
+ * so two independently-vendored copies of sparsemap can coexist in
+ * one address space without colliding at link time.  Only C
+ * identifiers that become linker symbols (the public functions) and
+ * the public type names are renamed; compile-time macros
+ * (SM_IDX_MAX, the SM_VERSION_* values, enum constants) are
+ * unaffected because they never reach the linker.  The serialized
+ * wire format does not change.
+ */
+#ifdef SM_PREFIX
+#define SM__CAT2(a, b) a##b
+#define SM__CAT(a, b)  SM__CAT2(a, b)
+#define SM__P(name)    SM__CAT(SM_PREFIX, name)
+
+/* Public types (and the struct tag / deprecated noun constructor). */
+#define sparsemap                   SM__P(sparsemap)
+#define sparsemap_t                 SM__P(sparsemap_t)
+#define sm_allocator_t              SM__P(sm_allocator_t)
+#define sm_membership_t             SM__P(sm_membership_t)
+#define sm_stats_t                  SM__P(sm_stats_t)
+#define sm_subset_relation_t        SM__P(sm_subset_relation_t)
+
+/* Public functions. */
+#define sm_add                      SM__P(sm_add)
+#define sm_add_grow                 SM__P(sm_add_grow)
+#define sm_add_many                 SM__P(sm_add_many)
+#define sm_add_range                SM__P(sm_add_range)
+#define sm_and                      SM__P(sm_and)
+#define sm_andnot                   SM__P(sm_andnot)
+#define sm_assign                   SM__P(sm_assign)
+#define sm_capacity_remaining       SM__P(sm_capacity_remaining)
+#define sm_cardinality              SM__P(sm_cardinality)
+#define sm_clear                    SM__P(sm_clear)
+#define sm_compare                  SM__P(sm_compare)
+#define sm_contains                 SM__P(sm_contains)
+#define sm_copy                     SM__P(sm_copy)
+#define sm_create                   SM__P(sm_create)
+#define sm_create_from_array        SM__P(sm_create_from_array)
+#define sm_create_from_range        SM__P(sm_create_from_range)
+#define sm_create_singleton         SM__P(sm_create_singleton)
+#define sm_create_with_allocator    SM__P(sm_create_with_allocator)
+#define sm_deserialize              SM__P(sm_deserialize)
+#define sm_difference               SM__P(sm_difference)
+#define sm_difference_cardinality   SM__P(sm_difference_cardinality)
+#define sm_difference_inplace       SM__P(sm_difference_inplace)
+#define sm_equals                   SM__P(sm_equals)
+#define sm_extract_range            SM__P(sm_extract_range)
+#define sm_fill_factor              SM__P(sm_fill_factor)
+#define sm_flip_range               SM__P(sm_flip_range)
+#define sm_free                     SM__P(sm_free)
+#define sm_get_capacity             SM__P(sm_get_capacity)
+#define sm_get_data                 SM__P(sm_get_data)
+#define sm_get_size                 SM__P(sm_get_size)
+#define sm_hash                     SM__P(sm_hash)
+#define sm_init                     SM__P(sm_init)
+#define sm_intersection             SM__P(sm_intersection)
+#define sm_intersection_cardinality SM__P(sm_intersection_cardinality)
+#define sm_intersection_inplace     SM__P(sm_intersection_inplace)
+#define sm_is_empty                 SM__P(sm_is_empty)
+#define sm_is_subset                SM__P(sm_is_subset)
+#define sm_is_superset              SM__P(sm_is_superset)
+#define sm_jaccard_index            SM__P(sm_jaccard_index)
+#define sm_maximum                  SM__P(sm_maximum)
+#define sm_membership               SM__P(sm_membership)
+#define sm_minimum                  SM__P(sm_minimum)
+#define sm_next_member              SM__P(sm_next_member)
+#define sm_nonempty_difference      SM__P(sm_nonempty_difference)
+#define sm_offset                   SM__P(sm_offset)
+#define sm_open                     SM__P(sm_open)
+#define sm_open_copy                SM__P(sm_open_copy)
+#define sm_or                       SM__P(sm_or)
+#define sm_overlap                  SM__P(sm_overlap)
+#define sm_owned_copy               SM__P(sm_owned_copy)
+#define sm_pop_first                SM__P(sm_pop_first)
+#define sm_pop_last                 SM__P(sm_pop_last)
+#define sm_prev_member              SM__P(sm_prev_member)
+#define sm_rank                     SM__P(sm_rank)
+#define sm_remove                   SM__P(sm_remove)
+#define sm_remove_range             SM__P(sm_remove_range)
+#define sm_scan                     SM__P(sm_scan)
+#define sm_select                   SM__P(sm_select)
+#define sm_serialize                SM__P(sm_serialize)
+#define sm_serialized_size          SM__P(sm_serialized_size)
+#define sm_set_allocator            SM__P(sm_set_allocator)
+#define sm_set_data_size            SM__P(sm_set_data_size)
+#define sm_shrink_to_fit            SM__P(sm_shrink_to_fit)
+#define sm_singleton_member         SM__P(sm_singleton_member)
+#define sm_span                     SM__P(sm_span)
+#define sm_split                    SM__P(sm_split)
+#define sm_statistics               SM__P(sm_statistics)
+#define sm_subset_compare           SM__P(sm_subset_compare)
+#define sm_to_array                 SM__P(sm_to_array)
+#define sm_union                    SM__P(sm_union)
+#define sm_union_cardinality        SM__P(sm_union_cardinality)
+#define sm_union_inplace            SM__P(sm_union_inplace)
+#define sm_validate                 SM__P(sm_validate)
+#define sm_wrap                     SM__P(sm_wrap)
+#define sm_xor                      SM__P(sm_xor)
+#define sm_xor_cardinality          SM__P(sm_xor_cardinality)
+#endif /* SM_PREFIX */
+
 #if defined(__cplusplus)
 extern "C" {
 #endif
