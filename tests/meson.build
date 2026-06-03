@@ -67,6 +67,30 @@ test_prefix = executable('test_prefix',
 )
 test('prefix', test_prefix, timeout : 60)
 
+# Property tests using hegel-c (optional).  hegel-c has no pkg-config
+# file and is usually vendored or installed by hand, so we probe for
+# the header and the libraries it links against (-lhegel -lcbor -lz).
+# With -Dhegel=auto the target is built only when all are present;
+# -Dhegel=enabled turns a missing dependency into a hard error;
+# -Dhegel=disabled skips it entirely.
+hegel_opt = get_option('hegel')
+if not hegel_opt.disabled()
+  hegel_lib = cc.find_library('hegel', required : false)
+  cbor_lib = cc.find_library('cbor', required : false)
+  z_lib = cc.find_library('z', required : false)
+  have_hegel = hegel_lib.found() and cbor_lib.found() and z_lib.found() \
+    and cc.has_header('hegel/hegel.h')
+  if have_hegel
+    test_hegel = executable('test_hegel',
+      'test_hegel.c',
+      dependencies : [libsparsemap_dep, hegel_lib, cbor_lib, z_lib],
+    )
+    test('hegel', test_hegel, timeout : 300)
+  elif hegel_opt.enabled()
+    error('hegel=enabled but hegel-c (hegel/hegel.h + libhegel + libcbor + libz) was not found')
+  endif
+endif
+
 # Soak is a stochastic stress harness, not a pass/fail gate.  Build it
 # (so it stays compiling) but don't add it to `meson test`; run on
 # demand with `ninja -C build sparsemap_soak && ./build/tests/soak`.

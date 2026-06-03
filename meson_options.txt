@@ -27,3 +27,9 @@ option('fuzz',
   value : 'disabled',
   description : 'Build the libFuzzer harnesses (requires clang with -fsanitize=fuzzer).',
 )
+
+option('hegel',
+  type : 'feature',
+  value : 'auto',
+  description : 'Build the hegel-c property tests (auto: build only if the hegel-c library and headers are found).',
+)
