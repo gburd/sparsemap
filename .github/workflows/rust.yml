@@ -32,6 +32,14 @@ jobs:
       - name: Build without default features (no_std)
         run: cargo build --no-default-features
 
+  wire-compat:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: C reads Rust-produced buffers
+        run: sh ci/wire_compat.sh
+
   msrv:
     runs-on: ubuntu-latest
     steps:

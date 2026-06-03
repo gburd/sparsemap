@@ -1,117 +1,107 @@
-//! Wire-format compatibility with the C sparsemap library.
+//! Wire-format compatibility with the C sparsemap library (read
+//! direction), as a pure-Rust test.
 //!
-//! Compiled only when `build.rs` found the C source and set the `c_ffi`
-//! cfg (i.e. when building inside the upstream repository).  The tests
-//! round-trip serialized buffers in both directions:
+//! The byte constants below were produced by the C library's
+//! `sm_serialize` (see `ci/gen_fixtures.c`).  Deserializing them here
+//! and recovering the exact bit set proves the Rust port reads the C
+//! library's output.  Because the constants are checked in, this needs
+//! no C compiler and no build script — the crate stays 100% Rust.
 //!
-//! * a map built and serialized in C must deserialize in Rust to the
-//!   same bit set, and
-//! * a map built and serialized in Rust must deserialize in C to the
-//!   same bit set.
-//!
-//! This is the ground truth for the claim that the Rust port is
-//! functionally identical to, and interoperable with, the C library.
-#![cfg(c_ffi)]
+//! The reverse direction (the C library reading Rust-produced bytes) is
+//! exercised by `ci/wire_compat.sh` in CI, which has a C toolchain and
+//! the C source; it is deliberately kept out of the published crate.
 
 use sparsemap::SparseMap;
 use std::collections::BTreeSet;
-use std::os::raw::c_void;
 
-#[allow(non_camel_case_types)]
-type sm_t = c_void;
+/// Deserialize C-produced `bytes`, recover the set, and confirm it
+/// equals `expected`.  Also confirm Rust's own re-encoding round-trips.
+fn check(bytes: &[u8], expected: &BTreeSet<u64>) {
+    let m = SparseMap::from_bytes(bytes).expect("Rust must deserialize C output");
+    let got: BTreeSet<u64> = m.iter().collect();
+    assert_eq!(&got, expected, "Rust read of C bytes diverged");
 
-extern "C" {
-    fn sm_create(size: usize) -> *mut sm_t;
-    fn sm_free(map: *mut sm_t);
-    fn sm_add(map: *mut sm_t, idx: u64) -> u64;
-    fn sm_contains(map: *mut sm_t, idx: u64) -> bool;
-    fn sm_cardinality(map: *mut sm_t) -> usize;
-    fn sm_serialized_size(map: *const sm_t) -> usize;
-    fn sm_serialize(map: *const sm_t, out: *mut u8, out_size: usize) -> usize;
-    fn sm_deserialize(input: *const u8, n: usize) -> *mut sm_t;
+    let re = m.to_bytes().unwrap();
+    let back = SparseMap::from_bytes(&re).unwrap();
+    assert_eq!(back, m, "Rust re-encode round-trip diverged");
 }
 
-/// Build a C map from a set of bits and return its serialized bytes.
-fn c_serialize(bits: &BTreeSet<u64>) -> Vec<u8> {
-    unsafe {
-        let map = sm_create(4096);
-        assert!(!map.is_null());
-        for &b in bits {
-            // sm_add can fail with ENOSPC on a fixed buffer; grow by
-            // recreating large enough.  4096 + slack per bit is ample
-            // for these small test sets.
-            let rc = sm_add(map, b);
-            assert_ne!(rc, u64::MAX, "C sm_add ENOSPC; enlarge test buffer");
-        }
-        assert_eq!(sm_cardinality(map), bits.len());
-        let sz = sm_serialized_size(map);
-        let mut buf = vec![0u8; sz];
-        let wrote = sm_serialize(map, buf.as_mut_ptr(), sz);
-        assert_eq!(wrote, sz);
-        sm_free(map);
-        buf
-    }
+fn set(iter: impl IntoIterator<Item = u64>) -> BTreeSet<u64> {
+    iter.into_iter().collect()
 }
 
-/// Deserialize bytes with the C library and read back the bit set.
-fn c_deserialize_bits(bytes: &[u8], probe: &BTreeSet<u64>) -> (bool, Vec<u64>) {
-    unsafe {
-        let map = sm_deserialize(bytes.as_ptr(), bytes.len());
-        if map.is_null() {
-            return (false, Vec::new());
-        }
-        let present: Vec<u64> = probe
-            .iter()
-            .copied()
-            .filter(|&b| sm_contains(map, b))
-            .collect();
-        sm_free(map);
-        (true, present)
-    }
-}
+// --- fixtures emitted by the C library (ci/gen_fixtures.c) ---
 
-fn sample_sets() -> Vec<BTreeSet<u64>> {
-    vec![
-        BTreeSet::new(),
-        [42u64].into_iter().collect(),
-        [1, 2, 3, 2047, 2048, 4096, 100_000].into_iter().collect(),
-        (0..5000u64).collect(),     // crosses windows, partial run
-        (0..2048u64 * 4).collect(), // exact multi-window run
-        (0..100u64).chain(10_000..10_050).collect(),
-        (1000..1000u64 + 6000).collect(), // offset partial run
-    ]
+/// C `sm_serialize` output for the empty set (0 bits, 20 bytes).
+const EMPTY: &[u8] = &[
+    115, 109, 49, 48, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+];
+/// C `sm_serialize` output for `{42}` (1 bit, 40 bytes).
+const SINGLE: &[u8] = &[
+    115, 109, 49, 48, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 4, 0, 0,
+];
+/// C `sm_serialize` output for `{1,2,3,2047,2048,4096,100000}` (7 bits, 108 bytes).
+const SCATTERED: &[u8] = &[
+    115, 109, 49, 48, 1, 1, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0,
+    0, 128, 14, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 128, 0, 8, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0,
+    1, 0, 0, 0, 0, 0, 0, 0, 0, 16, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 128, 1,
+    0, 0, 0, 0, 0, 0, 0, 32, 0, 0, 0, 0, 0, 1, 0, 0, 0,
+];
+/// C `sm_serialize` output for `0..5000` (5000 bits, 32 bytes — RLE).
+const RUN_5000: &[u8] = &[
+    115, 109, 49, 48, 1, 1, 0, 0, 136, 19, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 136, 19, 0, 0,
+    0, 12, 0, 64,
+];
+/// C `sm_serialize` output for `0..8192` (four full windows, 32 bytes — RLE).
+const RUN_4WINDOWS: &[u8] = &[
+    115, 109, 49, 48, 1, 1, 0, 0, 0, 32, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 32, 0, 0, 0,
+    16, 0, 64,
+];
+/// C `sm_serialize` output for `0..100 ∪ 10000..10050` (150 bits, 68 bytes).
+const TWO_CLUSTERS: &[u8] = &[
+    115, 109, 49, 48, 1, 1, 0, 0, 150, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 11, 0, 0, 0, 0,
+    0, 0, 0, 255, 255, 255, 255, 15, 0, 0, 0, 0, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 10, 0, 0, 255, 255,
+    255, 255, 255, 255, 3, 0, 0, 0, 0, 0, 0, 0,
+];
+/// C `sm_serialize` output for `1000..7000` (6000 bits, 52 bytes).
+const OFFSET_RUN: &[u8] = &[
+    115, 109, 49, 48, 1, 1, 0, 0, 112, 23, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 128,
+    255, 255, 255, 255, 0, 0, 0, 0, 0, 255, 255, 255, 0, 8, 0, 0, 88, 19, 0, 0, 0, 12, 0, 64,
+];
+
+#[test]
+fn c_empty() {
+    let m = SparseMap::from_bytes(EMPTY).expect("empty deserializes");
+    assert!(m.is_empty());
 }
 
 #[test]
-fn c_writes_rust_reads() {
-    for bits in sample_sets() {
-        let c_bytes = c_serialize(&bits);
-        let m = SparseMap::from_bytes(&c_bytes).expect("Rust must deserialize C output");
-        let got: BTreeSet<u64> = m.iter().collect();
-        assert_eq!(got, bits, "Rust read of C bytes diverged");
-    }
+fn c_single() {
+    check(SINGLE, &set([42]));
 }
 
 #[test]
-fn rust_writes_c_reads() {
-    for bits in sample_sets() {
-        let m: SparseMap = bits.iter().copied().collect();
-        let rust_bytes = m.to_bytes().unwrap();
-        // Probe a superset of the bits plus some absent neighbors.
-        let mut probe = bits.clone();
-        for &b in &bits {
-            probe.insert(b + 1);
-            probe.insert(b.saturating_sub(1));
-        }
-        let (ok, present) = c_deserialize_bits(&rust_bytes, &probe);
-        if bits.is_empty() {
-            // An empty map may serialize to a body the C reader treats
-            // as NULL/empty; either way it must not report set bits.
-            assert!(present.is_empty());
-            continue;
-        }
-        assert!(ok, "C must deserialize Rust output");
-        let got: BTreeSet<u64> = present.into_iter().collect();
-        assert_eq!(got, bits, "C read of Rust bytes diverged");
-    }
+fn c_scattered() {
+    check(SCATTERED, &set([1, 2, 3, 2047, 2048, 4096, 100_000]));
+}
+
+#[test]
+fn c_run_5000() {
+    check(RUN_5000, &set(0..5000));
+}
+
+#[test]
+fn c_run_4windows() {
+    check(RUN_4WINDOWS, &set(0..8192));
+}
+
+#[test]
+fn c_two_clusters() {
+    check(TWO_CLUSTERS, &set((0..100).chain(10_000..10_050)));
+}
+
+#[test]
+fn c_offset_run() {
+    check(OFFSET_RUN, &set(1000..7000));
 }

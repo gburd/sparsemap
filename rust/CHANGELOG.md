@@ -4,6 +4,24 @@ All notable changes to the Rust `sparsemap` crate are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com), and
 the crate follows [SemVer](https://semver.org).
 
+## [3.0.1] - 2026-06-03
+
+### Changed
+
+- The crate is now **100% Rust with zero dependencies and no build
+  script**.  3.0.0 carried a `cc` build-dependency and a `build.rs`
+  that compiled the C library for an in-tree wire-compatibility test;
+  a default `cargo add sparsemap` pulled and compiled `cc` (a no-op for
+  consumers, since no C source ships in the crate).  Both are removed.
+- Cross-language wire compatibility is still verified: the read
+  direction (decoding C output) is now an in-crate, pure-Rust test
+  against checked-in fixtures produced by the C `sm_serialize`
+  (`ci/gen_fixtures.c`); the write direction (the C library reading
+  Rust's `to_bytes`) runs in CI via `ci/wire_compat.sh`, which is
+  excluded from the published crate.
+
+No API or behavior changes.
+
 ## [3.0.0] - 2026-06-03
 
 First release of the Rust port.  The version is aligned with the C
