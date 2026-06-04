@@ -57,7 +57,7 @@ assert_eq!(m.rank(5), 3);                    // bits below 5: {1,3,4}
 assert_eq!(m.iter().collect::<Vec<_>>(), vec![1, 3, 4, 5, 9]);
 
 // Serialize to the C-compatible wire format.
-let bytes = m.to_bytes().unwrap();
+let bytes = m.to_bytes();
 assert_eq!(SparseMap::from_bytes(&bytes).unwrap(), m);
 ```
 
@@ -73,7 +73,7 @@ assert_eq!(SparseMap::from_bytes(&bytes).unwrap(), m);
   `Default`, `Clone`, `PartialEq`/`Eq`/`Hash`, and the `|`, `&`, `-`,
   `^` operators (plus their `*=` assigning forms).
 - **Reads the C library's format.** `from_bytes` decodes buffers written
-  by the C `sm_serialize`, addressing the same `[0, 2^32)` universe;
+  by the C `sm_serialize`, addressing the full 64-bit universe;
   verified in-crate against checked-in C-produced fixtures, and in CI
   the reverse direction (C reading Rust's `to_bytes`).
 

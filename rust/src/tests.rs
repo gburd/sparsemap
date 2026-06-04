@@ -198,7 +198,7 @@ fn serialize_roundtrip() {
         [1, 2, 3, 2048, 4096, 1_000_000].into_iter().collect(),
     ];
     for m in cases {
-        let bytes = m.to_bytes().unwrap();
+        let bytes = m.to_bytes();
         let back = SparseMap::from_bytes(&bytes).unwrap();
         assert_eq!(m, back, "roundtrip mismatch");
     }

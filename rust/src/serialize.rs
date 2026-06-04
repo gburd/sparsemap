@@ -6,34 +6,42 @@
 //! ```text
 //! offset  size  field
 //!   0      4    magic       0x30316d73  ("sm10", little-endian)
-//!   4      1    version     1
+//!   4      1    version     2
 //!   5      1    flags       bit0 = 1 if the body is little-endian
 //!   6      2    reserved    0
 //!   8      8    cardinality hint (recomputed on read)
-//!  16      4    chunk count
-//!  20    ...    chunks
+//!  16      8    chunk-count header (u32 count + 4 zero pad)
+//!  24    ...    chunks
 //! ```
 //!
-//! Each chunk is `[u32 start][u64 descriptor][u64 payload...]`.  A
+//! Each chunk is `[u64 start][u64 descriptor][u64 payload...]`.  A
 //! descriptor whose top two bits are `01` is a run-length chunk
 //! (capacity in bits 61:31, length in bits 30:0); otherwise it is a
 //! sparse chunk of thirty-two 2-bit flags (`00` zero, `11` one, `10`
 //! mixed-with-payload), least-significant slot first.
 //!
-//! Because chunk starts are 32-bit, the serialized format addresses the
-//! `[0, 2^32)` universe, exactly as the C library does.  Reading honors
-//! the body's declared endianness, so a buffer written on a big-endian
-//! host can be read on a little-endian one (an improvement over the C
-//! reader, which rejects the cross-endian case).
+//! Chunk starts are 64-bit, so the format addresses the full 64-bit
+//! universe the public API advertises.  Reading honors the body's
+//! declared endianness, so a buffer written on a big-endian host can
+//! be read on a little-endian one.
+//!
+//! Version 2 of the wire format (sparsemap 4.0.0+).  Earlier 4-byte-
+//! start v1 buffers are not read; consumers should re-serialize through
+//! the C 4.0.0 (or later) library, which produces v2.
 
 use crate::{Chunk, SparseMap, BITS_PER_WORD, CHUNK_BITS, WORDS_PER_CHUNK};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 const MAGIC: u32 = 0x3031_6d73;
-const VERSION: u8 = 1;
+const VERSION: u8 = 2;
 const HEADER_LEN: usize = 16;
 const FLAG_LE: u8 = 0x01;
+/* On-disk overhead (chunk-count header and per-chunk start width) is
+ * 8 bytes, matching the C library's SM_SIZEOF_OVERHEAD =
+ * sizeof(uint64_t).  The count is a u32 in the low 4 bytes of the
+ * 8-byte header (the high 4 are zero padding). */
+const OVERHEAD: usize = 8;
 const RLE_FLAG_BITS: u64 = 0b01 << 62;
 const RLE_FLAG_MASK: u64 = 0b11 << 62;
 const RLE_MAX_SPAN: u64 = 0x7FFF_FFFF; // 31-bit cap/len fields
@@ -69,28 +77,6 @@ impl core::fmt::Display for DecodeError {
 #[cfg(feature = "std")]
 impl std::error::Error for DecodeError {}
 
-/// Error returned by [`SparseMap::to_bytes`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum EncodeError {
-    /// A set bit is at or above 2^32 and so cannot be addressed by the
-    /// 32-bit on-wire chunk start.
-    IndexTooLarge(u64),
-}
-
-impl core::fmt::Display for EncodeError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            EncodeError::IndexTooLarge(i) => {
-                write!(f, "index {i} exceeds the 2^32 wire universe")
-            }
-        }
-    }
-}
-
-#[cfg(feature = "std")]
-impl std::error::Error for EncodeError {}
-
 /// Classify a word for the sparse flag encoding.
 fn flag_of(word: u64) -> u64 {
     match word {
@@ -101,20 +87,10 @@ fn flag_of(word: u64) -> u64 {
 }
 
 impl SparseMap {
-    /// Serializes the map into the C-compatible wire format.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`EncodeError::IndexTooLarge`] if the map contains a bit
-    /// at or above `2^32`, which the 32-bit on-wire chunk start cannot
-    /// represent (the C library has the same limit).
-    pub fn to_bytes(&self) -> Result<Vec<u8>, EncodeError> {
-        if let Some(mx) = self.max() {
-            if mx >= 1u64 << 32 {
-                return Err(EncodeError::IndexTooLarge(mx));
-            }
-        }
-
+    /// Serializes the map into the C-compatible wire format (version 2:
+    /// 8-byte chunk-start offsets, addressing the full 64-bit universe).
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(&MAGIC.to_le_bytes());
         out.push(VERSION);
@@ -122,15 +98,16 @@ impl SparseMap {
         out.extend_from_slice(&[0, 0]); // reserved
         out.extend_from_slice(&self.cardinality().to_le_bytes());
 
-        // Body: chunk count placeholder, then chunks.
+        // Body: 8-byte chunk-count header (u32 count + 4 zero pad), then
+        // chunks.
         let count_pos = out.len();
-        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&[0u8; OVERHEAD]);
 
         let mut count: u32 = 0;
         for (&base, chunk) in &self.chunks {
             match chunk {
                 Chunk::Dense(w) => {
-                    write_sparse_chunk(&mut out, base as u32, w);
+                    write_sparse_chunk(&mut out, base, w);
                     count += 1;
                 }
                 Chunk::Run(n) => {
@@ -139,7 +116,7 @@ impl SparseMap {
                     let mut start = base;
                     while remaining > 0 {
                         let span = remaining.min(RLE_MAX_SPAN & !(CHUNK_BITS - 1));
-                        write_rle_chunk(&mut out, start as u32, span, span);
+                        write_rle_chunk(&mut out, start, span, span);
                         start += span;
                         remaining -= span;
                         count += 1;
@@ -148,7 +125,7 @@ impl SparseMap {
             }
         }
         out[count_pos..count_pos + 4].copy_from_slice(&count.to_le_bytes());
-        Ok(out)
+        out
     }
 
     /// Deserializes a buffer produced by [`SparseMap::to_bytes`] or by
@@ -174,7 +151,8 @@ impl SparseMap {
 
         let body = &buf[HEADER_LEN..];
         let count = read_u32(body, 0, le).ok_or(DecodeError::Corrupt)?;
-        let mut pos = 4usize;
+        // Chunks begin after the 8-byte chunk-count header.
+        let mut pos = OVERHEAD;
 
         let mut chunks = alloc::collections::BTreeMap::new();
         // Run-coalescing builder state.
@@ -183,14 +161,14 @@ impl SparseMap {
         let mut prev_start: Option<u64> = None;
 
         for _ in 0..count {
-            let start = u64::from(read_u32(body, pos, le).ok_or(DecodeError::Corrupt)?);
+            let start = read_u64(body, pos, le).ok_or(DecodeError::Corrupt)?;
             if let Some(p) = prev_start {
                 if start <= p {
                     return Err(DecodeError::Corrupt);
                 }
             }
             prev_start = Some(start);
-            pos += 4;
+            pos += 8;
             let desc = read_u64(body, pos, le).ok_or(DecodeError::Corrupt)?;
             pos += 8;
 
@@ -289,7 +267,7 @@ fn fill_prefix(w: &mut [u64; WORDS_PER_CHUNK], bits: usize) {
     }
 }
 
-fn write_sparse_chunk(out: &mut Vec<u8>, start: u32, w: &[u64; WORDS_PER_CHUNK]) {
+fn write_sparse_chunk(out: &mut Vec<u8>, start: u64, w: &[u64; WORDS_PER_CHUNK]) {
     let mut desc = 0u64;
     for (i, &word) in w.iter().enumerate() {
         desc |= flag_of(word) << (2 * i);
@@ -303,7 +281,7 @@ fn write_sparse_chunk(out: &mut Vec<u8>, start: u32, w: &[u64; WORDS_PER_CHUNK])
     }
 }
 
-fn write_rle_chunk(out: &mut Vec<u8>, start: u32, cap: u64, len: u64) {
+fn write_rle_chunk(out: &mut Vec<u8>, start: u64, cap: u64, len: u64) {
     let desc = RLE_FLAG_BITS | ((cap & RLE_MAX_SPAN) << 31) | (len & RLE_MAX_SPAN);
     out.extend_from_slice(&start.to_le_bytes());
     out.extend_from_slice(&desc.to_le_bytes());

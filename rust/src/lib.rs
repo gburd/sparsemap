@@ -80,7 +80,7 @@ mod ops;
 mod serialize;
 
 pub use iter::Iter;
-pub use serialize::{DecodeError, EncodeError};
+pub use serialize::DecodeError;
 
 /// Bits in a machine word.
 const BITS_PER_WORD: u64 = 64;

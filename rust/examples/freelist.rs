@@ -40,7 +40,7 @@ fn main() {
     println!("50,000th free slot: {:?}", free.select(50_000));
 
     // Persist the free list, then reload it.
-    let bytes = free.to_bytes().expect("indices fit the wire universe");
+    let bytes = free.to_bytes();
     println!("serialized free list: {} bytes", bytes.len());
     let reloaded = SparseMap::from_bytes(&bytes).expect("round-trips");
     assert_eq!(reloaded, free);

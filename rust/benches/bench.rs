@@ -106,8 +106,8 @@ fn bench_serialize(c: &mut Criterion) {
     let rnd = random_map(50_000, 1 << 20, 1);
     let dense = dense_map(0, 200_000);
     let mut g = c.benchmark_group("serialize");
-    g.bench_function("random", |b| b.iter(|| black_box(rnd.to_bytes().unwrap())));
-    g.bench_function("dense", |b| b.iter(|| black_box(dense.to_bytes().unwrap())));
+    g.bench_function("random", |b| b.iter(|| black_box(rnd.to_bytes())));
+    g.bench_function("dense", |b| b.iter(|| black_box(dense.to_bytes())));
     g.finish();
 }
 

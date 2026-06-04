@@ -4,6 +4,37 @@ All notable changes to the Rust `sparsemap` crate are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com), and
 the crate follows [SemVer](https://semver.org).
 
+## [4.0.0] - 2026-06-04
+
+### Fixed
+
+- **Data loss for indices `>= 2^32`** (parity with C `sparsemap` 4.0.0):
+  the wire format's chunk-start offsets are now 8 bytes (`u64`) so the
+  serialized form addresses the full 64-bit universe the API has always
+  advertised.  Previously, `to_bytes()` returned `EncodeError::IndexTooLarge`
+  for any bit at or above `2^32`; now it succeeds for any valid index.
+
+### Changed (breaking)
+
+- The on-disk **wire format version** is now `2`.  Buffers written by
+  the C `sparsemap` 4.0.0+ deserialize transparently; pre-4.0 buffers
+  (v1, 4-byte starts) are rejected with `DecodeError::UnsupportedVersion(1)`
+  and need to be re-serialized through C 4.0.0+ first.
+- `SparseMap::to_bytes` is now infallible: signature changes from
+  `Result<Vec<u8>, EncodeError>` to `Vec<u8>`.  Callers must drop the
+  `?`/`.unwrap()`/`.expect()` they had on the result.
+- `EncodeError` is removed (the `2^32` cap it expressed no longer
+  exists).
+
+### Verified
+
+- Read-direction wire compatibility against checked-in fixtures emitted
+  by C 4.0.0's `sm_serialize`.
+- Write-direction wire compatibility (`ci/wire_compat.sh`): C 4.0.0
+  reads byte-for-byte the buffers Rust produces, recovering identical
+  bit sets across six representative shapes.
+- `clippy::pedantic` and `rustfmt` clean; `no_std` build green.
+
 ## [3.0.1] - 2026-06-03
 
 ### Changed

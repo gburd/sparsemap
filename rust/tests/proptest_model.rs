@@ -129,7 +129,7 @@ proptest! {
     #[test]
     fn serialize_roundtrip(bits in proptest::collection::hash_set(0..U, 0..400)) {
         let m: SparseMap = bits.iter().copied().collect();
-        let bytes = m.to_bytes().unwrap();
+        let bytes = m.to_bytes();
         let back = SparseMap::from_bytes(&bytes).unwrap();
         prop_assert_eq!(m, back);
     }

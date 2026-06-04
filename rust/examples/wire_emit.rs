@@ -25,7 +25,7 @@ fn main() {
     );
     let m = build(name.expect("usage: wire_emit <emit|describe> <name>"));
     match cmd {
-        Some("emit") => std::io::stdout().write_all(&m.to_bytes().unwrap()).unwrap(),
+        Some("emit") => std::io::stdout().write_all(&m.to_bytes()).unwrap(),
         Some("describe") => {
             for b in &m {
                 println!("{b}");
