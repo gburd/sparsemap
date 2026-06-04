@@ -43,7 +43,7 @@ test_main = executable('test_main',
 
 # Standalone tests link against the library proper (not its source) so
 # they exercise the public API exactly as a downstream consumer would.
-foreach name : ['test_rle_standalone', 'test_heisenbug', 'test_empty_map', 'test_coverage', 'test_portability']
+foreach name : ['test_rle_standalone', 'test_heisenbug', 'test_empty_map', 'test_coverage', 'test_portability', 'test_large_index']
   exe = executable(name,
     name + '.c',
     dependencies : libsparsemap_dep,

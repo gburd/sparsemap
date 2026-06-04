@@ -98,4 +98,3 @@ vgcore.*
 # Core dumps
 core
 core.*
-vgcore.*
