@@ -893,7 +893,7 @@ CASE(test_select_unset_in_partial_rle)
 
 static size_t g_scan_count = 0;
 static uint32_t g_scan_first = 0;
-static void scan_cb(uint32_t vec[], size_t n, void *aux)
+static void scan_cb(uint64_t vec[], size_t n, void *aux)
 {
     (void)aux;
     if (g_scan_count == 0 && n > 0) g_scan_first = vec[0];

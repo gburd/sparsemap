@@ -94,3 +94,8 @@ tests/soak
 bench/sparsemap_bench
 examples/ex_[0-9]
 vgcore.*
+
+# Core dumps
+core
+core.*
+vgcore.*

@@ -251,8 +251,8 @@ extern "C" {
 #endif
 
 /** Library version (kept in sync with meson.build's project(version: ...)). */
-#define SM_VERSION_STRING "3.0.0"
-#define SM_VERSION_MAJOR  3
+#define SM_VERSION_STRING "4.0.0"
+#define SM_VERSION_MAJOR  4
 #define SM_VERSION_MINOR  0
 #define SM_VERSION_PATCH  0
 
@@ -794,7 +794,8 @@ uint64_t sm_span(sm_t *map, uint64_t start, size_t len, bool value);
 /** @brief Invoke a callback for every set bit in the map.
  *
  * The callback receives batches of up to 64 indices at a time.  Indices are
- * delivered in ascending order.
+ * delivered in ascending order.  Each index is an absolute 64-bit bit
+ * position, so the callback array is `uint64_t`.
  *
  * @param[in] map      The sparsemap to scan.
  * @param[in] scanner  Callback invoked with (array_of_indices, count, aux).
@@ -803,15 +804,15 @@ uint64_t sm_span(sm_t *map, uint64_t start, size_t len, bool value);
  *
  * Example:
  * @code
- *   void print_bits(uint32_t idx[], size_t n, void *aux) {
+ *   void print_bits(uint64_t idx[], size_t n, void *aux) {
  *       for (size_t i = 0; i < n; i++)
- *           printf("%u\n", idx[i]);
+ *           printf("%" PRIu64 "\n", idx[i]);
  *   }
  *   sm_scan(map, print_bits, 0, NULL);
  * @endcode
  */
 void sm_scan(const sm_t *map,
-    void (*scanner)(uint32_t vec[], size_t n, void *aux), size_t skip,
+    void (*scanner)(uint64_t vec[], size_t n, void *aux), size_t skip,
     void *aux);
 
 /* -------------------------------------------------------------------

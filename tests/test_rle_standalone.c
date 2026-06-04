@@ -14,7 +14,7 @@ static size_t scan_count = 0;
 static uint32_t scan_last_idx = 0;
 
 void
-scan_counter(uint32_t v[], size_t n, void *aux)
+scan_counter(uint64_t v[], size_t n, void *aux)
 {
   (void)aux;
   for (size_t i = 0; i < n; i++) {

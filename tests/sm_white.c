@@ -3,7 +3,7 @@
  * sm_white.c - white-box test translation unit.
  *
  * The unit/property tests in test.c reach into sparsemap internals
- * (static helpers, the chunk codec, __sm_idx_t) that the public header
+ * (static helpers, the chunk codec, uint64_t) that the public header
  * does not expose.  Rather than ship that scaffolding inside the
  * library, we compile it here: this file #includes the entire
  * implementation so it can see the file-static symbols, then defines
@@ -19,7 +19,7 @@
 
 char *QCC_showSparsemap(void *value, int len);
 char *QCC_showChunk(void *value, int len);
-static char *_qcc_format_chunk(__sm_idx_t start, const __sm_chunk_t *chunk,
+static char *_qcc_format_chunk(uint64_t start, const __sm_chunk_t *chunk,
     bool none);
 
 static void __attribute__((format(printf, 2, 3), unused))
@@ -55,7 +55,7 @@ __sm_diag_chunk(const char *msg, __sm_chunk_t *chunk)
 #include <qc.h>
 
 static char *
-_qcc_format_chunk(const __sm_idx_t start, const __sm_chunk_t *chunk,
+_qcc_format_chunk(const uint64_t start, const __sm_chunk_t *chunk,
     const bool none)
 {
 	size_t amt = sizeof(wchar_t) *
@@ -98,7 +98,7 @@ _qcc_format_chunk(const __sm_idx_t start, const __sm_chunk_t *chunk,
 			}
 		}
 		str = buf +
-		    sprintf(buf, "%.10u\t|%s|%s", start, desc_str,
+		    sprintf(buf, "%.10" PRIu64 "\t|%s|%s", start, desc_str,
 		        mixed ? " :: " : "");
 		for (int i = 0; i < mixed; i++) {
 			const size_t n =
@@ -110,8 +110,8 @@ _qcc_format_chunk(const __sm_idx_t start, const __sm_chunk_t *chunk,
 	} else {
 		const size_t len = __sm_chunk_rle_get_length(chunk);
 		const size_t cap = __sm_chunk_rle_get_capacity(chunk);
-		sprintf(buf, "%.10u\t[%u, %zu) %zu of %zu", start, start,
-		    start + len - 1, len, cap);
+		sprintf(buf, "%.10" PRIu64 "\t[%" PRIu64 ", %" PRIu64 ") %zu of %zu",
+		    start, start, start + len - 1, len, cap);
 	}
 	return buf;
 }
@@ -120,7 +120,7 @@ char *
 QCC_showChunk(void *value, int len)
 {
 	(void)len;
-	const __sm_idx_t start = __sm_load_idx((const uint8_t *)value);
+	const uint64_t start = __sm_load_idx((const uint8_t *)value);
 	__sm_chunk_t chunk;
 	__sm_chunk_init(&chunk, value + SM_SIZEOF_OVERHEAD);
 
@@ -136,24 +136,28 @@ QCC_showSparsemap(void *value, int len)
 	const size_t count = __sm_get_chunk_count(map);
 
 	if (count > 0) {
-		char *str = NULL;
 		uint8_t *p = __sm_get_chunk_data(map, 0);
 		for (size_t i = 0; i < count; i++) {
 			__sm_chunk_t chunk;
-			const __sm_idx_t start =
+			const uint64_t start =
 			    __sm_load_idx((const uint8_t *)p);
 			__sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
 			char *c = _qcc_format_chunk(start, &chunk, true);
 			if (buf) {
+				const size_t used = strlen(buf);
 				char *new_buf =
-				    realloc(buf, strlen(buf) + strlen(c) + 24);
+				    realloc(buf, used + strlen(c) + 2);
 				if (new_buf) {
 					buf = new_buf;
-					str += sprintf(str, "\n%s", c);
+					/* Recompute from the (possibly moved)
+					 * buffer; appending via a stale pointer
+					 * into the pre-realloc block was a
+					 * use-after-free. */
+					sprintf(buf + used, "\n%s", c);
 				}
+				free(c);
 			} else {
-				buf = c;
-				str = buf + strlen(c);
+				buf = c; /* take ownership of the first chunk */
 			}
 			p += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&chunk);
 		}
@@ -371,7 +375,7 @@ _tst_chunk_get_capacity(QCC_GenValue **vals, int len, QCC_Stamp **stamp)
 	(void)len;
 	(void)stamp;
 	uint8_t *p = (uint8_t *)QCC_getValue(vals, 0, void *);
-	__sm_idx_t start = __sm_load_idx((const uint8_t *)p);
+	uint64_t start = __sm_load_idx((const uint8_t *)p);
 	/* See _tst_chunk_get_position above for layout notes. */
 	__sm_chunk_t chunk_local = {
 		.m_data = (__sm_bitvec_unaligned_t *)((uintptr_t)p +
@@ -401,7 +405,7 @@ _tst_get_chunk_offset(QCC_GenValue **vals, int len, QCC_Stamp **stamp)
 	const unsigned int rnd_offset =
 	    (idx % max_offset) - (idx % max_offset % sizeof(__sm_bitvec_t));
 	const unsigned int rnd_nvec = rnd_offset / sizeof(__sm_bitvec_t);
-	const __sm_idx_t offset = __sm_get_chunk_aligned_offset(idx);
+	const uint64_t offset = __sm_get_chunk_aligned_offset(idx);
 	ssize_t result;
 	size_t expected;
 
@@ -495,7 +499,7 @@ _tst_get_chunk_offset(QCC_GenValue **vals, int len, QCC_Stamp **stamp)
 		    chunk_count);
 		uint8_t *p = __sm_get_chunk_data(map, 0);
 		for (size_t i = 0; i < chunk_count; i++) {
-			__sm_idx_t start = __sm_load_idx((const uint8_t *)p);
+			uint64_t start = __sm_load_idx((const uint8_t *)p);
 			__sm_chunk_t chunk;
 			__sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
 			size_t cap = __sm_chunk_get_capacity(&chunk);
@@ -527,7 +531,7 @@ _tst_get_chunk_offset(QCC_GenValue **vals, int len, QCC_Stamp **stamp)
 		size_t chunk_count = __sm_get_chunk_count(map);
 		__sm_diag("After set(0): chunk_count=%zu\n", chunk_count);
 		uint8_t *p = __sm_get_chunk_data(map, 0);
-		__sm_idx_t start = __sm_load_idx((const uint8_t *)p);
+		uint64_t start = __sm_load_idx((const uint8_t *)p);
 		__sm_chunk_t chunk;
 		__sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
 		bool is_rle = __sm_chunk_is_rle(&chunk);
@@ -561,7 +565,7 @@ _tst_get_chunk_offset(QCC_GenValue **vals, int len, QCC_Stamp **stamp)
 			if ((ssize_t)chunk_offset == -1)
 				break;
 			uint8_t *p = __sm_get_chunk_data(map, chunk_offset);
-			__sm_idx_t start = __sm_load_idx((const uint8_t *)p);
+			uint64_t start = __sm_load_idx((const uint8_t *)p);
 			__sm_chunk_t chunk;
 			__sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
 			bool is_rle = __sm_chunk_is_rle(&chunk);
@@ -587,7 +591,7 @@ _tst_get_chunk_offset(QCC_GenValue **vals, int len, QCC_Stamp **stamp)
 		__sm_diag("After set(129): chunk_count=%zu\n", chunk_count);
 		if (chunk_count > 0) {
 			uint8_t *p = __sm_get_chunk_data(map, 0);
-			__sm_idx_t start = __sm_load_idx((const uint8_t *)p);
+			uint64_t start = __sm_load_idx((const uint8_t *)p);
 			__sm_chunk_t chunk;
 			__sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
 			bool is_rle = __sm_chunk_is_rle(&chunk);
@@ -607,7 +611,7 @@ _tst_get_chunk_offset(QCC_GenValue **vals, int len, QCC_Stamp **stamp)
 #ifdef SPARSEMAP_DIAGNOSTIC
 	{
 		uint8_t *p = __sm_get_chunk_data(map, 0);
-		__sm_idx_t start = __sm_load_idx((const uint8_t *)p);
+		uint64_t start = __sm_load_idx((const uint8_t *)p);
 		__sm_chunk_t chunk;
 		__sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
 		bool is_rle = __sm_chunk_is_rle(&chunk);
@@ -631,7 +635,7 @@ _tst_get_chunk_offset(QCC_GenValue **vals, int len, QCC_Stamp **stamp)
 		__sm_diag("After unset(2050): chunk_count=%zu\n", chunk_count);
 		uint8_t *p = __sm_get_chunk_data(map, 0);
 		for (size_t i = 0; i < chunk_count; i++) {
-			__sm_idx_t start = __sm_load_idx((const uint8_t *)p);
+			uint64_t start = __sm_load_idx((const uint8_t *)p);
 			__sm_chunk_t chunk;
 			__sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
 			size_t capacity = __sm_chunk_get_capacity(&chunk);
@@ -685,10 +689,10 @@ _tst_get_chunk_offset(QCC_GenValue **vals, int len, QCC_Stamp **stamp)
 		    result);
 	}
 	result = __sm_get_chunk_offset(map, 5046);
-	if (result != 12) {
+	if (result != (ssize_t)(SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t))) {
 		FAIL_AT(__LINE__,
-		    "chunk offset after split, second chunk failed: __sm_get_chunk_offset(map, 5046) = %zd, expected 12",
-		    result);
+		    "chunk offset after split, second chunk failed: __sm_get_chunk_offset(map, 5046) = %zd, expected %zu",
+		    result, SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t));
 	}
 
 	sm_remove(map, 5048);
@@ -745,7 +749,7 @@ _tst_rle_select_rank_consistency(QCC_GenValue **vals, int len,
 		}
 
 		/* Select should give us back the same index */
-		__sm_idx_t idx2 = sm_select(map, r - 1, true);
+		uint64_t idx2 = sm_select(map, r - 1, true);
 		if (idx2 != idx) {
 			return QCC_FAIL;
 		}
@@ -757,7 +761,7 @@ _tst_rle_select_rank_consistency(QCC_GenValue **vals, int len,
 /* Helper for scan completeness test */
 static size_t scan_completeness_count = 0;
 static void
-_scan_completeness_counter(uint32_t v[], size_t n, void *aux)
+_scan_completeness_counter(uint64_t v[], size_t n, void *aux)
 {
 	(void)v;
 	(void)aux;
