@@ -255,8 +255,21 @@ prop_deserialize_no_crash(hegel_test_case *tc, void *ctx)
 }
 
 static int
-run(hegel_session *s, void (*fn)(hegel_test_case *, void *), const char *name)
+run(void (*fn)(hegel_test_case *, void *), const char *name)
 {
+	/*
+	 * Give every property its own session.  The hegel-c client
+	 * carries per-session protocol state, and sharing one session
+	 * across several heavyweight properties has proven flaky with
+	 * the 0.x client/server pair; a fresh session per property is
+	 * cheap (the server is a long-lived subprocess spawned per
+	 * session) and keeps each property independent.
+	 */
+	hegel_session *s = hegel_session_new();
+	if (s == NULL) {
+		fprintf(stderr, "hegel: could not start session for %s\n", name);
+		return (1);
+	}
 	hegel_settings settings = HEGEL_DEFAULT_SETTINGS;
 	settings.max_examples = 200;
 	hegel_results r = hegel_run_test(s, fn, NULL, &settings);
@@ -264,18 +277,17 @@ run(hegel_session *s, void (*fn)(hegel_test_case *, void *), const char *name)
 	if (!ok)
 		fprintf(stderr, "hegel property FAILED: %s\n", name);
 	hegel_results_free(&r);
+	hegel_session_free(s);
 	return (ok);
 }
 
 int
 main(void)
 {
-	hegel_session *s = hegel_session_new();
 	int rc = 0;
-	rc |= run(s, prop_model, "model");
-	rc |= run(s, prop_serialize_roundtrip, "serialize_roundtrip");
-	rc |= run(s, prop_setops, "setops");
-	rc |= run(s, prop_deserialize_no_crash, "deserialize_no_crash");
-	hegel_session_free(s);
+	rc |= run(prop_model, "model");
+	rc |= run(prop_serialize_roundtrip, "serialize_roundtrip");
+	rc |= run(prop_setops, "setops");
+	rc |= run(prop_deserialize_no_crash, "deserialize_no_crash");
 	return (rc);
 }

@@ -14,7 +14,6 @@
 #include <common.h>
 #include <errno.h>
 #include <munit.h>
-#include <qc.h>
 #include <sm.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -27,9 +26,6 @@
 #endif
 
 #define SELECT_FALSE
-
-char *QCC_showSparsemap(void *value, int len);
-char *QCC_showChunk(void *value, int len);
 
 /* !!! Duplicated here for testing purposes. Keep in sync, or suffer. !!! */
 /* !!! Duplicated here for testing purposes. Keep in sync, or suffer. !!! */
@@ -724,10 +720,6 @@ test_api_get_start_offset_roll(const MunitParameter params[], void *data)
     sm_add(map, i);
     if (i > 2047) {
       sm_remove(map, i - 2048);
-      // if (sm_minimum(map) != i - 2047) {
-      //   fprintf(stdout, "\n%s\n", QCC_showSparsemap(map, 0));
-      //   fprintf(stdout, "%ld\t%ld\t%zu\n", i, i - 2047, sm_minimum(map));
-      // }
       assert_true(sm_minimum(map) == i - 2047);
     }
   }
@@ -2157,83 +2149,6 @@ static MunitTest api_test_suite[] = {
 };
 // clang-format on
 
-/* -------------------------- Quickcheck, Property Based Tests */
-
-extern QCC_GenValue *QCC_genChunk();
-extern QCC_GenValue *QCC_genSparsemap();
-extern QCC_TestStatus _tst_chunk_calc_vector_size_equality(QCC_GenValue **vals, int len, QCC_Stamp **stamp);
-extern QCC_TestStatus _tst_chunk_get_position(QCC_GenValue **vals, int len, QCC_Stamp **stamp);
-extern QCC_TestStatus _tst_chunk_get_capacity(QCC_GenValue **vals, int len, QCC_Stamp **stamp);
-extern QCC_TestStatus _tst_get_chunk_offset(QCC_GenValue **vals, int len, QCC_Stamp **stamp);
-extern QCC_TestStatus _tst_rle_select_rank_consistency(QCC_GenValue **vals, int len, QCC_Stamp **stamp);
-extern QCC_TestStatus _tst_rle_scan_completeness(QCC_GenValue **vals, int len, QCC_Stamp **stamp);
-
-static MunitResult
-qc__sm_chunk_calc_vector_size(const MunitParameter params[], void *data)
-{
-  (void)params;
-  (void)data;
-
-  return QCC_testForAll(1000, 1000, _tst_chunk_calc_vector_size_equality, 1, QCC_genInt);
-}
-
-static MunitResult
-qc__sm_chunk_get_position(const MunitParameter params[], void *data)
-{
-  (void)params;
-  (void)data;
-
-  return QCC_testForAll(100, 1000, _tst_chunk_get_position, 1, QCC_genChunk);
-}
-
-static MunitResult
-qc__sm_chunk_get_capacity(const MunitParameter params[], void *data)
-{
-  (void)params;
-  (void)data;
-
-  return QCC_testForAll(100, 1000, _tst_chunk_get_capacity, 1, QCC_genChunk);
-}
-
-static MunitResult
-qc__sm_get_chunk_offset(const MunitParameter params[], void *data)
-{
-  (void)params;
-  (void)data;
-
-  return QCC_testForAll(100, 1000, _tst_get_chunk_offset, 2, QCC_genInt, QCC_genSparsemap);
-}
-
-static MunitResult
-qc_rle_select_rank_consistency(const MunitParameter params[], void *data)
-{
-  (void)params;
-  (void)data;
-
-  return QCC_testForAll(100, 1000, _tst_rle_select_rank_consistency, 1, QCC_genSparsemap);
-}
-
-static MunitResult
-qc_rle_scan_completeness(const MunitParameter params[], void *data)
-{
-  (void)params;
-  (void)data;
-
-  return QCC_testForAll(100, 1000, _tst_rle_scan_completeness, 1, QCC_genSparsemap);
-}
-
-// clang-format off
-static MunitTest qc_test_suite[] = {
-  { (char *)"/__sm_chunk_calc_vector_size", qc__sm_chunk_calc_vector_size, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
-  { (char *)"/__sm_chunk_get_position", qc__sm_chunk_get_position, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
-  { (char *)"/__sm_chunk_get_capacity", qc__sm_chunk_get_capacity, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
-  { (char *)"/__sm_get_chunk_offset", qc__sm_get_chunk_offset, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
-  { (char *)"/rle_select_rank_consistency", qc_rle_select_rank_consistency, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
-  { (char *)"/rle_scan_completeness", qc_rle_scan_completeness, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
-  { NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
-};
-// clang-format off
-
 /* -------------------------- Integration Tests */
 
 static void *
@@ -2764,7 +2679,6 @@ static MunitTest perf_test_suite[] = {
 // clang-format off
 static MunitSuite other_test_suite[] = {
   { "/api", api_test_suite, NULL, 1, MUNIT_SUITE_OPTION_NONE },
-  { "/qc", qc_test_suite, NULL, 1, MUNIT_SUITE_OPTION_NONE },
   { "/integration", integration_test_suite, NULL, 1, MUNIT_SUITE_OPTION_NONE },
   { "/perf", perf_test_suite, NULL, 1, MUNIT_SUITE_OPTION_NONE },
   { "/scale", scale_test_suite, NULL, 1, MUNIT_SUITE_OPTION_NONE },
@@ -2787,8 +2701,6 @@ main(int argc, char *argv[MUNIT_ARRAY_PARAM(argc + 1)])
   /* Disable buffering on std{out,err} to avoid having to call fflush(). */
   setvbuf(stdout, NULL, _IONBF, 0);
   setvbuf(stderr, NULL, _IONBF, 0);
-
-  QCC_init(0);
 
   return munit_suite_main(&main_test_suite, (void *)&info, argc, argv);
 }

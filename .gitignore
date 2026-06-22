@@ -98,3 +98,5 @@ vgcore.*
 # Core dumps
 core
 core.*
+.hegel-c/
+.hegel/

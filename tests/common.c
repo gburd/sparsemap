@@ -53,12 +53,6 @@ tsc(void)
 return 0;
 }
 
-// TODO remove me, this is only used for debugging.
-#ifdef SPARSEMAP_TESTING
-char *QCC_showSparsemap(void *value, int len);
-char *QCC_showChunk(void *value, int len);
-#endif
-
 // get microsecond timestamp
 uint64_t
 msts()
