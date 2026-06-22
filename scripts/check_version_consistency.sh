@@ -1,7 +1,7 @@
 #!/bin/sh
 # SPDX-License-Identifier: MIT
 #
-# scripts/check_version_consistency.sh — fail if the sparsemap
+# scripts/check_version_consistency.sh -- fail if the sparsemap
 # version string disagrees between its two sources of truth:
 #
 #   meson.build               (project(version: '...'))
@@ -18,7 +18,7 @@ MESON=$(grep -E "^[[:space:]]*version[[:space:]]*:" meson.build \
         | head -1 \
         | sed -E "s/.*version[[:space:]]*:[[:space:]]*'([^']+)'.*/\1/")
 
-# 2. sm.h — look for SM_VERSION_STRING.
+# 2. sm.h -- look for SM_VERSION_STRING.
 HEADER=$(grep -E '^#define[[:space:]]+SM_VERSION_STRING' \
          sm.h 2>/dev/null \
          | head -1 \

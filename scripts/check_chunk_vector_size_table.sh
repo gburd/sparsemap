@@ -1,7 +1,7 @@
 #!/bin/sh
 # SPDX-License-Identifier: MIT
 #
-# scripts/check_chunk_vector_size_table.sh — fail if the static lookup
+# scripts/check_chunk_vector_size_table.sh -- fail if the static lookup
 # table inlined at sm.c:__sm_chunk_calc_vector_size has
 # drifted from what scripts/gen_chunk_vector_size_table.py produces.
 #

@@ -1,7 +1,7 @@
 #!/bin/sh
 # SPDX-License-Identifier: MIT
 #
-# scripts/check_memory.sh — run the sparsemap test suite under
+# scripts/check_memory.sh -- run the sparsemap test suite under
 # valgrind and fail if any leaks or invalid accesses are reported.
 #
 # Usage: scripts/check_memory.sh [BUILDDIR]

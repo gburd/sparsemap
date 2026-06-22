@@ -50,8 +50,18 @@
  *			    the caller must guard).
  *	SM_CLZ64(x)	    Count leading zeros (undefined on x == 0;
  *			    the caller must guard).
+ *
+ * Each macro may be overridden by the consumer: define it before
+ * including this translation unit (e.g. on the compiler command line
+ * with -DSM_POPCOUNT64=my_popcount) and sparsemap uses your version
+ * verbatim, skipping the built-in detection below.  This lets a host
+ * environment route these primitives through its own intrinsics
+ * (for example PostgreSQL's pg_popcount64 / pg_rightmost_one_pos64).
+ * The override must have the same call signature and return an int
+ * (popcount/ctz/clz) or evaluate to void (prefetch).
  */
 
+#ifndef SM_PREFETCH
 #if defined(__GNUC__) || defined(__clang__)
 #define SM_PREFETCH(addr) __builtin_prefetch((addr), 0, 1)
 #elif defined(_MSC_VER)
@@ -66,7 +76,9 @@
 #else
 #define SM_PREFETCH(addr) ((void)0)
 #endif
+#endif /* SM_PREFETCH */
 
+#ifndef SM_POPCOUNT64
 #if defined(__GNUC__) || defined(__clang__)
 #define SM_POPCOUNT64(x) ((int)__builtin_popcountll((unsigned long long)(x)))
 #elif defined(_MSC_VER) && (defined(_M_X64) || defined(_M_ARM64))
@@ -87,7 +99,9 @@ sm_swar_popcount64(uint64_t x)
 }
 #define SM_POPCOUNT64(x) sm_swar_popcount64((uint64_t)(x))
 #endif
+#endif /* SM_POPCOUNT64 */
 
+#ifndef SM_CTZ64
 #if defined(__GNUC__) || defined(__clang__)
 #define SM_CTZ64(x) __builtin_ctzll((unsigned long long)(x))
 #elif defined(_MSC_VER) && (defined(_M_X64) || defined(_M_ARM64))
@@ -133,7 +147,9 @@ sm_swar_ctz64(uint64_t x)
 }
 #define SM_CTZ64(x) sm_swar_ctz64((uint64_t)(x))
 #endif
+#endif /* SM_CTZ64 */
 
+#ifndef SM_CLZ64
 #if defined(__GNUC__) || defined(__clang__)
 #define SM_CLZ64(x) __builtin_clzll((unsigned long long)(x))
 #elif defined(_MSC_VER) && (defined(_M_X64) || defined(_M_ARM64))
@@ -178,8 +194,44 @@ sm_swar_clz64(uint64_t x)
 }
 #define SM_CLZ64(x) sm_swar_clz64((uint64_t)(x))
 #endif
+#endif /* SM_CLZ64 */
 
-#ifdef SPARSEMAP_DIAGNOSTIC
+/*
+ * Diagnostic and assertion hooks.
+ *
+ * sparsemap reports internal invariant violations through three
+ * macros, each independently overridable by the consumer (define it
+ * before this translation unit is compiled, e.g. with -D on the
+ * command line):
+ *
+ *	__sm_assert(expr)
+ *		Evaluated wherever the library checks an internal
+ *		invariant.  The built-in forms below are active only
+ *		under SPARSEMAP_DIAGNOSTIC; in a normal build the
+ *		default is ((void)0).  A host that wants its own
+ *		assertion machinery (PostgreSQL's Assert(), the C
+ *		standard assert(), an abort-on-fail check) defines
+ *		__sm_assert to route there.
+ *
+ *	__sm_diag(fmt, ...)
+ *		printf-style debug logging.  Default is ((void)0)
+ *		outside SPARSEMAP_DIAGNOSTIC.  A host that wants the
+ *		messages routed to its logger (PostgreSQL's elog,
+ *		syslog, a ring buffer) defines __sm_diag.
+ *
+ *	__sm_when_diag(stmt)
+ *		Guards diagnostic-only statement blocks (chunk dumps
+ *		and the like).  Expands to `if (1) stmt` when
+ *		diagnostics are on, `if (0) stmt` otherwise, so the
+ *		compiler still type-checks the block but drops it.
+ *
+ * If a consumer overrides __sm_diag but not __sm_assert (or vice
+ * versa) the un-overridden macro keeps its default.  When the
+ * consumer overrides __sm_diag, the built-in __sm_diag_ sink below
+ * is not compiled, so it costs nothing.
+ */
+
+#if defined(SPARSEMAP_DIAGNOSTIC) && !defined(__sm_diag)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wpedantic"
 #pragma GCC diagnostic ignored "-Wvariadic-macros"
@@ -195,18 +247,30 @@ void __attribute__((format(printf, 4, 5))) __sm_diag_(const char *file,
 	vfprintf(stderr, format, args);
 	va_end(args);
 }
+#endif
 
+#if defined(SPARSEMAP_DIAGNOSTIC) && !defined(__sm_assert)
 #define __sm_assert(expr)                                               \
 	if (!(expr))                                                    \
 	fprintf(stderr, "%s:%d:%s(): assertion failed! %s\n", __FILE__, \
 	    __LINE__, __func__, #expr)
+#endif
 
+#if defined(SPARSEMAP_DIAGNOSTIC) && !defined(__sm_when_diag)
 #define __sm_when_diag(expr) \
 	if (1)               \
 	expr
-#else
+#endif
+
+/* Defaults for any hook the consumer did not supply and that the
+ * diagnostic build did not define above. */
+#ifndef __sm_diag
 #define __sm_diag(format, ...) ((void)0)
-#define __sm_assert(expr)      ((void)0)
+#endif
+#ifndef __sm_assert
+#define __sm_assert(expr) ((void)0)
+#endif
+#ifndef __sm_when_diag
 #define __sm_when_diag(expr) \
 	if (0)               \
 	expr
