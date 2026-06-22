@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT
  *
- * examples/ex_6.c — using sm_set_allocator and sm_create_with_allocator
+ * examples/ex_6.c -- using sm_set_allocator and sm_create_with_allocator
  * to route sparsemap's allocations through a custom allocator.
  *
  * Pattern shown: arena allocator (single bump pointer, freed all-at-

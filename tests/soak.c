@@ -505,7 +505,7 @@ __sm_merge(void **handle, void *other_handle)
   sm_t *other = (sm_t *)other_handle;
   sm_t *merged = sm_union(*map, other);
   if (merged == NULL) {
-    /* Both empty — nothing to merge, that's fine. */
+    /* Both empty -- nothing to merge, that's fine. */
     return true;
   }
   free(*map);

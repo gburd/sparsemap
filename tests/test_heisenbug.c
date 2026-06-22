@@ -42,7 +42,7 @@
 #include <sm.h>
 
 /*
- * Local macros — no munit dependency.  Standalone test, intended to
+ * Local macros -- no munit dependency.  Standalone test, intended to
  * be wired into the meson test runner in Phase 3 with a TAP-style
  * adapter, and to be compilable with `cc test_heisenbug.c -lsparsemap`
  * for quick reproduction outside the build system.
@@ -55,7 +55,7 @@ static int g_total = 0;
 #define EXPECT(cond, msg) do {                                          \
         g_total++;                                                      \
         if (!(cond)) {                                                  \
-            fprintf(stderr, "  FAIL: %s:%d: %s — expected %s\n",        \
+            fprintf(stderr, "  FAIL: %s:%d: %s -- expected %s\n",        \
                     __FILE__, __LINE__, msg, #cond);                    \
             g_failures++;                                               \
             return 1;                                                   \
@@ -199,7 +199,7 @@ CASE(test_wrap_then_swap_buffer)
      * via sm_clear.  At minimum, the first SM_SIZEOF_OVERHEAD
      * bytes must be zero (chunk count 0); bytes after that may be
      * anything.  Just verify the library didn't write into `small`
-     * past byte 4 — for our purposes, bytes [4, 256) should still
+     * past byte 4 -- for our purposes, bytes [4, 256) should still
      * be zero from the initial memset.
      */
     int small_unchanged_past_overhead = 1;
@@ -361,7 +361,7 @@ CASE(test_intersection_difference_with_wrapped)
 /*  Driver                                                            */
 /* ------------------------------------------------------------------ */
 
-/* Driver — registers all tests including owned_copy normalization. */
+/* Driver -- registers all tests including owned_copy normalization. */
 int main(void)
 {
     fprintf(stderr, "test_heisenbug:\n");

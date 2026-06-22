@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT
  *
- * tests/test_coverage.c — focused tests for under-covered code paths
+ * tests/test_coverage.c -- focused tests for under-covered code paths
  * in sparsemap.  Each section targets a specific function or branch
  * cluster identified by `scripts/measure_coverage.sh`.
  *
@@ -178,7 +178,7 @@ CASE(test_free_owned_split_after_grow)
 }
 
 /* ------------------------------------------------------------------ */
-/*  sm_set_data_size — every lineage × every direction                */
+/*  sm_set_data_size -- every lineage x every direction                */
 /* ------------------------------------------------------------------ */
 
 CASE(test_set_data_size_owned_grow)
@@ -527,7 +527,7 @@ CASE(test_offset_carry_across_chunks)
 {
     /* Source map populated densely with bits at the END of each
      * source chunk; a small positive unaligned offset moves them into
-     * the START of the next chunk — exactly the carry case in
+     * the START of the next chunk -- exactly the carry case in
      * sm_offset. */
     sm_t *m = sm_create(32768);
     for (int chunk = 0; chunk < 5; chunk++) {
@@ -538,7 +538,7 @@ CASE(test_offset_carry_across_chunks)
         }
     }
     const uint64_t card_before = sm_cardinality(m);
-    /* Shift by 200 — unaligned and bigger than the source-chunk
+    /* Shift by 200 -- unaligned and bigger than the source-chunk
      * tail, so each chunk's bits span two output chunks. */
     sm_t *o = sm_offset(m, 200);
     EXPECT(o != NULL, "shift across chunks");
@@ -549,7 +549,7 @@ CASE(test_offset_carry_across_chunks)
 }
 
 /* ------------------------------------------------------------------ */
-/*  sm_split — exotic positions                                       */
+/*  sm_split -- exotic positions                                       */
 /* ------------------------------------------------------------------ */
 
 CASE(test_split_at_zero)
@@ -653,10 +653,10 @@ CASE(test_sparse_with_unused_flags)
      * some 2-bit flags end up SM_PAYLOAD_NONE.  Adding a bit that
      * crosses into a NONE region triggers __sm_chunk_increase_capacity. */
     sm_t *m = sm_create(2048);
-    /* Set bit 0 and bit 1500 — sparse with internal gaps. */
+    /* Set bit 0 and bit 1500 -- sparse with internal gaps. */
     sm_add(m, 0);
     sm_add(m, 1500);
-    /* Now add bits inside the gap — exercises increase_capacity. */
+    /* Now add bits inside the gap -- exercises increase_capacity. */
     for (uint64_t i = 100; i < 200; i++) {
         sm_add(m, i);
     }
@@ -669,7 +669,7 @@ CASE(test_sparse_with_unused_flags)
 }
 
 /* ------------------------------------------------------------------ */
-/*  RLE ↔ sparse transitions                                          */
+/*  RLE <-> sparse transitions                                          */
 /* ------------------------------------------------------------------ */
 
 CASE(test_rle_to_sparse_transition)
@@ -679,7 +679,7 @@ CASE(test_rle_to_sparse_transition)
     sm_t *m = sm_create(8192);
     populate_run(m, 0, 4096);
     EXPECT(sm_cardinality(m) == 4096, "populated RLE");
-    /* Clear bit 100 — forces RLE separation. */
+    /* Clear bit 100 -- forces RLE separation. */
     sm_remove(m, 100);
     EXPECT(sm_cardinality(m) == 4095, "one bit cleared");
     EXPECT(!sm_contains(m, 100), "bit 100 unset");
@@ -691,7 +691,7 @@ CASE(test_rle_to_sparse_transition)
 
 CASE(test_sparse_to_rle_transition)
 {
-    /* Fill a chunk completely with set bits — should transition to RLE. */
+    /* Fill a chunk completely with set bits -- should transition to RLE. */
     sm_t *m = sm_create(8192);
     /* SM_CHUNK_MAX_CAPACITY = 2048 bits per chunk. */
     populate_run(m, 0, 2048);
@@ -831,7 +831,7 @@ CASE(test_span_with_start_offset)
     sm_t *m = sm_create(8192);
     populate_run(m, 0, 100);
     populate_run(m, 200, 200);
-    /* From start=150, find run of 100 set bits — should be at 200. */
+    /* From start=150, find run of 100 set bits -- should be at 200. */
     EXPECT(sm_span(m, 150, 100, true) == 200, "span starts after offset");
     sm_free(m);
     return 0;
@@ -862,7 +862,7 @@ CASE(test_select_unset_in_rle)
 {
     /* RLE chunk fully set within the chunk; the chunk's range is
      * [0, 4096), all set, no unset bits within range.  sm_select(false)
-     * cannot find unset bits past the last chunk — returns IDX_MAX. */
+     * cannot find unset bits past the last chunk -- returns IDX_MAX. */
     sm_t *m = sm_create(8192);
     populate_run(m, 0, 4096);
     EXPECT(sm_select(m, 0, false) == SM_IDX_MAX,
@@ -1393,7 +1393,7 @@ CASE(test_extract_range)
     sm_t *m = sm_create(8192);
     for (uint64_t i = 0; i < 1000; i += 10) sm_add(m, i);  /* 0,10,20,...,990 */
 
-    /* Extract [100, 200) — should contain 100,110,...,190. */
+    /* Extract [100, 200) -- should contain 100,110,...,190. */
     sm_t *r = sm_extract_range(m, 100, 200);
     EXPECT(r != NULL, "extract returns non-NULL");
     EXPECT(sm_cardinality(r) == 10, "10 bits");

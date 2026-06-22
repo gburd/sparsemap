@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT
  *
- * tests/build_fuzz_corpus.c — emit a small corpus of valid
+ * tests/build_fuzz_corpus.c -- emit a small corpus of valid
  * sparsemap byte streams for libFuzzer to start from.  Run once,
  * commit the output to tests/fuzz-corpus/.
  */

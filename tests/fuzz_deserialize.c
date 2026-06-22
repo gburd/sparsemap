@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT
  *
- * tests/fuzz_deserialize.c — libFuzzer harness for the deserialize
+ * tests/fuzz_deserialize.c -- libFuzzer harness for the deserialize
  * path.  Two distinct entry points get attacked:
  *
  *   sm_open(map, data, size):

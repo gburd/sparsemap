@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT
  *
- * examples/ex_5.c — exercising the v1.2 API expansion.
+ * examples/ex_5.c -- exercising the v1.2 API expansion.
  *
  * Demonstrates the predicates, iteration primitives, in-place set
  * ops, range operations, and serialization added in v1.2.
