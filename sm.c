@@ -7870,85 +7870,47 @@ static size_t
 __sm_rank_vec(sm_t *map, uint64_t begin, uint64_t end, bool value,
     __sm_bitvec_t *vec)
 {
-	(void)vec; /* unused parameter */
+	(void)vec; /* retained for ABI/signature compatibility */
 	__sm_assert(sm_get_size(map) >= SM_SIZEOF_OVERHEAD);
-	size_t gap, pos = 0, result = 0, prev = 0, len = end - begin + 1;
 
 	if (begin > end) {
 		return (0);
 	}
 
-	if (begin == end) {
-		return (sm_contains(map, begin) == value ? 1 : 0);
-	}
+	/*
+	 * Range width as a count.  When [begin, end] spans the entire
+	 * 64-bit universe (begin == 0, end == UINT64_MAX) the +1
+	 * overflows to 0; size_t saturates instead so the derived unset
+	 * count below stays meaningful.  A full-universe unset query is
+	 * degenerate (the answer is ~2^64) but must not wrap.
+	 */
+	const uint64_t span_width = end - begin;
+	const size_t width =
+	    (span_width == UINT64_MAX) ? SIZE_MAX : (size_t)(span_width + 1);
 
+	/*
+	 * Rank is computed from the set-bit count only.  A bit is set
+	 * iff some chunk covers it, so the number of set bits in the
+	 * inclusive range [begin, end] is the sum, over every chunk, of
+	 * the matching bits in the overlap of [begin, end] with that
+	 * chunk's covered span [start, start + capacity).  The unset
+	 * count is then width - set; there is no cross-chunk gap
+	 * bookkeeping to get wrong.
+	 *
+	 * __sm_chunk_rank does the per-chunk work (it takes from/to
+	 * positions relative to the chunk start and is validated by the
+	 * get_position / RLE property tests).  We only ever ask it for
+	 * set bits here; unset is derived once at the end.
+	 */
 	const size_t count = __sm_get_chunk_count(map);
-
 	if (count == 0) {
-		if (value == false) {
-			/* The count/rank of unset bits in an empty map is inf, so what you requested is the answer. */
-			return (len);
-		}
+		return (value ? 0 : width);
 	}
 
+	size_t set = 0;
 	uint8_t *p = __sm_get_chunk_data(map, 0);
 	for (size_t i = 0; i < count; i++) {
-		__sm_idx_t start = __sm_load_idx((const uint8_t *)p);
-		/* [prev, start + pos), prev is the last bit examined 0-based. */
-		if (i == 0) {
-			gap = start;
-		} else {
-			if (prev + SM_CHUNK_MAX_CAPACITY == start) {
-				gap = 0;
-			} else {
-				gap = start - (prev + pos);
-			}
-		}
-		/* Start of this chunk is greater than the end of the desired range. */
-		if (start > end) {
-			if (value == true) {
-				/* We're counting set bits and this chunk starts after the range
-				 * [begin, end], we're done. */
-				return (result);
-			} else {
-				if (i == 0) {
-					/* We're counting unset bits and the first chunk starts after the
-					 * range meaning everything proceeding this chunk was zero and should
-					 * be counted, also we're done. */
-					result += (end - begin) + 1;
-					return (result);
-				} else {
-					/* We're counting unset bits and some chunk starts after the range, so
-					 * we've counted enough, we're done. */
-					if (pos > end) {
-						return (result);
-					} else {
-						if (end - pos < gap) {
-							result += end - pos;
-							return (result);
-						} else {
-							result += gap;
-							return (result);
-						}
-					}
-				}
-			}
-		} else {
-			/* The range and this chunk overlap. */
-			if (value == false) {
-				if (begin > gap) {
-					begin -= gap;
-				} else {
-					result += gap - begin;
-					begin = 0;
-				}
-			} else {
-				if (begin >= gap) {
-					begin -= gap;
-				}
-			}
-		}
-		prev = start;
+		const __sm_idx_t start = __sm_load_idx((const uint8_t *)p);
 		p += SM_SIZEOF_OVERHEAD;
 		__sm_chunk_t chunk;
 		__sm_chunk_init(&chunk, p);
@@ -7956,25 +7918,47 @@ __sm_rank_vec(sm_t *map, uint64_t begin, uint64_t end, bool value,
 		if (i + 1 < count) {
 			SM_PREFETCH(p + chunk_size + SM_SIZEOF_OVERHEAD);
 		}
+		const size_t cap = __sm_chunk_get_capacity(&chunk);
+		const uint64_t chunk_lo = start;
+		/* Inclusive top of the chunk's covered span.  cap >= 1, and we
+		 * form (cap - 1) as a distance so the comparison below never
+		 * overflows even when chunk_lo is near UINT64_MAX (the
+		 * top-of-universe case). */
+		const uint64_t span = (uint64_t)cap - 1;
+		const uint64_t chunk_hi_incl =
+		    (chunk_lo > UINT64_MAX - span) ? UINT64_MAX
+		                                  : chunk_lo + span;
 
-		/* Count all the set/unset inside this chunk within the range. */
+		/* Chunks are ordered ascending.  Once a chunk starts past
+		 * `end` no later chunk can overlap [begin, end]. */
+		if (chunk_lo > end) {
+			p += chunk_size;
+			break;
+		}
+		/* Skip chunks entirely below `begin`. */
+		if (chunk_hi_incl < begin) {
+			p += chunk_size;
+			continue;
+		}
+
+		/* Overlap of [begin, end] with [chunk_lo, chunk_hi_incl]. */
+		const uint64_t ov_lo = begin > chunk_lo ? begin : chunk_lo;
+		const uint64_t ov_hi_incl =
+		    (end < chunk_hi_incl) ? end : chunk_hi_incl;
+		/* Positions relative to the chunk start. */
+		const size_t from = (size_t)(ov_lo - chunk_lo);
+		const size_t to = (size_t)(ov_hi_incl - chunk_lo);
+
 		__sm_chunk_rank_t rank;
-		const size_t amt =
-		    __sm_chunk_rank(&rank, value, &chunk, begin, end - start);
-		result += amt;
-		pos = rank.pos;
-		begin = rank.pos > begin ? 0 : begin - rank.pos;
+		set += __sm_chunk_rank(&rank, true, &chunk, from, to);
 		p += chunk_size;
 	}
-	/* Count any additional unset bits that fall outside the last chunk but
-	 * within the range. */
-	if (value == false) {
-		size_t last = prev - 1 + pos;
-		if (end > last) {
-			result += end - last - begin;
-		}
+
+	if (value) {
+		return (set);
 	}
-	return (result);
+	__sm_assert((uint64_t)set <= width);
+	return ((size_t)(width - set));
 }
 
 size_t

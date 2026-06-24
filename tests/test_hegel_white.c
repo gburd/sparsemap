@@ -208,13 +208,8 @@ prop_get_capacity(hegel_test_case *tc, void *ctx)
 }
 
 static int
-run(void (*fn)(hegel_test_case *, void *), const char *name)
+run(hegel_session *s, void (*fn)(hegel_test_case *, void *), const char *name)
 {
-	hegel_session *s = hegel_session_new();
-	if (s == NULL) {
-		fprintf(stderr, "hegel: could not start session for %s\n", name);
-		return (1);
-	}
 	hegel_settings settings = HEGEL_DEFAULT_SETTINGS;
 	settings.max_examples = 300;
 	hegel_results r = hegel_run_test(s, fn, NULL, &settings);
@@ -222,16 +217,22 @@ run(void (*fn)(hegel_test_case *, void *), const char *name)
 	if (!ok)
 		fprintf(stderr, "hegel white-box property FAILED: %s\n", name);
 	hegel_results_free(&r);
-	hegel_session_free(s);
 	return (ok);
 }
 
 int
 main(void)
 {
+	/* One shared session for all properties (see test_hegel.c). */
+	hegel_session *s = hegel_session_new();
+	if (s == NULL) {
+		fprintf(stderr, "hegel: could not start session\n");
+		return (1);
+	}
 	int rc = 0;
-	rc |= run(prop_calc_vector_size, "calc_vector_size");
-	rc |= run(prop_get_position, "get_position");
-	rc |= run(prop_get_capacity, "get_capacity");
+	rc |= run(s, prop_calc_vector_size, "calc_vector_size");
+	rc |= run(s, prop_get_position, "get_position");
+	rc |= run(s, prop_get_capacity, "get_capacity");
+	hegel_session_free(s);
 	return (rc);
 }
