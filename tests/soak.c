@@ -420,7 +420,7 @@ static bool
 __sm_is_set(void *handle, pgno_t pg)
 {
   sm_t *map = (sm_t *)handle;
-  return sm_contains(map, pg);
+  return sm_contains(map, pg, NULL);
 }
 
 static pgno_t
@@ -463,7 +463,7 @@ __sm_is_span(void *handle, pgno_t pg, unsigned len)
 {
   sm_t *map = (sm_t *)handle;
   for (pgno_t i = pg; i < pg + len; i++) {
-    if (sm_contains(map, i) != true) {
+    if (sm_contains(map, i, NULL) != true) {
       return false;
     }
   }
@@ -475,7 +475,7 @@ __sm_is_empty(void *handle, pgno_t pg, unsigned len)
 {
   sm_t *map = (sm_t *)handle;
   for (pgno_t i = 0; i < len; i++) {
-    if (sm_contains(map, pg + i) != false) {
+    if (sm_contains(map, pg + i, NULL) != false) {
       return false;
     }
   }
@@ -488,7 +488,7 @@ __sm_is_first(void *handle, pgno_t pg, unsigned len)
   sm_t *map = (sm_t *)handle;
   for (uint64_t i = 0; i < pg + len; i++) {
     uint64_t j = 0;
-    while (sm_contains(map, i + j) == true && j < len) {
+    while (sm_contains(map, i + j, NULL) == true && j < len) {
       j++;
     }
     if (j == len) {
@@ -1114,13 +1114,13 @@ verify_sm_eq_rb(sm_t *map, roaring_bitmap_t *rbm)
   roaring_iterator_init(rbm, &iter);
   for (uint64_t i = 0; i <= max; i++) {
     if (i == iter.current_value) {
-      if (sm_contains(map, i) == false) {
+      if (sm_contains(map, i, NULL) == false) {
         fprintf(stdout, "- %zu ", i);
         ret = false;
       }
       roaring_uint32_iterator_advance(&iter);
     } else {
-      if (sm_contains(map, i) == true) {
+      if (sm_contains(map, i, NULL) == true) {
         fprintf(stdout, "+ %zu ", i);
         ret = false;
       }
@@ -1138,13 +1138,13 @@ verify_sm_eq_ml(sm_t *map, MDB_IDL list)
     unsigned skipped = i == 1 ? 0 : list[i - 1] - list[i] - 1;
     if (skipped) {
       for (MDB_ID j = list[i - 1]; j > list[i]; j--) {
-        if (sm_contains(map, pg - j) != false) {
+        if (sm_contains(map, pg - j, NULL) != false) {
           fprintf(stdout, "+ %zu ", pg - j);
           ret = false;
         }
       }
     }
-    if (sm_contains(map, pg) != true) {
+    if (sm_contains(map, pg, NULL) != true) {
       fprintf(stdout, "- %zu ", pg);
       ret = false;
     }

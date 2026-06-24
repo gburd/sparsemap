@@ -119,7 +119,7 @@ CASE(test_owned_copy_of_owned)
     EXPECT(cpy != NULL, "owned_copy succeeds");
     EXPECT(sm_cardinality(cpy) == sm_cardinality(src), "same cardinality");
     for (uint64_t i = 0; i < 50; i++) {
-        EXPECT(sm_contains(cpy, i * 8), "same bits");
+        EXPECT(sm_contains(cpy, i * 8, NULL), "same bits");
     }
     sm_free(src);
     sm_free(cpy);
@@ -463,7 +463,7 @@ CASE(test_offset_positive_chunk_aligned)
     sm_t *o = sm_offset(m, 2048);
     EXPECT(o != NULL, "positive chunk-aligned offset");
     EXPECT(sm_cardinality(o) == sm_cardinality(m), "preserves cardinality");
-    EXPECT(sm_contains(o, 2048), "first bit shifted");
+    EXPECT(sm_contains(o, 2048, NULL), "first bit shifted");
     sm_free(o); sm_free(m);
     return 0;
 }
@@ -476,7 +476,7 @@ CASE(test_offset_positive_unaligned)
     sm_t *o = sm_offset(m, 73);
     EXPECT(o != NULL, "positive unaligned offset");
     EXPECT(sm_cardinality(o) == sm_cardinality(m), "preserves cardinality");
-    EXPECT(sm_contains(o, 173), "shifted bit visible");
+    EXPECT(sm_contains(o, 173, NULL), "shifted bit visible");
     sm_free(o); sm_free(m);
     return 0;
 }
@@ -488,7 +488,7 @@ CASE(test_offset_negative_partial)
     /* Shift left by 500. Bits at [1000, 1304] become [500, 804]. */
     sm_t *o = sm_offset(m, -500);
     EXPECT(o != NULL, "negative offset");
-    EXPECT(sm_contains(o, 500), "lowest bit at 500");
+    EXPECT(sm_contains(o, 500, NULL), "lowest bit at 500");
     sm_free(o); sm_free(m);
     return 0;
 }
@@ -661,9 +661,9 @@ CASE(test_sparse_with_unused_flags)
         sm_add(m, i);
     }
     EXPECT(sm_cardinality(m) == 102, "all bits present after gap-fill");
-    EXPECT(sm_contains(m, 0), "bit 0 still set");
-    EXPECT(sm_contains(m, 1500), "bit 1500 still set");
-    EXPECT(sm_contains(m, 150), "bit 150 set");
+    EXPECT(sm_contains(m, 0, NULL), "bit 0 still set");
+    EXPECT(sm_contains(m, 1500, NULL), "bit 1500 still set");
+    EXPECT(sm_contains(m, 150, NULL), "bit 150 set");
     sm_free(m);
     return 0;
 }
@@ -682,9 +682,9 @@ CASE(test_rle_to_sparse_transition)
     /* Clear bit 100 -- forces RLE separation. */
     sm_remove(m, 100);
     EXPECT(sm_cardinality(m) == 4095, "one bit cleared");
-    EXPECT(!sm_contains(m, 100), "bit 100 unset");
-    EXPECT(sm_contains(m, 99), "bit 99 still set");
-    EXPECT(sm_contains(m, 101), "bit 101 still set");
+    EXPECT(!sm_contains(m, 100, NULL), "bit 100 unset");
+    EXPECT(sm_contains(m, 99, NULL), "bit 99 still set");
+    EXPECT(sm_contains(m, 101, NULL), "bit 101 still set");
     sm_free(m);
     return 0;
 }
@@ -711,7 +711,7 @@ CASE(test_rle_extend)
     /* The next bit should extend the existing run. */
     sm_add(m, 2049);
     EXPECT(sm_cardinality(m) == 2050, "RLE extended");
-    EXPECT(sm_contains(m, 2049), "appended bit set");
+    EXPECT(sm_contains(m, 2049, NULL), "appended bit set");
     sm_free(m);
     return 0;
 }
@@ -945,16 +945,16 @@ CASE(test_setops_dense_dense)
     sm_t *d = sm_difference(a, b);
 
     /* Verify a few specific bits. */
-    EXPECT(u != NULL && sm_contains(u, 0), "both a and b have 0");
-    EXPECT(u != NULL && sm_contains(u, 6), "both share 6");
-    EXPECT(u != NULL && sm_contains(u, 9), "only b has 9");
-    EXPECT(u != NULL && sm_contains(u, 4), "only a has 4");
+    EXPECT(u != NULL && sm_contains(u, 0, NULL), "both a and b have 0");
+    EXPECT(u != NULL && sm_contains(u, 6, NULL), "both share 6");
+    EXPECT(u != NULL && sm_contains(u, 9, NULL), "only b has 9");
+    EXPECT(u != NULL && sm_contains(u, 4, NULL), "only a has 4");
 
-    EXPECT(i != NULL && sm_contains(i, 0), "intersection at 0");
-    EXPECT(i == NULL || !sm_contains(i, 4), "4 not in intersection");
+    EXPECT(i != NULL && sm_contains(i, 0, NULL), "intersection at 0");
+    EXPECT(i == NULL || !sm_contains(i, 4, NULL), "4 not in intersection");
 
-    EXPECT(d != NULL && sm_contains(d, 4), "4 in a-b");
-    EXPECT(d == NULL || !sm_contains(d, 6), "6 not in a-b");
+    EXPECT(d != NULL && sm_contains(d, 4, NULL), "4 in a-b");
+    EXPECT(d == NULL || !sm_contains(d, 6, NULL), "6 not in a-b");
 
     sm_free(u); sm_free(i); sm_free(d);
     sm_free(a); sm_free(b);
@@ -1121,7 +1121,7 @@ CASE(test_offset_one_bit)
     sm_t *m = sm_create(1024);
     sm_add(m, 100);
     sm_t *o = sm_offset(m, 50);
-    EXPECT(o != NULL && sm_contains(o, 150), "single-bit offset");
+    EXPECT(o != NULL && sm_contains(o, 150, NULL), "single-bit offset");
     EXPECT(sm_cardinality(o) == 1, "single bit preserved");
     sm_free(o); sm_free(m);
     return 0;
@@ -1134,8 +1134,8 @@ CASE(test_offset_dense_long_run)
     sm_t *o = sm_offset(m, 1000);
     EXPECT(o != NULL, "offset dense");
     EXPECT(sm_cardinality(o) == 8192, "all bits preserved");
-    EXPECT(sm_contains(o, 1000), "first shifted bit");
-    EXPECT(sm_contains(o, 9191), "last shifted bit");
+    EXPECT(sm_contains(o, 1000, NULL), "first shifted bit");
+    EXPECT(sm_contains(o, 9191, NULL), "last shifted bit");
     sm_free(o); sm_free(m);
     return 0;
 }
@@ -1148,7 +1148,7 @@ CASE(test_offset_chunk_aligned_negative)
     sm_t *o = sm_offset(m, -2048);
     EXPECT(o != NULL, "chunk-aligned negative offset");
     EXPECT(sm_cardinality(o) == 30, "all bits preserved");
-    EXPECT(sm_contains(o, 2048), "first bit at 4096-2048=2048");
+    EXPECT(sm_contains(o, 2048, NULL), "first bit at 4096-2048=2048");
     sm_free(o); sm_free(m);
     return 0;
 }
@@ -1194,7 +1194,7 @@ CASE(test_add_grow)
         EXPECT(sm_add_grow(&m, i * 100) == i * 100, "add_grow ok");
     }
     EXPECT(sm_cardinality(m) == 200, "all 200 added");
-    EXPECT(sm_contains(m, 100) && sm_contains(m, 19900), "first and last present");
+    EXPECT(sm_contains(m, 100, NULL) && sm_contains(m, 19900, NULL), "first and last present");
     sm_free(m);
 
     /* NULL or NULL-pointer-pointee returns SM_IDX_MAX. */
@@ -1204,36 +1204,26 @@ CASE(test_add_grow)
     return 0;
 }
 
-/* Allocator instrumentation: count alloc / alloc_zero / realloc / free
- * calls so we can verify the hooks are actually being called. */
+/* Allocator instrumentation: count malloc / realloc / free calls so we
+ * can verify the process-global hooks are actually being called. */
 static struct {
     size_t allocs;
-    size_t alloc_zeros;
     size_t reallocs;
     size_t frees;
 } g_alloc_stats;
 
-static void *test_alloc(size_t n, void *aux)
+static void *test_alloc(size_t n)
 {
-    (void)aux;
     g_alloc_stats.allocs++;
     return malloc(n);
 }
-static void *test_alloc_zero(size_t n, void *aux)
+static void *test_realloc(void *p, size_t n)
 {
-    (void)aux;
-    g_alloc_stats.alloc_zeros++;
-    return calloc(1, n);
-}
-static void *test_realloc(void *p, size_t n, void *aux)
-{
-    (void)aux;
     g_alloc_stats.reallocs++;
     return realloc(p, n);
 }
-static void test_free(void *p, void *aux)
+static void test_free(void *p)
 {
-    (void)aux;
     if (p) g_alloc_stats.frees++;
     free(p);
 }
@@ -1241,7 +1231,7 @@ static void test_free(void *p, void *aux)
 CASE(test_allocator_global)
 {
     sm_allocator_t hooks = {
-        .alloc = test_alloc,
+        .malloc = test_alloc,
         .realloc = test_realloc,
         .free = test_free,
     };
@@ -1249,11 +1239,9 @@ CASE(test_allocator_global)
     sm_set_allocator(hooks);
 
     sm_t *m = sm_create(1024);
-    /* alloc_zero is NULL so the helper falls back to alloc + memset. */
-    EXPECT(g_alloc_stats.allocs >= 1, "alloc hook invoked on create");
-    EXPECT(g_alloc_stats.alloc_zeros == 0, "no alloc_zero (not set)");
+    EXPECT(g_alloc_stats.allocs >= 1, "malloc hook invoked on create");
     sm_add(m, 42);
-    EXPECT(sm_contains(m, 42), "basic add still works");
+    EXPECT(sm_contains(m, 42, NULL), "basic add still works");
     sm_free(m);
     EXPECT(g_alloc_stats.frees >= 1, "free hook invoked");
 
@@ -1267,58 +1255,28 @@ CASE(test_allocator_global)
     return 0;
 }
 
-CASE(test_allocator_per_map)
+CASE(test_allocator_grow)
 {
     sm_allocator_t hooks = {
-        .alloc = test_alloc,
+        .malloc = test_alloc,
         .realloc = test_realloc,
         .free = test_free,
     };
     memset(&g_alloc_stats, 0, sizeof(g_alloc_stats));
-    /* Default is libc. */
-    sm_set_allocator((sm_allocator_t){0});
+    sm_set_allocator(hooks);
 
-    /* Create with per-map override. */
-    sm_t *m = sm_create_with_allocator(1024, hooks);
-    EXPECT(g_alloc_stats.allocs == 1, "per-map alloc hook invoked");
+    sm_t *m = sm_create(1024);
+    EXPECT(g_alloc_stats.allocs >= 1, "malloc hook invoked");
 
-    /* Grow this map: should also use the hook (via realloc). */
+    /* Grow: routes through the realloc hook. */
     sm_t *grown = sm_set_data_size(m, NULL, 4096);
     EXPECT(grown != NULL, "grow ok");
-    EXPECT(g_alloc_stats.reallocs == 1, "per-map realloc hook invoked");
-
-    /* Concurrent libc map should not touch the hook. */
-    const size_t allocs_at_check = g_alloc_stats.allocs;
-    sm_t *libc_map = sm_create(1024);
-    EXPECT(g_alloc_stats.allocs == allocs_at_check, "libc map untouched");
-    sm_free(libc_map);
+    EXPECT(g_alloc_stats.reallocs >= 1, "realloc hook invoked on grow");
 
     sm_free(grown);
-    EXPECT(g_alloc_stats.frees >= 1, "per-map free invoked on dispose");
-    return 0;
-}
+    EXPECT(g_alloc_stats.frees >= 1, "free hook invoked on dispose");
 
-CASE(test_allocator_alloc_zero)
-{
-    /* When alloc_zero is provided, sparsemap routes its zeroed-memory
-     * needs through it instead of alloc + memset. */
-    sm_allocator_t hooks = {
-        .alloc = test_alloc,
-        .alloc_zero = test_alloc_zero,
-        .realloc = test_realloc,
-        .free = test_free,
-    };
-    memset(&g_alloc_stats, 0, sizeof(g_alloc_stats));
-
-    sm_t *m = sm_create_with_allocator(1024, hooks);
-    /* sm_create allocates one zeroed block (struct + data); should
-     * have gone through alloc_zero, not alloc. */
-    EXPECT(g_alloc_stats.alloc_zeros == 1, "alloc_zero used for create");
-    EXPECT(g_alloc_stats.allocs == 0, "plain alloc not used");
-
-    sm_add(m, 7);
-    EXPECT(sm_contains(m, 7), "basic ops still work");
-    sm_free(m);
+    sm_set_allocator((sm_allocator_t){0});
     return 0;
 }
 
@@ -1329,14 +1287,16 @@ CASE(test_allocator_partial_hooks)
     sm_allocator_t hooks = {0};
     hooks.free = test_free;
     memset(&g_alloc_stats, 0, sizeof(g_alloc_stats));
+    sm_set_allocator(hooks);
 
-    sm_t *m = sm_create_with_allocator(1024, hooks);
-    EXPECT(m != NULL, "create ok with libc-fallback alloc");
-    EXPECT(g_alloc_stats.allocs == 0 && g_alloc_stats.alloc_zeros == 0,
-           "alloc/alloc_zero not invoked (libc fallback)");
+    sm_t *m = sm_create(1024);
+    EXPECT(m != NULL, "create ok with libc-fallback malloc");
+    EXPECT(g_alloc_stats.allocs == 0, "malloc hook not invoked (libc fallback)");
 
     sm_free(m);
     EXPECT(g_alloc_stats.frees == 1, "custom free invoked exactly once");
+
+    sm_set_allocator((sm_allocator_t){0});
     return 0;
 }
 
@@ -1397,8 +1357,8 @@ CASE(test_extract_range)
     sm_t *r = sm_extract_range(m, 100, 200);
     EXPECT(r != NULL, "extract returns non-NULL");
     EXPECT(sm_cardinality(r) == 10, "10 bits");
-    EXPECT(sm_contains(r, 100) && sm_contains(r, 190), "endpoints");
-    EXPECT(!sm_contains(r, 90) && !sm_contains(r, 200), "outside range");
+    EXPECT(sm_contains(r, 100, NULL) && sm_contains(r, 190, NULL), "endpoints");
+    EXPECT(!sm_contains(r, 90, NULL) && !sm_contains(r, 200, NULL), "outside range");
     sm_free(r);
 
     /* Empty result: extract a range with no bits. */
@@ -1422,7 +1382,7 @@ CASE(test_pop_last)
 
     sm_add(m, 50); sm_add(m, 100); sm_add(m, 200);
     EXPECT(sm_pop_last(m) == 200, "highest popped");
-    EXPECT(!sm_contains(m, 200), "popped bit gone");
+    EXPECT(!sm_contains(m, 200, NULL), "popped bit gone");
     EXPECT(sm_pop_last(m) == 100, "next highest");
     EXPECT(sm_pop_last(m) == 50, "lowest");
     EXPECT(sm_pop_last(m) == SM_IDX_MAX, "empty after drain");
@@ -1503,8 +1463,8 @@ CASE(test_flip_range)
     /* Empty map: flip [10, 20) sets bits 10-19. */
     EXPECT(sm_flip_range(m, 10, 20), "flip empty");
     EXPECT(sm_cardinality(m) == 10, "10 bits set after flip");
-    EXPECT(sm_contains(m, 10) && sm_contains(m, 19), "endpoints");
-    EXPECT(!sm_contains(m, 9) && !sm_contains(m, 20), "outside range");
+    EXPECT(sm_contains(m, 10, NULL) && sm_contains(m, 19, NULL), "endpoints");
+    EXPECT(!sm_contains(m, 9, NULL) && !sm_contains(m, 20, NULL), "outside range");
 
     /* Flipping the same range again clears them. */
     EXPECT(sm_flip_range(m, 10, 20), "flip back");
@@ -1514,7 +1474,7 @@ CASE(test_flip_range)
     sm_add(m, 50); sm_add(m, 51); sm_add(m, 52);
     EXPECT(sm_flip_range(m, 51, 53), "partial flip");
     /* 51 was set -> unset.  52 was set -> unset.  50 still set. */
-    EXPECT(sm_contains(m, 50) && !sm_contains(m, 51) && !sm_contains(m, 52),
+    EXPECT(sm_contains(m, 50, NULL) && !sm_contains(m, 51, NULL) && !sm_contains(m, 52, NULL),
            "partial flip results");
 
     sm_free(m);
@@ -1598,7 +1558,7 @@ CASE(test_union_inplace)
     dst = sm_union_inplace(dst, src);
     EXPECT(dst != NULL, "union_inplace returns dst");
     EXPECT(sm_cardinality(dst) == 10, "union has 10 bits");
-    EXPECT(sm_contains(dst, 0) && sm_contains(dst, 50), "both sets present");
+    EXPECT(sm_contains(dst, 0, NULL) && sm_contains(dst, 50, NULL), "both sets present");
 
     /* Adding duplicates: cardinality unchanged. */
     dst = sm_union_inplace(dst, src);
@@ -1620,9 +1580,9 @@ CASE(test_intersection_inplace)
     dst = sm_intersection_inplace(dst, src);
     EXPECT(dst != NULL, "intersection_inplace returns dst");
     EXPECT(sm_cardinality(dst) == 3, "3 bits intersect");
-    EXPECT(sm_contains(dst, 100) && sm_contains(dst, 200) && sm_contains(dst, 300),
+    EXPECT(sm_contains(dst, 100, NULL) && sm_contains(dst, 200, NULL) && sm_contains(dst, 300, NULL),
            "intersection bits");
-    EXPECT(!sm_contains(dst, 0), "non-intersecting bit gone");
+    EXPECT(!sm_contains(dst, 0, NULL), "non-intersecting bit gone");
 
     sm_free(dst); sm_free(src);
     return 0;
@@ -1640,8 +1600,8 @@ CASE(test_difference_inplace)
     dst = sm_difference_inplace(dst, src);
     EXPECT(dst != NULL, "difference_inplace returns dst");
     EXPECT(sm_cardinality(dst) == 8, "two bits removed");
-    EXPECT(!sm_contains(dst, 200) && !sm_contains(dst, 500), "removed bits gone");
-    EXPECT(sm_contains(dst, 0) && sm_contains(dst, 100), "untouched bits stay");
+    EXPECT(!sm_contains(dst, 200, NULL) && !sm_contains(dst, 500, NULL), "removed bits gone");
+    EXPECT(sm_contains(dst, 0, NULL) && sm_contains(dst, 100, NULL), "untouched bits stay");
 
     sm_free(dst); sm_free(src);
     return 0;
@@ -1655,8 +1615,8 @@ CASE(test_add_range)
 
     EXPECT(sm_add_range(m, 100, 200), "add [100, 200)");
     EXPECT(sm_cardinality(m) == 100, "100 bits");
-    EXPECT(sm_contains(m, 100) && sm_contains(m, 199), "endpoints");
-    EXPECT(!sm_contains(m, 99) && !sm_contains(m, 200), "outside excluded");
+    EXPECT(sm_contains(m, 100, NULL) && sm_contains(m, 199, NULL), "endpoints");
+    EXPECT(!sm_contains(m, 99, NULL) && !sm_contains(m, 200, NULL), "outside excluded");
 
     sm_free(m);
     return 0;
@@ -1670,8 +1630,8 @@ CASE(test_remove_range)
 
     EXPECT(sm_remove_range(m, 200, 700), "remove middle");
     EXPECT(sm_cardinality(m) == 500, "500 left");
-    EXPECT(sm_contains(m, 100) && sm_contains(m, 800), "edges still set");
-    EXPECT(!sm_contains(m, 300) && !sm_contains(m, 600), "middle cleared");
+    EXPECT(sm_contains(m, 100, NULL) && sm_contains(m, 800, NULL), "edges still set");
+    EXPECT(!sm_contains(m, 300, NULL) && !sm_contains(m, 600, NULL), "middle cleared");
 
     sm_free(m);
     return 0;
@@ -1702,8 +1662,8 @@ CASE(test_xor)
     /* a={0,100,200,...,900}; b={50,100,150,200,250,...,950}
      * a ^ b: bits unique to one or the other. 100 and 200 in both -> excluded. */
     EXPECT(x != NULL, "overlap xor non-null");
-    EXPECT(!sm_contains(x, 100) && !sm_contains(x, 200), "shared excluded");
-    EXPECT(sm_contains(x, 0) && sm_contains(x, 50), "unique included");
+    EXPECT(!sm_contains(x, 100, NULL) && !sm_contains(x, 200, NULL), "shared excluded");
+    EXPECT(sm_contains(x, 0, NULL) && sm_contains(x, 50, NULL), "unique included");
     sm_free(x);
 
     sm_free(a); sm_free(b); sm_free(c);
@@ -1730,7 +1690,7 @@ CASE(test_create_singleton)
     sm_t *m = sm_create_singleton(42);
     EXPECT(m != NULL, "singleton created");
     EXPECT(sm_cardinality(m) == 1, "one bit");
-    EXPECT(sm_contains(m, 42), "correct bit");
+    EXPECT(sm_contains(m, 42, NULL), "correct bit");
     EXPECT(sm_singleton_member(m) == 42, "matches singleton api");
     sm_free(m);
     return 0;
@@ -1741,8 +1701,8 @@ CASE(test_create_from_range)
     sm_t *m = sm_create_from_range(0, 100);
     EXPECT(m != NULL, "range created");
     EXPECT(sm_cardinality(m) == 100, "100 bits");
-    EXPECT(sm_contains(m, 0) && sm_contains(m, 99), "endpoints");
-    EXPECT(!sm_contains(m, 100), "upper exclusive");
+    EXPECT(sm_contains(m, 0, NULL) && sm_contains(m, 99, NULL), "endpoints");
+    EXPECT(!sm_contains(m, 100, NULL), "upper exclusive");
     sm_free(m);
 
     /* Empty range. */
@@ -1757,8 +1717,8 @@ CASE(test_create_from_array)
     const uint64_t arr[] = { 5, 100, 200, 1000 };
     sm_t *m = sm_create_from_array(arr, 4);
     EXPECT(m != NULL && sm_cardinality(m) == 4, "4 bits");
-    EXPECT(sm_contains(m, 5), "first bit");
-    EXPECT(sm_contains(m, 1000), "last bit");
+    EXPECT(sm_contains(m, 5, NULL), "first bit");
+    EXPECT(sm_contains(m, 1000, NULL), "last bit");
     sm_free(m);
     return 0;
 }
@@ -1829,7 +1789,7 @@ CASE(test_pop_first)
 
     sm_add(m, 100); sm_add(m, 200); sm_add(m, 50);
     EXPECT(sm_pop_first(m) == 50, "first popped");
-    EXPECT(!sm_contains(m, 50), "popped bit gone");
+    EXPECT(!sm_contains(m, 50, NULL), "popped bit gone");
     EXPECT(sm_cardinality(m) == 2, "cardinality decreased");
 
     EXPECT(sm_pop_first(m) == 100, "next popped");
@@ -1941,7 +1901,7 @@ CASE(test_add_many)
     const uint64_t arr[] = { 5, 10, 100, 200, 1500 };
     EXPECT(sm_add_many(m, arr, 5), "add_many succeeds");
     EXPECT(sm_cardinality(m) == 5, "5 bits added");
-    EXPECT(sm_contains(m, 5) && sm_contains(m, 1500), "first and last present");
+    EXPECT(sm_contains(m, 5, NULL) && sm_contains(m, 1500, NULL), "first and last present");
 
     /* Empty array. */
     EXPECT(sm_add_many(m, NULL, 0), "add 0 elements ok");
@@ -2094,28 +2054,28 @@ CASE(test_singleton_member)
 CASE(test_next_member)
 {
     sm_t *m = sm_create(8192);
-    EXPECT(sm_next_member(m, SM_IDX_MAX) == SM_IDX_MAX, "empty: IDX_MAX");
-    EXPECT(sm_next_member(NULL, SM_IDX_MAX) == SM_IDX_MAX, "NULL: IDX_MAX");
+    EXPECT(sm_next_member(m, SM_IDX_MAX, NULL) == SM_IDX_MAX, "empty: IDX_MAX");
+    EXPECT(sm_next_member(NULL, SM_IDX_MAX, NULL) == SM_IDX_MAX, "NULL: IDX_MAX");
 
     sm_add(m, 0);
     sm_add(m, 100);
     sm_add(m, 1000);
     sm_add(m, 4000);
-    EXPECT(sm_next_member(m, SM_IDX_MAX) == 0, "first set bit");
-    EXPECT(sm_next_member(m, 0) == 100, "after 0");
-    EXPECT(sm_next_member(m, 99) == 100, "after 99");
-    EXPECT(sm_next_member(m, 100) == 1000, "after 100");
-    EXPECT(sm_next_member(m, 1000) == 4000, "after 1000");
-    EXPECT(sm_next_member(m, 4000) == SM_IDX_MAX, "past last");
-    EXPECT(sm_next_member(m, 10000) == SM_IDX_MAX, "way past");
+    EXPECT(sm_next_member(m, SM_IDX_MAX, NULL) == 0, "first set bit");
+    EXPECT(sm_next_member(m, 0, NULL) == 100, "after 0");
+    EXPECT(sm_next_member(m, 99, NULL) == 100, "after 99");
+    EXPECT(sm_next_member(m, 100, NULL) == 1000, "after 100");
+    EXPECT(sm_next_member(m, 1000, NULL) == 4000, "after 1000");
+    EXPECT(sm_next_member(m, 4000, NULL) == SM_IDX_MAX, "past last");
+    EXPECT(sm_next_member(m, 10000, NULL) == SM_IDX_MAX, "way past");
 
     /* RLE chunk path. */
     sm_t *r = sm_create(8192);
     for (uint64_t i = 0; i < 4096; i++) sm_add(r, i);
-    EXPECT(sm_next_member(r, SM_IDX_MAX) == 0, "RLE first");
-    EXPECT(sm_next_member(r, 100) == 101, "RLE walk");
-    EXPECT(sm_next_member(r, 4094) == 4095, "RLE last-1");
-    EXPECT(sm_next_member(r, 4095) == SM_IDX_MAX, "past RLE end");
+    EXPECT(sm_next_member(r, SM_IDX_MAX, NULL) == 0, "RLE first");
+    EXPECT(sm_next_member(r, 100, NULL) == 101, "RLE walk");
+    EXPECT(sm_next_member(r, 4094, NULL) == 4095, "RLE last-1");
+    EXPECT(sm_next_member(r, 4095, NULL) == SM_IDX_MAX, "past RLE end");
     sm_free(r);
 
     sm_free(m);
@@ -2125,25 +2085,25 @@ CASE(test_next_member)
 CASE(test_prev_member)
 {
     sm_t *m = sm_create(8192);
-    EXPECT(sm_prev_member(m, SM_IDX_MAX) == SM_IDX_MAX, "empty: IDX_MAX");
+    EXPECT(sm_prev_member(m, SM_IDX_MAX, NULL) == SM_IDX_MAX, "empty: IDX_MAX");
 
     sm_add(m, 0);
     sm_add(m, 100);
     sm_add(m, 1000);
     sm_add(m, 4000);
-    EXPECT(sm_prev_member(m, SM_IDX_MAX) == 4000, "last set bit");
-    EXPECT(sm_prev_member(m, 4000) == 1000, "before 4000");
-    EXPECT(sm_prev_member(m, 1001) == 1000, "before 1001");
-    EXPECT(sm_prev_member(m, 1000) == 100, "before 1000");
-    EXPECT(sm_prev_member(m, 100) == 0, "before 100");
-    EXPECT(sm_prev_member(m, 0) == SM_IDX_MAX, "before first");
+    EXPECT(sm_prev_member(m, SM_IDX_MAX, NULL) == 4000, "last set bit");
+    EXPECT(sm_prev_member(m, 4000, NULL) == 1000, "before 4000");
+    EXPECT(sm_prev_member(m, 1001, NULL) == 1000, "before 1001");
+    EXPECT(sm_prev_member(m, 1000, NULL) == 100, "before 1000");
+    EXPECT(sm_prev_member(m, 100, NULL) == 0, "before 100");
+    EXPECT(sm_prev_member(m, 0, NULL) == SM_IDX_MAX, "before first");
 
     /* RLE chunk path. */
     sm_t *r = sm_create(8192);
     for (uint64_t i = 100; i < 200; i++) sm_add(r, i);
-    EXPECT(sm_prev_member(r, SM_IDX_MAX) == 199, "RLE last");
-    EXPECT(sm_prev_member(r, 150) == 149, "RLE walk");
-    EXPECT(sm_prev_member(r, 100) == SM_IDX_MAX, "before RLE start");
+    EXPECT(sm_prev_member(r, SM_IDX_MAX, NULL) == 199, "RLE last");
+    EXPECT(sm_prev_member(r, 150, NULL) == 149, "RLE walk");
+    EXPECT(sm_prev_member(r, 100, NULL) == SM_IDX_MAX, "before RLE start");
     sm_free(r);
 
     sm_free(m);
@@ -2160,7 +2120,7 @@ CASE(test_iteration_idiom)
     /* Forward */
     size_t count = 0;
     uint64_t i = SM_IDX_MAX;
-    while ((i = sm_next_member(m, i)) != SM_IDX_MAX) {
+    while ((i = sm_next_member(m, i, NULL)) != SM_IDX_MAX) {
         EXPECT(i == bits[count], "forward iteration order");
         count++;
     }
@@ -2169,7 +2129,7 @@ CASE(test_iteration_idiom)
     /* Backward */
     count = 0;
     i = SM_IDX_MAX;
-    while ((i = sm_prev_member(m, i)) != SM_IDX_MAX) {
+    while ((i = sm_prev_member(m, i, NULL)) != SM_IDX_MAX) {
         EXPECT(i == bits[n - 1 - count], "backward iteration order");
         count++;
     }
@@ -2230,9 +2190,9 @@ static int
 check_agrees(const sm_t *m, const bool *ref, size_t ref_max)
 {
     for (size_t i = 0; i < ref_max; i++) {
-        if (sm_contains((sm_t *)m, i) != ref[i]) {
+        if (sm_contains((sm_t *)m, i, NULL) != ref[i]) {
             fprintf(stderr, "    disagrees at idx %zu: sm=%d ref=%d\n",
-                    i, sm_contains((sm_t *)m, i) ? 1 : 0, ref[i] ? 1 : 0);
+                    i, sm_contains((sm_t *)m, i, NULL) ? 1 : 0, ref[i] ? 1 : 0);
             return 0;
         }
     }
@@ -2380,8 +2340,8 @@ CASE(test_create_helpers)
     sm_t *s = sm_create_singleton(12345);
     EXPECT(s != NULL, "singleton non-NULL");
     EXPECT(sm_cardinality(s) == 1, "singleton has 1 bit");
-    EXPECT(sm_contains(s, 12345), "singleton contains its bit");
-    EXPECT(!sm_contains(s, 12346), "singleton has no other bits");
+    EXPECT(sm_contains(s, 12345, NULL), "singleton contains its bit");
+    EXPECT(!sm_contains(s, 12346, NULL), "singleton has no other bits");
     sm_free(s);
 
     /* sm_create_from_array */
@@ -2390,7 +2350,7 @@ CASE(test_create_helpers)
     EXPECT(fa != NULL, "from_array non-NULL");
     EXPECT(sm_cardinality(fa) == 5, "from_array has all bits");
     for (int i = 0; i < 5; i++) {
-        EXPECT(sm_contains(fa, arr[i]), "from_array contains each bit");
+        EXPECT(sm_contains(fa, arr[i], NULL), "from_array contains each bit");
     }
     sm_free(fa);
 
@@ -2405,10 +2365,10 @@ CASE(test_create_helpers)
     EXPECT(r != NULL, "from_range non-NULL");
     EXPECT(sm_cardinality(r) == 5, "from_range cardinality");
     for (uint64_t i = 100; i < 105; i++) {
-        EXPECT(sm_contains(r, i), "from_range contains each bit");
+        EXPECT(sm_contains(r, i, NULL), "from_range contains each bit");
     }
-    EXPECT(!sm_contains(r, 99), "from_range excludes start-1");
-    EXPECT(!sm_contains(r, 105), "from_range excludes end");
+    EXPECT(!sm_contains(r, 99, NULL), "from_range excludes start-1");
+    EXPECT(!sm_contains(r, 105, NULL), "from_range excludes end");
     sm_free(r);
 
     /* Empty range. */
@@ -2451,7 +2411,7 @@ CASE(test_extract_range_thorough)
     /* Range fully inside one cluster. */
     sm_t *e1 = sm_extract_range(m, 110, 120);
     EXPECT(e1 != NULL && sm_cardinality(e1) == 10, "extract inside cluster");
-    for (uint64_t i = 110; i < 120; i++) EXPECT(sm_contains(e1, i), "e1 bit");
+    for (uint64_t i = 110; i < 120; i++) EXPECT(sm_contains(e1, i, NULL), "e1 bit");
     sm_free(e1);
 
     /* Range spanning two clusters. */
@@ -2524,10 +2484,10 @@ CASE(test_split_span)
     (void)pivot;  /* return value documented as pivot index */
     EXPECT(sm_cardinality(m) == 100, "left has bits below 1000");
     EXPECT(sm_cardinality(other) == 100, "right has bits >= 1000");
-    EXPECT(sm_contains(m, 50), "left keeps low");
-    EXPECT(!sm_contains(m, 1050), "left drops high");
-    EXPECT(sm_contains(other, 1050), "right has high");
-    EXPECT(!sm_contains(other, 50), "right has no low");
+    EXPECT(sm_contains(m, 50, NULL), "left keeps low");
+    EXPECT(!sm_contains(m, 1050, NULL), "left drops high");
+    EXPECT(sm_contains(other, 1050, NULL), "right has high");
+    EXPECT(!sm_contains(other, 50, NULL), "right has no low");
 
     sm_free(m); sm_free(other);
     return 0;
@@ -2545,7 +2505,7 @@ CASE(test_scan_to_buffer)
      * previous result. */
     uint64_t cursor = SM_IDX_MAX;
     while (pos < 64) {
-        cursor = sm_next_member(m, cursor);
+        cursor = sm_next_member(m, cursor, NULL);
         if (cursor == SM_IDX_MAX) break;
         buf[pos++] = cursor;
     }
@@ -2601,7 +2561,7 @@ CASE(test_stress_randomized)
                 sm_remove(m, idx);
                 ref[idx] = false;
             } else {
-                bool got = sm_contains(m, idx);
+                bool got = sm_contains(m, idx, NULL);
                 EXPECT(got == ref[idx], "contains matches reference");
             }
         }
@@ -2691,8 +2651,8 @@ CASE(test_stress_rle_paths)
     EXPECT(sm_cardinality(m) == 4096, "4096 contiguous bits set");
 
     sm_remove(m, 1500);
-    EXPECT(!sm_contains(m, 1500), "middle bit cleared");
-    EXPECT(sm_contains(m, 1499) && sm_contains(m, 1501), "neighbors kept");
+    EXPECT(!sm_contains(m, 1500, NULL), "middle bit cleared");
+    EXPECT(sm_contains(m, 1499, NULL) && sm_contains(m, 1501, NULL), "neighbors kept");
     EXPECT(sm_validate(m), "valid after RLE separation");
 
     sm_remove(m, 1000);
@@ -3046,10 +3006,9 @@ int main(void)
     RUN(test_open_copy);
     RUN(test_add_grow);
     RUN(test_allocator_global);
-    RUN(test_allocator_per_map);
+    RUN(test_allocator_grow);
 
     /* v2.2 additions */
-    RUN(test_allocator_alloc_zero);
     RUN(test_allocator_partial_hooks);
 
     /* v2.3: differential property tests + low-hit public surface */

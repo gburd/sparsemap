@@ -219,7 +219,7 @@ has_span(sm_t *map, int *array, int l, int n)
     if (sorted[i] + n - 1 == sorted[i + n - 1]) {
       for (int j = 0; j < n; j++) {
         size_t pos = sorted[j + i];
-        bool set = sm_contains(map, pos);
+        bool set = sm_contains(map, pos, NULL);
         assert(set);
       }
       __diag("Found span: [%d, %d], length: %d\n", sorted[i], sorted[i + n - 1], n);
@@ -430,7 +430,7 @@ sm_whats_set(sm_t *map, int off, int len)
 {
   printf("what's set in the range [%d, %d): ", off, off + len);
   for (int i = off; i < off + len; i++) {
-    if (sm_contains(map, i)) {
+    if (sm_contains(map, i, NULL)) {
       printf("%d ", i);
     }
   }
@@ -441,7 +441,7 @@ bool
 sm_is_span(sm_t *map, uint64_t m, int len, bool value)
 {
   for (uint64_t i = m; i < m + len; i++) {
-    if (sm_contains(map, i) != value) {
+    if (sm_contains(map, i, NULL) != value) {
       return false;
     }
   }
@@ -452,7 +452,7 @@ bool
 sm_occupied(sm_t *map, uint64_t m, int len, bool value)
 {
   for (uint64_t i = m; i < (uint64_t)len; i++) {
-    if (sm_contains(map, i) == value) {
+    if (sm_contains(map, i, NULL) == value) {
       return true;
     }
   }

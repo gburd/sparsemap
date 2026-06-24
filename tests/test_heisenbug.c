@@ -146,7 +146,7 @@ CASE(test_wrap_then_grow_via_set_data_size_null)
 
     /* Verify the bits we set are observable. */
     for (uint64_t i = 0; i < 100; i++) {
-        EXPECT(sm_contains(grown, i * 8),
+        EXPECT(sm_contains(grown, i * 8, NULL),
                "set bit reads back as set");
     }
 
@@ -249,7 +249,7 @@ CASE(test_owned_copy_normalizes_lineage)
     EXPECT(sm_cardinality(owned) == 50,
            "copy has same cardinality");
     for (uint64_t i = 0; i < 50; i++) {
-        EXPECT(sm_contains(owned, i * 16),
+        EXPECT(sm_contains(owned, i * 16, NULL),
                "copy contains same bits");
     }
 
@@ -306,11 +306,11 @@ CASE(test_union_with_wrapped_input_grows_result)
     EXPECT(u != NULL, "union returns a non-NULL result");
 
     /* Spot-check a few bits from each side. */
-    EXPECT(sm_contains(u, 0), "bit from a");
-    EXPECT(sm_contains(u, 64), "bit from a");
-    EXPECT(sm_contains(u, 1000000), "bit from b");
-    EXPECT(sm_contains(u, 1000064), "bit from b");
-    EXPECT(!sm_contains(u, 1), "unset bit");
+    EXPECT(sm_contains(u, 0, NULL), "bit from a");
+    EXPECT(sm_contains(u, 64, NULL), "bit from a");
+    EXPECT(sm_contains(u, 1000000, NULL), "bit from b");
+    EXPECT(sm_contains(u, 1000064, NULL), "bit from b");
+    EXPECT(!sm_contains(u, 1, NULL), "unset bit");
 
     free(u);
     free(b);
@@ -343,12 +343,12 @@ CASE(test_intersection_difference_with_wrapped)
     sm_t *diff = sm_difference(a, b);
 
     /* Even-index bits are in both (i*100 == i*100 + 0); odd-index aren't. */
-    EXPECT(sm_contains(intr, 0), "even index in intersection");
-    EXPECT(sm_contains(intr, 200), "even index in intersection");
-    EXPECT(!sm_contains(intr, 100), "odd index NOT in intersection");
+    EXPECT(sm_contains(intr, 0, NULL), "even index in intersection");
+    EXPECT(sm_contains(intr, 200, NULL), "even index in intersection");
+    EXPECT(!sm_contains(intr, 100, NULL), "odd index NOT in intersection");
 
-    EXPECT(!sm_contains(diff, 0), "even index NOT in difference");
-    EXPECT(sm_contains(diff, 100), "odd index in difference");
+    EXPECT(!sm_contains(diff, 0, NULL), "even index NOT in difference");
+    EXPECT(sm_contains(diff, 100, NULL), "odd index in difference");
 
     sm_free(intr);
     sm_free(diff);

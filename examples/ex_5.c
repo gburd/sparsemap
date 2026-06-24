@@ -53,11 +53,11 @@ demo_iteration(void)
     }
 
     printf("forward:  ");
-    for (uint64_t i = SM_IDX_MAX; (i = sm_next_member(m, i)) != SM_IDX_MAX; ) {
+    for (uint64_t i = SM_IDX_MAX; (i = sm_next_member(m, i, NULL)) != SM_IDX_MAX; ) {
         printf("%lu ", i);
     }
     printf("\nbackward: ");
-    for (uint64_t i = SM_IDX_MAX; (i = sm_prev_member(m, i)) != SM_IDX_MAX; ) {
+    for (uint64_t i = SM_IDX_MAX; (i = sm_prev_member(m, i, NULL)) != SM_IDX_MAX; ) {
         printf("%lu ", i);
     }
     printf("\n");

@@ -103,7 +103,7 @@ prop_model(hegel_test_case *tc, void *ctx)
 				m = oracle_add(m, oracle, j);
 			break;
 		}
-		assert(sm_contains(m, idx) == oracle[idx]);
+		assert(sm_contains(m, idx, NULL) == oracle[idx]);
 	}
 
 	/* Cardinality and extents agree. */
@@ -131,10 +131,10 @@ prop_model(hegel_test_case *tc, void *ctx)
 	for (uint64_t b = 0; b < U; b++) {
 		if (!oracle[b])
 			continue;
-		it = sm_next_member(m, it);
+		it = sm_next_member(m, it, NULL);
 		assert(it == b);
 	}
-	assert(sm_next_member(m, it) == SM_IDX_MAX);
+	assert(sm_next_member(m, it, NULL) == SM_IDX_MAX);
 
 	sm_free(m);
 	free(oracle);
@@ -216,10 +216,10 @@ prop_setops(hegel_test_case *tc, void *ctx)
 		bool want_i = oa[k] && ob[k];
 		bool want_d = oa[k] && !ob[k];
 		bool want_x = oa[k] ^ ob[k];
-		assert((u ? sm_contains(u, k) : false) == want_u);
-		assert((i ? sm_contains(i, k) : false) == want_i);
-		assert((d ? sm_contains(d, k) : false) == want_d);
-		assert((x ? sm_contains(x, k) : false) == want_x);
+		assert((u ? sm_contains(u, k, NULL) : false) == want_u);
+		assert((i ? sm_contains(i, k, NULL) : false) == want_i);
+		assert((d ? sm_contains(d, k, NULL) : false) == want_d);
+		assert((x ? sm_contains(x, k, NULL) : false) == want_x);
 	}
 
 	if (u)
@@ -338,10 +338,10 @@ prop_prev_member(hegel_test_case *tc, void *ctx)
 	for (uint64_t bb = U; bb-- > 0;) {
 		if (!oracle[bb])
 			continue;
-		it = sm_prev_member(m, it);
+		it = sm_prev_member(m, it, NULL);
 		assert(it == bb);
 	}
-	assert(sm_prev_member(m, it) == SM_IDX_MAX);
+	assert(sm_prev_member(m, it, NULL) == SM_IDX_MAX);
 
 	sm_free(m);
 	free(oracle);
@@ -378,7 +378,7 @@ prop_cursor_interleaved(hegel_test_case *tc, void *ctx)
 			oracle[idx] = false;
 			break;
 		case 2: { /* forward probe from idx */
-			uint64_t got = sm_next_member(m, idx);
+			uint64_t got = sm_next_member(m, idx, NULL);
 			uint64_t want = SM_IDX_MAX;
 			for (uint64_t b = idx + 1; b < U; b++)
 				if (oracle[b]) {
@@ -389,7 +389,7 @@ prop_cursor_interleaved(hegel_test_case *tc, void *ctx)
 			break;
 		}
 		case 3: { /* backward probe from idx */
-			uint64_t got = sm_prev_member(m, idx);
+			uint64_t got = sm_prev_member(m, idx, NULL);
 			uint64_t want = SM_IDX_MAX;
 			for (uint64_t b = idx; b-- > 0;)
 				if (oracle[b]) {
@@ -400,7 +400,7 @@ prop_cursor_interleaved(hegel_test_case *tc, void *ctx)
 			break;
 		}
 		case 4: /* membership probe */
-			assert(sm_contains(m, idx) == oracle[idx]);
+			assert(sm_contains(m, idx, NULL) == oracle[idx]);
 			break;
 		}
 	}
@@ -460,7 +460,7 @@ prop_range_ops(hegel_test_case *tc, void *ctx)
 			oracle[b] = !oracle[b];
 		/* check the single flip first */
 		for (uint64_t b = 0; b < U; b++)
-			assert(sm_contains(m, b) == oracle[b]);
+			assert(sm_contains(m, b, NULL) == oracle[b]);
 		/* involution: flip the same range back */
 		sm_flip_range(m, lo, hi);
 		for (uint64_t b = lo; b < hi; b++)
@@ -468,7 +468,7 @@ prop_range_ops(hegel_test_case *tc, void *ctx)
 	}
 
 	for (uint64_t b = 0; b < U; b++)
-		assert(sm_contains(m, b) == oracle[b]);
+		assert(sm_contains(m, b, NULL) == oracle[b]);
 
 	sm_free(m);
 	free(oracle);
@@ -497,7 +497,7 @@ prop_extract_range(hegel_test_case *tc, void *ctx)
 	sm_t *e = sm_extract_range(m, lo, hi);
 	for (uint64_t b = 0; b < U; b++) {
 		bool want = (b >= lo && b < hi) ? oracle[b] : false;
-		bool got = (e != NULL) ? sm_contains(e, b) : false;
+		bool got = (e != NULL) ? sm_contains(e, b, NULL) : false;
 		assert(got == want);
 	}
 	if (e != NULL)
@@ -534,7 +534,7 @@ prop_offset(hegel_test_case *tc, void *ctx)
 	for (uint64_t b = 0; b < U; b++) {
 		bool want = (b >= (uint64_t)off) ? oracle[b - (uint64_t)off]
 		                                 : false;
-		bool got = (shifted != NULL) ? sm_contains(shifted, b) : false;
+		bool got = (shifted != NULL) ? sm_contains(shifted, b, NULL) : false;
 		assert(got == want);
 	}
 	if (shifted != NULL)
@@ -645,8 +645,8 @@ prop_setop_inplace(hegel_test_case *tc, void *ctx)
 	                      : sm_difference_inplace(acopy, b);
 
 	for (uint64_t k = 0; k < U; k++) {
-		bool wp = (pure != NULL) ? sm_contains(pure, k) : false;
-		bool wg = (got != NULL) ? sm_contains(got, k) : false;
+		bool wp = (pure != NULL) ? sm_contains(pure, k, NULL) : false;
+		bool wg = (got != NULL) ? sm_contains(got, k, NULL) : false;
 		assert(wp == wg);
 	}
 
@@ -689,7 +689,7 @@ prop_hash_compare(hegel_test_case *tc, void *ctx)
 
 	/* perturb b by one bit and require inequality. */
 	uint64_t idx = (uint64_t)hegel_draw_int(tc, hegel_integers(0, U - 1));
-	if (sm_contains(b, idx)) {
+	if (sm_contains(b, idx, NULL)) {
 		sm_remove(b, idx);
 	} else {
 		sm_t *g = sm_set_data_size(b, NULL, sm_get_capacity(b) + 64);
@@ -750,7 +750,7 @@ prop_lineage_roundtrip(hegel_test_case *tc, void *ctx)
 	uint64_t newbit = (uint64_t)hegel_draw_int(tc, hegel_integers(0, U - 1));
 	uint64_t rc = sm_add_grow(&oc, newbit);
 	assert(rc == newbit);
-	assert(sm_contains(oc, newbit));
+	assert(sm_contains(oc, newbit, NULL));
 
 	free(buf);
 	if (opened != NULL)
@@ -777,7 +777,7 @@ prop_constructors(hegel_test_case *tc, void *ctx)
 	assert(sm_membership(sg) == SM_SINGLETON);
 	assert(sm_singleton_member(sg) == s);
 	assert(sm_cardinality(sg) == 1);
-	assert(sm_contains(sg, s));
+	assert(sm_contains(sg, s, NULL));
 	sm_free(sg);
 
 	/* from_range [lo, hi) */
@@ -791,7 +791,7 @@ prop_constructors(hegel_test_case *tc, void *ctx)
 	sm_t *r = sm_create_from_range(lo, hi);
 	for (uint64_t b = 0; b < U; b++) {
 		bool want = (b >= lo && b < hi);
-		bool got = (r != NULL) ? sm_contains(r, b) : false;
+		bool got = (r != NULL) ? sm_contains(r, b, NULL) : false;
 		assert(got == want);
 	}
 	if (r != NULL)
@@ -813,7 +813,7 @@ prop_constructors(hegel_test_case *tc, void *ctx)
 	assert(fa != NULL);
 	size_t want_card = 0;
 	for (uint64_t b = 0; b < U; b++) {
-		assert(sm_contains(fa, b) == seen[b]);
+		assert(sm_contains(fa, b, NULL) == seen[b]);
 		if (seen[b])
 			want_card++;
 	}

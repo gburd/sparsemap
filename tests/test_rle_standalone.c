@@ -47,10 +47,10 @@ main(void)
 
   /* Test 2: is_set boundary check (the bug we fixed) */
   printf("Test 2: is_set boundary check...\n");
-  assert(sm_contains(map, 0) == true);
-  assert(sm_contains(map, 1500) == true);
-  assert(sm_contains(map, 2999) == true);
-  assert(sm_contains(map, 3000) == false); /* Should be false, was incorrectly true before fix */
+  assert(sm_contains(map, 0, NULL) == true);
+  assert(sm_contains(map, 1500, NULL) == true);
+  assert(sm_contains(map, 2999, NULL) == true);
+  assert(sm_contains(map, 3000, NULL) == false); /* Should be false, was incorrectly true before fix */
   printf("  PASS: is_set boundary check\n");
 
   /* Test 3: select operations */

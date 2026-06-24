@@ -64,11 +64,11 @@ main(void)
   for (i = 0; i < 1024; i++) {
     __diag("set %d\n", array[i]);
     sm_add(map, array[i]);
-    assert(sm_contains(map, array[i]) == true);
+    assert(sm_contains(map, array[i], NULL) == true);
   }
 
   sm_add(map, 1025);
-  assert(sm_contains(map, 1025) == true);
+  assert(sm_contains(map, 1025, NULL) == true);
 
   return 0;
 }

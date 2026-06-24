@@ -161,7 +161,7 @@ b_contains_hit(uint64_t iters, void *aux)
 	sm_t *m = aux;
 	uint64_t hi = sm_maximum(m), sum = 0;
 	for (uint64_t i = 0; i < iters; i++)
-		sum += sm_contains(m, (i * 2654435761u) % (hi + 1)) ? 1 : 0;
+		sum += sm_contains(m, (i * 2654435761u) % (hi + 1), NULL) ? 1 : 0;
 	return (sum);
 }
 
@@ -172,7 +172,8 @@ b_next_member(uint64_t iters, void *aux)
 	uint64_t sum = 0, done = 0;
 	while (done < iters) {
 		uint64_t i = SM_IDX_MAX;
-		while ((i = sm_next_member(m, i)) != SM_IDX_MAX) {
+		sm_cursor_t cur = SM_CURSOR_INIT;
+		while ((i = sm_next_member(m, i, &cur)) != SM_IDX_MAX) {
 			sum += i;
 			if (++done >= iters)
 				break;

@@ -57,10 +57,16 @@ the wire format is.
 
 ## Allocators
 
-If you route allocation through `sm_allocator_t` hooks, nothing
-changed in 3.0.0: `sm_set_allocator(hooks)` sets a process-wide
-default and `sm_create_with_allocator(n, hooks)` overrides per map,
-both by value.  An all-zero `sm_allocator_t` means "use libc".
+The allocator is process-global, set with `sm_set_allocator(hooks)`
+(CRoaring's `roaring_init_memory_hook` model).  `sm_allocator_t` is a
+minimal `{ malloc, realloc, free }` triple; an all-zero struct means
+"use libc".  There is no per-map allocator.
+
+5.0.0 note: earlier 4.x releases also offered
+`sm_create_with_allocator(n, hooks)` for a per-map override and a
+larger hook struct (`alloc_zero`, `aligned_alloc`, `aux`).  Those were
+removed in 5.0.0 to keep `sm_t` to three words; route everything
+through `sm_set_allocator` instead.
 
 ## Pre-3.0 history
 

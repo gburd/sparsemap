@@ -126,8 +126,8 @@ CASE(test_union_with_zero_used_input)
      */
     sm_t *u = sm_union(a, b);
     EXPECT(u != NULL, "union returns non-NULL");
-    EXPECT(sm_contains(u, 42), "bit from b present in union");
-    EXPECT(sm_contains(u, 4242), "bit from b present in union");
+    EXPECT(sm_contains(u, 42, NULL), "bit from b present in union");
+    EXPECT(sm_contains(u, 4242, NULL), "bit from b present in union");
 
     free(u);
     free(b);
@@ -154,7 +154,7 @@ CASE(test_intersection_with_zero_used_input)
      * that contains `b`'s bits.
      */
     if (i != NULL) {
-        EXPECT(!sm_contains(i, 42),
+        EXPECT(!sm_contains(i, 42, NULL),
                "intersection with zero-used must be empty");
         free(i);
     }
@@ -202,7 +202,7 @@ CASE(test_cleared_map_is_empty)
     sm_clear(m);
     EXPECT(sm_cardinality(m) == 0, "post-clear cardinality 0");
     EXPECT(sm_maximum(m) == 0, "post-clear maximum 0");
-    EXPECT(!sm_contains(m, 100), "post-clear bit absent");
+    EXPECT(!sm_contains(m, 100, NULL), "post-clear bit absent");
 
     free(m);
     return 0;
