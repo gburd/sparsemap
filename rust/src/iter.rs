@@ -130,4 +130,39 @@ impl SparseMap {
     pub fn to_vec(&self) -> alloc::vec::Vec<u64> {
         self.iter().collect()
     }
+
+    /// Materializes the index window `[lo, hi)` into a dense
+    /// [`bitvec::vec::BitVec`], with bit `i` of the result set iff
+    /// `self.contains(lo + i)`.
+    ///
+    /// `SparseMap` is a *compressed sparse* structure, so it has no
+    /// contiguous bit buffer to borrow a `BitSlice` from; this bridge
+    /// expands a *bounded* range on demand for code that wants
+    /// `bitvec`'s dense slicing.  The result has `hi - lo` bits (empty
+    /// if `lo >= hi`).  Choose the window deliberately: a full
+    /// `0..u64::MAX` expansion would allocate 2^64 bits.
+    ///
+    /// Requires the `bitvec` crate feature.
+    #[cfg(feature = "bitvec")]
+    #[must_use]
+    pub fn to_bitvec(&self, lo: u64, hi: u64) -> bitvec::vec::BitVec {
+        use bitvec::vec::BitVec;
+        if lo >= hi {
+            return BitVec::new();
+        }
+        let len = (hi - lo) as usize;
+        let mut bv = BitVec::repeat(false, len);
+        // Walk the set bits (sparse) and stamp those inside the window.
+        // iter() yields ascending indices, so we can stop once we pass hi.
+        for b in self.iter() {
+            if b < lo {
+                continue;
+            }
+            if b >= hi {
+                break;
+            }
+            bv.set((b - lo) as usize, true);
+        }
+        bv
+    }
 }

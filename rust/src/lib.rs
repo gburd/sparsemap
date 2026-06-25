@@ -166,6 +166,16 @@ impl SparseMap {
         self.chunks.values().map(Chunk::count).sum()
     }
 
+    /// Returns the number of set bits.
+    ///
+    /// An alias for [`cardinality`](Self::cardinality), named to match
+    /// the Rust collection convention (and `roaring::RoaringBitmap`),
+    /// so the type drops in for code written against those APIs.
+    #[must_use]
+    pub fn len(&self) -> u64 {
+        self.cardinality()
+    }
+
     /// Returns `true` if bit `idx` is set.
     #[must_use]
     pub fn contains(&self, idx: u64) -> bool {

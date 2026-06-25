@@ -20,6 +20,11 @@ exclude = ["ci", "examples/wire_emit.rs"]
 default = ["std"]
 # Enables std::error::Error impls for the error types.
 std = []
+# Enables SparseMap::to_bitvec, materializing a bounded index window
+# into a bitvec::BitVec for code that wants dense bit-slice operations.
+# Pulls in the `bitvec` crate; off by default to keep the core
+# dependency-free.
+bitvec = ["dep:bitvec"]
 
 [lints.rust]
 missing_docs = "warn"
@@ -29,6 +34,7 @@ all = "warn"
 pedantic = "warn"
 
 [dependencies]
+bitvec = { version = "1", optional = true, default-features = false, features = ["alloc"] }
 
 [dev-dependencies]
 proptest = "1"
