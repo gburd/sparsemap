@@ -42,7 +42,7 @@ static int g_total = 0;
 #define EXPECT(cond, msg) do {                                          \
         g_total++;                                                      \
         if (!(cond)) {                                                  \
-            fprintf(stderr, "  FAIL: %s:%d: %s — expected %s\n",        \
+            fprintf(stderr, "  FAIL: %s:%d: %s -- expected %s\n",        \
                     __FILE__, __LINE__, msg, #cond);                    \
             g_failures++;                                               \
             return 1;                                                   \
@@ -67,7 +67,7 @@ static int g_total = 0;
 /*
  * Wrap a buffer that has non-zero content in its first 4 bytes and
  * never call sm_clear or sm_open.  m_data_used == 0,
- * so __sm_get_chunk_count must report 0 — not whatever uint32_t lives
+ * so __sm_get_chunk_count must report 0 -- not whatever uint32_t lives
  * at m_data[0..3].
  *
  * We can't directly observe __sm_get_chunk_count from outside the
@@ -121,13 +121,13 @@ CASE(test_union_with_zero_used_input)
 
     /*
      * Union of a zero-used map and a populated map should be
-     * equivalent to the populated map — it must not iterate `a`'s
+     * equivalent to the populated map -- it must not iterate `a`'s
      * garbage chunk metadata.
      */
     sm_t *u = sm_union(a, b);
     EXPECT(u != NULL, "union returns non-NULL");
-    EXPECT(sm_contains(u, 42), "bit from b present in union");
-    EXPECT(sm_contains(u, 4242), "bit from b present in union");
+    EXPECT(sm_contains(u, 42, NULL), "bit from b present in union");
+    EXPECT(sm_contains(u, 4242, NULL), "bit from b present in union");
 
     free(u);
     free(b);
@@ -154,7 +154,7 @@ CASE(test_intersection_with_zero_used_input)
      * that contains `b`'s bits.
      */
     if (i != NULL) {
-        EXPECT(!sm_contains(i, 42),
+        EXPECT(!sm_contains(i, 42, NULL),
                "intersection with zero-used must be empty");
         free(i);
     }
@@ -202,7 +202,7 @@ CASE(test_cleared_map_is_empty)
     sm_clear(m);
     EXPECT(sm_cardinality(m) == 0, "post-clear cardinality 0");
     EXPECT(sm_maximum(m) == 0, "post-clear maximum 0");
-    EXPECT(!sm_contains(m, 100), "post-clear bit absent");
+    EXPECT(!sm_contains(m, 100, NULL), "post-clear bit absent");
 
     free(m);
     return 0;

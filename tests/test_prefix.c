@@ -43,9 +43,13 @@ main(void)
 
 	smtest_sm_add(m, 42);
 	smtest_sm_add(m, 1024);
-	CHECK(smtest_sm_contains(m, 42));
-	CHECK(!smtest_sm_contains(m, 43));
+	CHECK(smtest_sm_contains(m, 42, NULL));
+	CHECK(!smtest_sm_contains(m, 43, NULL));
 	CHECK(smtest_sm_cardinality(m) == 2);
+
+	/* Cursor type must pick up the prefix too. */
+	smtest_sm_cursor_t cur = SM_CURSOR_INIT;
+	CHECK(smtest_sm_contains(m, 42, &cur));
 
 	/* Enum constants are not prefixed (compile-time only). */
 	mb = smtest_sm_membership(m);
@@ -56,7 +60,7 @@ main(void)
 	CHECK(smtest_sm_maximum(m) == 1024);
 
 	smtest_sm_add_many(m, arr, 3);
-	CHECK(smtest_sm_contains(m, 100000));
+	CHECK(smtest_sm_contains(m, 100000, &cur));
 
 	smtest_sm_statistics(m, &st);
 	CHECK(st.bits_set == smtest_sm_cardinality(m));

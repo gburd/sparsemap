@@ -14,20 +14,15 @@ munit = static_library('sparsemap_munit',
   c_args : ['-Wno-unused-parameter'],
 )
 
-# qc + helpers used inside the main test binary; built directly into
-# the test executable so it can see SPARSEMAP_TESTING-only symbols.
-
-# Main exhaustive test binary.  sm_white.c #includes the whole of
-# ../sm.c so the property/unit tests can reach the file-static chunk
-# codec; it also carries the QCC generators and _tst_* checks that
-# test.c drives.  Compiled with -DSPARSEMAP_TESTING for the harness
-# helpers in common.c.
+# Main munit-driven suite.  Exercises the public API exactly as a
+# downstream consumer would, linking the installed library.  White-box
+# chunk-codec property tests now live in test_hegel_white.c (hegel-c);
+# the former QCC generators / _tst_* checks (qc.c, sm_white.c) were
+# retired when the property tests moved to hegel.
 test_main = executable('test_main',
   'test.c',
   'common.c',
-  'qc.c',
   'midl.c',
-  'sm_white.c',
   c_args : [
     '-DSPARSEMAP_TESTING',
     '-Wno-unused-parameter',
@@ -35,6 +30,7 @@ test_main = executable('test_main',
   ],
   link_with : [support, munit],
   dependencies : [
+    libsparsemap_dep,
     cc.find_library('m', required : false),
     dependency('threads'),
   ],
@@ -74,7 +70,12 @@ test('prefix', test_prefix, timeout : 60)
 # -Dhegel=enabled turns a missing dependency into a hard error;
 # -Dhegel=disabled skips it entirely.
 hegel_opt = get_option('hegel')
-if not hegel_opt.disabled()
+# hegel-c spawns the server subprocess and links libcbor/zlib that the
+# sanitizers don't instrument, which makes ASan/UBSan abort spuriously.
+# Skip the hegel targets whenever a sanitizer is active; they still run
+# in the plain and coverage builds.
+sanitize = get_option('b_sanitize')
+if not hegel_opt.disabled() and sanitize == 'none'
   hegel_lib = cc.find_library('hegel', required : false)
   cbor_lib = cc.find_library('cbor', required : false)
   z_lib = cc.find_library('z', required : false)
@@ -86,6 +87,18 @@ if not hegel_opt.disabled()
       dependencies : [libsparsemap_dep, hegel_lib, cbor_lib, z_lib],
     )
     test('hegel', test_hegel, timeout : 300)
+
+    # White-box chunk-codec properties.  Compiles its own copy of
+    # ../sm.c (like sm_white.c) so it can reach the file-static chunk
+    # primitives; this is the hegel replacement for the old QCC
+    # _tst_chunk_* properties.
+    test_hegel_white = executable('test_hegel_white',
+      'test_hegel_white.c',
+      dependencies : [hegel_lib, cbor_lib, z_lib],
+      include_directories : inc,
+      c_args : ['-Wno-unused-function', '-Wno-unused-parameter'],
+    )
+    test('hegel_white', test_hegel_white, timeout : 300)
   elif hegel_opt.enabled()
     error('hegel=enabled but hegel-c (hegel/hegel.h + libhegel + libcbor + libz) was not found')
   endif

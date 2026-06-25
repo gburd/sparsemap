@@ -37,7 +37,7 @@ main(void)
   // set all the bits on in a random order
   for (i = 0; i < TEST_ARRAY_SIZE; i++) {
     sm_add(map, array[i]);
-    assert(sm_contains(map, array[i]) == true);
+    assert(sm_contains(map, array[i], NULL) == true);
   }
 
   // for (size_t len = 1; len < 20; len++) {
@@ -57,7 +57,7 @@ main(void)
     print_spans(array, TEST_ARRAY_SIZE);
     for (i = 0; i < TEST_ARRAY_SIZE; i++) {
       sm_add(map, array[i]);
-      assert(sm_contains(map, array[i]) == true);
+      assert(sm_contains(map, array[i], NULL) == true);
     }
     has_span(map, array, TEST_ARRAY_SIZE, (int)len);
     uint64_t l = sm_span(map, 0, len, true);
@@ -66,7 +66,7 @@ main(void)
       __diag("is_span(%lu, %lu) == %s\n", l, len, is_span(array, TEST_ARRAY_SIZE, l, len) ? "yes" : "no");
       i = (int)l;
       do {
-        bool set = sm_contains(map, i);
+        bool set = sm_contains(map, i, NULL);
         if (set) {
           __diag("verified %d was set\n", i);
         } else {

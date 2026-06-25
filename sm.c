@@ -23,6 +23,10 @@
 
 #include <sys/types.h>
 
+/* Expose the full struct definition from <sm.h> to this translation
+ * unit; the library needs the layout, consumers get it only via
+ * SM_EXPOSE_STRUCT. */
+#define SM_INTERNAL
 #include "sm.h"
 #include <errno.h>
 #include <stdarg.h>
@@ -50,8 +54,18 @@
  *			    the caller must guard).
  *	SM_CLZ64(x)	    Count leading zeros (undefined on x == 0;
  *			    the caller must guard).
+ *
+ * Each macro may be overridden by the consumer: define it before
+ * including this translation unit (e.g. on the compiler command line
+ * with -DSM_POPCOUNT64=my_popcount) and sparsemap uses your version
+ * verbatim, skipping the built-in detection below.  This lets a host
+ * environment route these primitives through its own intrinsics
+ * (for example PostgreSQL's pg_popcount64 / pg_rightmost_one_pos64).
+ * The override must have the same call signature and return an int
+ * (popcount/ctz/clz) or evaluate to void (prefetch).
  */
 
+#ifndef SM_PREFETCH
 #if defined(__GNUC__) || defined(__clang__)
 #define SM_PREFETCH(addr) __builtin_prefetch((addr), 0, 1)
 #elif defined(_MSC_VER)
@@ -66,7 +80,9 @@
 #else
 #define SM_PREFETCH(addr) ((void)0)
 #endif
+#endif /* SM_PREFETCH */
 
+#ifndef SM_POPCOUNT64
 #if defined(__GNUC__) || defined(__clang__)
 #define SM_POPCOUNT64(x) ((int)__builtin_popcountll((unsigned long long)(x)))
 #elif defined(_MSC_VER) && (defined(_M_X64) || defined(_M_ARM64))
@@ -87,7 +103,9 @@ sm_swar_popcount64(uint64_t x)
 }
 #define SM_POPCOUNT64(x) sm_swar_popcount64((uint64_t)(x))
 #endif
+#endif /* SM_POPCOUNT64 */
 
+#ifndef SM_CTZ64
 #if defined(__GNUC__) || defined(__clang__)
 #define SM_CTZ64(x) __builtin_ctzll((unsigned long long)(x))
 #elif defined(_MSC_VER) && (defined(_M_X64) || defined(_M_ARM64))
@@ -133,7 +151,9 @@ sm_swar_ctz64(uint64_t x)
 }
 #define SM_CTZ64(x) sm_swar_ctz64((uint64_t)(x))
 #endif
+#endif /* SM_CTZ64 */
 
+#ifndef SM_CLZ64
 #if defined(__GNUC__) || defined(__clang__)
 #define SM_CLZ64(x) __builtin_clzll((unsigned long long)(x))
 #elif defined(_MSC_VER) && (defined(_M_X64) || defined(_M_ARM64))
@@ -178,8 +198,44 @@ sm_swar_clz64(uint64_t x)
 }
 #define SM_CLZ64(x) sm_swar_clz64((uint64_t)(x))
 #endif
+#endif /* SM_CLZ64 */
 
-#ifdef SPARSEMAP_DIAGNOSTIC
+/*
+ * Diagnostic and assertion hooks.
+ *
+ * sparsemap reports internal invariant violations through three
+ * macros, each independently overridable by the consumer (define it
+ * before this translation unit is compiled, e.g. with -D on the
+ * command line):
+ *
+ *	__sm_assert(expr)
+ *		Evaluated wherever the library checks an internal
+ *		invariant.  The built-in forms below are active only
+ *		under SPARSEMAP_DIAGNOSTIC; in a normal build the
+ *		default is ((void)0).  A host that wants its own
+ *		assertion machinery (PostgreSQL's Assert(), the C
+ *		standard assert(), an abort-on-fail check) defines
+ *		__sm_assert to route there.
+ *
+ *	__sm_diag(fmt, ...)
+ *		printf-style debug logging.  Default is ((void)0)
+ *		outside SPARSEMAP_DIAGNOSTIC.  A host that wants the
+ *		messages routed to its logger (PostgreSQL's elog,
+ *		syslog, a ring buffer) defines __sm_diag.
+ *
+ *	__sm_when_diag(stmt)
+ *		Guards diagnostic-only statement blocks (chunk dumps
+ *		and the like).  Expands to `if (1) stmt` when
+ *		diagnostics are on, `if (0) stmt` otherwise, so the
+ *		compiler still type-checks the block but drops it.
+ *
+ * If a consumer overrides __sm_diag but not __sm_assert (or vice
+ * versa) the un-overridden macro keeps its default.  When the
+ * consumer overrides __sm_diag, the built-in __sm_diag_ sink below
+ * is not compiled, so it costs nothing.
+ */
+
+#if defined(SPARSEMAP_DIAGNOSTIC) && !defined(__sm_diag)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wpedantic"
 #pragma GCC diagnostic ignored "-Wvariadic-macros"
@@ -195,18 +251,30 @@ void __attribute__((format(printf, 4, 5))) __sm_diag_(const char *file,
 	vfprintf(stderr, format, args);
 	va_end(args);
 }
+#endif
 
+#if defined(SPARSEMAP_DIAGNOSTIC) && !defined(__sm_assert)
 #define __sm_assert(expr)                                               \
 	if (!(expr))                                                    \
 	fprintf(stderr, "%s:%d:%s(): assertion failed! %s\n", __FILE__, \
 	    __LINE__, __func__, #expr)
+#endif
 
+#if defined(SPARSEMAP_DIAGNOSTIC) && !defined(__sm_when_diag)
 #define __sm_when_diag(expr) \
 	if (1)               \
 	expr
-#else
+#endif
+
+/* Defaults for any hook the consumer did not supply and that the
+ * diagnostic build did not define above. */
+#ifndef __sm_diag
 #define __sm_diag(format, ...) ((void)0)
-#define __sm_assert(expr)      ((void)0)
+#endif
+#ifndef __sm_assert
+#define __sm_assert(expr) ((void)0)
+#endif
+#ifndef __sm_when_diag
 #define __sm_when_diag(expr) \
 	if (0)               \
 	expr
@@ -301,16 +369,30 @@ __sm_store_idx(uint8_t *p, const __sm_idx_t v)
 	memcpy(p, &v, sizeof(v));
 }
 
-static inline uint32_t
-__sm_load_u32(const uint8_t *p)
+/*
+ * The chunk-count header occupies SM_SIZEOF_OVERHEAD (8) bytes at the
+ * start of m_data.  Through v5.0 the count was stored as a uint32_t
+ * (the low 4 bytes), capping a map at 2^32-1 chunks; the high 4 bytes
+ * were always zero (sm_create / sm_clear memset the whole buffer, and
+ * sm_deserialize copies a body whose high bytes are likewise zero).
+ *
+ * v5.1 widens the count to uint64_t using the full 8-byte slot.  This
+ * is wire-compatible in both directions: a v5.1 reader sees the same
+ * value in a v5.0 stream (high bytes zero), and a v5.1 writer storing
+ * a count < 2^32 produces byte-identical output.  The ceiling now
+ * exceeds the addressable index space, so the chunk count is no
+ * longer a binding limit for any consumer.
+ */
+static inline uint64_t
+__sm_load_u64(const uint8_t *p)
 {
-	uint32_t v;
+	uint64_t v;
 	memcpy(&v, p, sizeof(v));
 	return (v);
 }
 
 static inline void
-__sm_store_u32(uint8_t *p, const uint32_t v)
+__sm_store_u64(uint8_t *p, const uint64_t v)
 {
 	memcpy(p, &v, sizeof(v));
 }
@@ -416,7 +498,7 @@ typedef struct {
 #define SM_ENOUGH_SPACE(need)                                        \
 	do {                                                         \
 		if (map->m_data_used + (need) + SM_SIZEOF_OVERHEAD > \
-		    map->m_capacity) {                               \
+		    __sm_cap(map)) {                                  \
 			errno = ENOSPC;                              \
 			return (SM_IDX_MAX);                         \
 		}                                                    \
@@ -656,63 +738,13 @@ __sm_chunk_get_run_length(const __sm_chunk_t *chunk)
 	return (length);
 }
 
-struct __attribute__((aligned(8))) sparsemap {
-	size_t m_capacity;  /* The total size of m_data */
-	size_t m_data_used; /* The used size of m_data */
-	uint8_t *m_data;    /* The serialized bitmap data */
-	/*
-	 * Tail-chunk cursor (in-memory only; not serialized).
-	 *
-	 * The chunk-locator __sm_get_chunk_offset() is the dominant cost
-	 * for ascending-order builds and forward iteration when the map
-	 * has many chunks (high-cardinality TID postings can produce
-	 * 100k+ single-bit chunks).  Without a cursor, every lookup walks
-	 * from chunk 0 -- O(N) per call, O(N^2) per build.
-	 *
-	 * The cursor caches the (offset, chunk_index, start_idx) of the
-	 * last chunk returned by __sm_get_chunk_offset().  When the next
-	 * lookup's idx is >= that chunk's start, we resume the walk from
-	 * the cursor instead of from the head.  For ascending workloads
-	 * this collapses each lookup to O(1) amortized.
-	 *
-	 * Invalidation: any operation that shifts chunk bytes at or
-	 * before the cursor's offset.  See __sm_insert_data and
-	 * __sm_remove_data for the policy.
-	 *
-	 * In-memory only.  sm_init / sm_open / sm_clear / sm_create all
-	 * start with m_cursor_valid = 0 (zero-init covers most paths).
-	 * sm_copy / sm_owned_copy / sm_deserialize get fresh maps and
-	 * therefore fresh cursors.
-	 *
-	 * NB: the SHARED on-disk format is m_data; the cursor lives only
-	 * in this in-memory struct and is not part of any serialization.
-	 */
-	size_t m_cursor_offset;
-	size_t m_cursor_chunk_index;
-	__sm_idx_t m_cursor_start_idx;
-	uint8_t m_cursor_valid;
-	/*
-	 * m_alloc_kind tags how m_data was provisioned.  See enum
-	 * sm_alloc_kind below.  Used by sm_set_data_size and
-	 * sm_free to know whether the library may realloc / free
-	 * the buffer.  Pre-v1 maps that predate this field would have
-	 * m_alloc_kind == SM_OWNED_CONTIGUOUS == 0 by zero-initialization,
-	 * which matches their actual lineage (everyone allocated via
-	 * sparsemap()).
-	 */
-	uint8_t m_alloc_kind;
-	/*
-	 * Per-map allocator (v2.2+).  Held by value: the map carries its
-	 * own copy of the hooks so the caller's source struct can go out
-	 * of scope without invalidating the map.
-	 *
-	 * Sentinel: m_allocator.alloc == NULL means "use libc".  Other
-	 * function pointers are checked individually at each call site,
-	 * so an allocator can implement only a subset and let libc handle
-	 * the rest.
-	 */
-	sm_allocator_t m_allocator;
-};
+/*
+ * struct sparsemap is defined in <sm.h> (visible here because this
+ * file defines SM_INTERNAL before including it; consumers get it via
+ * SM_EXPOSE_STRUCT).  Keeping the single definition in the header
+ * lets callers embed an sm_t by value without the layout drifting
+ * from the library.
+ */
 
 /*
  * Allocation lineage.  Tracked per sm_t so the grow / dispose
@@ -751,14 +783,11 @@ enum sm_alloc_kind {
 /* -------------------------------------------------------------------
  * Allocator hooks
  *
- * Sparsemap routes every malloc/realloc/free through these helpers.
- * Each helper takes a const sm_allocator_t * which points at either
- * a per-map field (&map->m_allocator) or the global default.
- *
- * Within an allocator any individual function pointer may be NULL;
- * the helper falls back to libc for that operation.  This means an
- * all-zero sm_allocator_t means "use libc throughout", and a partial
- * allocator (e.g. only `free` overridden) works as expected.
+ * Sparsemap routes every malloc/realloc/free through these helpers,
+ * which consult a single process-global allocator (CRoaring style).
+ * Any individual hook may be NULL; the helper falls back to libc for
+ * that operation.  An all-zero allocator therefore means "use libc
+ * throughout", which is the default.
  * ------------------------------------------------------------------- */
 
 static sm_allocator_t __sm_g_allocator = { 0 };
@@ -770,24 +799,18 @@ sm_set_allocator(sm_allocator_t a)
 }
 
 static inline void *
-__sm_alloc(const sm_allocator_t *a, size_t n)
+__sm_alloc(size_t n)
 {
-	if (a != NULL && a->alloc != NULL) {
-		return (a->alloc(n, a->aux));
+	if (__sm_g_allocator.malloc != NULL) {
+		return (__sm_g_allocator.malloc(n));
 	}
 	return (malloc(n));
 }
 
 static inline void *
-__sm_alloc_zero(const sm_allocator_t *a, size_t n)
+__sm_alloc_zero(size_t n)
 {
-	if (a != NULL && a->alloc_zero != NULL) {
-		return (a->alloc_zero(n, a->aux));
-	}
-	/* Fall back to alloc + memset.  Use the same allocator's alloc()
-	 * (so a per-map override stays in-family) and only fall through to
-	 * libc if even that one is NULL. */
-	void *p = __sm_alloc(a, n);
+	void *p = __sm_alloc(n);
 	if (p != NULL) {
 		memset(p, 0, n);
 	}
@@ -795,22 +818,62 @@ __sm_alloc_zero(const sm_allocator_t *a, size_t n)
 }
 
 static inline void *
-__sm_realloc(const sm_allocator_t *a, void *p, size_t n)
+__sm_realloc(void *p, size_t n)
 {
-	if (a != NULL && a->realloc != NULL) {
-		return (a->realloc(p, n, a->aux));
+	if (__sm_g_allocator.realloc != NULL) {
+		return (__sm_g_allocator.realloc(p, n));
 	}
 	return (realloc(p, n));
 }
 
 static inline void
-__sm_free(const sm_allocator_t *a, void *p)
+__sm_free(void *p)
 {
-	if (a != NULL && a->free != NULL) {
-		a->free(p, a->aux);
+	if (__sm_g_allocator.free != NULL) {
+		__sm_g_allocator.free(p);
 		return;
 	}
 	free(p);
+}
+
+/* -------------------------------------------------------------------
+ * Capacity / lineage accessors
+ *
+ * The allocation-lineage tag (how m_data was provisioned) is folded
+ * into the low 3 bits of m_capacity.  Capacity is always rounded up to
+ * an 8-byte boundary before being stored, so those bits are free.
+ * Read the byte capacity with __sm_cap() and the lineage with
+ * __sm_kind(); never touch m_capacity directly.
+ * ------------------------------------------------------------------- */
+
+static inline size_t
+__sm_cap(const sm_t *m)
+{
+	return (m->m_capacity & ~(size_t)7);
+}
+
+static inline uint8_t
+__sm_kind(const sm_t *m)
+{
+	return ((uint8_t)(m->m_capacity & 7u));
+}
+
+static inline void
+__sm_set_cap_kind(sm_t *m, size_t cap, uint8_t kind)
+{
+	/* Round capacity DOWN to an 8-byte boundary so the tag bits are
+	 * free and we never report more usable bytes than the buffer
+	 * actually has.  Library-owned allocators round the allocation
+	 * size UP before calling here, so for them this is a no-op; for
+	 * caller-supplied (wrapped) buffers a non-8-aligned size loses up
+	 * to 7 trailing bytes, which is the documented behavior. */
+	m->m_capacity = (cap & ~(size_t)7) | (kind & 7u);
+}
+
+static inline void
+__sm_set_kind(sm_t *m, uint8_t kind)
+{
+	m->m_capacity = (m->m_capacity & ~(size_t)7) | (kind & 7u);
 }
 
 /*
@@ -818,10 +881,11 @@ __sm_free(const sm_allocator_t *a, void *p)
  * SPARSEMAP_TESTING / SPARSEMAP_DIAGNOSTIC it asserts:
  *
  *   - map is non-NULL
- *   - m_data is non-NULL when m_capacity > 0
- *   - m_data_used <= m_capacity (no buffer overrun)
+ *   - m_data is non-NULL when the byte capacity > 0
+ *   - m_data_used <= byte capacity (no buffer overrun)
  *   - m_data is 8-byte aligned (the chunk codec assumes this)
- *   - m_alloc_kind is one of the three known values
+ *   - the lineage tag (low bits of m_capacity) is one of the three
+ *     known values
  *
  * The intent is to fail at the moment a corrupted map is touched,
  * rather than three operations later when the libc heap finally
@@ -835,12 +899,12 @@ __sm_check_invariants(const struct sparsemap *map)
 		__sm_assert(map != NULL);
 		if (map == NULL)
 			return;
-		__sm_assert(map->m_capacity == 0 || map->m_data != NULL);
-		__sm_assert(map->m_data_used <= map->m_capacity);
+		__sm_assert(__sm_cap(map) == 0 || map->m_data != NULL);
+		__sm_assert(map->m_data_used <= __sm_cap(map));
 		__sm_assert(IS_8_BYTE_ALIGNED(map->m_data));
-		__sm_assert(map->m_alloc_kind == SM_OWNED_CONTIGUOUS ||
-		    map->m_alloc_kind == SM_WRAPPED ||
-		    map->m_alloc_kind == SM_OWNED_SPLIT);
+		__sm_assert(__sm_kind(map) == SM_OWNED_CONTIGUOUS ||
+		    __sm_kind(map) == SM_WRAPPED ||
+		    __sm_kind(map) == SM_OWNED_SPLIT);
 	});
 }
 
@@ -1772,7 +1836,7 @@ __sm_get_chunk_count(const sm_t *map)
 	if (map->m_data_used < SM_SIZEOF_OVERHEAD) {
 		return (0);
 	}
-	return (__sm_load_u32(&map->m_data[0]));
+	return ((size_t)__sm_load_u64(&map->m_data[0]));
 }
 
 /**
@@ -1911,7 +1975,7 @@ __sm_get_size_impl(const sm_t *map)
 {
 	uint8_t *start = __sm_get_chunk_data(map, 0);
 	uint8_t *p = start;
-	uint8_t *end = map->m_data + map->m_capacity;
+	uint8_t *end = map->m_data + __sm_cap(map);
 
 	/* Defensive: a chunk-data start outside the data buffer means the
 	 * map header itself is corrupt.  Return the empty-map size. */
@@ -1972,53 +2036,26 @@ __sm_get_size_impl(const sm_t *map)
  *
  * @param[in] map The sparse map to search within.
  * @param[in] idx The index to find the corresponding chunk offset for.
+ * @param[in,out] cur Optional caller-owned cursor; NULL = no acceleration.
  * @return The offset of the chunk if found, otherwise -1 if no appropriate chunk is found.
  *
- * Tail-chunk cursor optimization:
+ * Read-cursor optimization:
  *
- * The original implementation walked from chunk 0 on every call.
- * For a map with N chunks this is O(N) per lookup.  Build paths
- * that call sm_set for every index in ascending order are then
- * O(N^2), which dominates large-cardinality builds.  We cache
- * the (offset, chunk_index, start) of the most-recently-returned
- * chunk in three in-memory-only fields on the sm_t struct,
- * and resume the walk from there when the new idx is at or after
- * the cursor's chunk start.  For random-order inserts the cursor's
- * preconditions don't hold and we fall back to a full walk.
+ * The naive implementation walks from chunk 0 on every call.  For a
+ * map with N chunks this is O(N) per lookup, so a sequence of N
+ * ascending lookups is O(N^2).  When the caller threads a cursor
+ * (see sm_cursor_t) the walk resumes from the most-recently-located
+ * chunk whenever the new idx is at or after that chunk's start,
+ * making an ascending sequence O(N) overall.  Passing NULL (every
+ * mutator does) walks from chunk 0.
  *
- * The cursor is invalidated whenever __sm_insert_data or
- * __sm_remove_data shifts bytes at or before the cached offset,
- * and reset by sm_clear / sm_init / sm_open / sm_open_copy /
- * sm_create / sm_copy / sm_owned_copy / sm_deserialize /
- * __sm_replace_buffer / sm_split (both halves) / __sm_coalesce_map.
- *
- * The cursor is purely an in-memory speedup; the on-disk format
- * is unchanged, and a freshly-deserialized map starts with an
- * invalid cursor and rebuilds it on first use.
+ * The cursor is caller-owned and purely an in-memory speedup; the
+ * on-disk format is unchanged.  ANY mutation of the map invalidates
+ * the caller's cursor (the caller must reset it); the library no
+ * longer tracks cursor validity in the struct.
  */
-static inline void
-__sm_cursor_invalidate(const sm_t *map_ro)
-{
-	/* Cursor lives on the in-memory struct only; const-cast is safe
-	 * because we never publish a const pointer that aliases the
-	 * mutable fields outside the library. */
-	sm_t *m = (sm_t *)map_ro;
-	m->m_cursor_valid = 0;
-}
-
-static inline void
-__sm_cursor_record(const sm_t *map_ro, size_t offset, size_t chunk_index,
-    __sm_idx_t start)
-{
-	sm_t *m = (sm_t *)map_ro;
-	m->m_cursor_offset = offset;
-	m->m_cursor_chunk_index = chunk_index;
-	m->m_cursor_start_idx = start;
-	m->m_cursor_valid = 1;
-}
-
 static ssize_t
-__sm_get_chunk_offset(const sm_t *map, const uint64_t idx)
+__sm_get_chunk_offset(const sm_t *map, const uint64_t idx, sm_cursor_t *cur)
 {
 	const size_t count = __sm_get_chunk_count(map);
 
@@ -2028,40 +2065,57 @@ __sm_get_chunk_offset(const sm_t *map, const uint64_t idx)
 
 	uint8_t *base = __sm_get_chunk_data(map, 0);
 	uint8_t *p = base;
-	size_t i = 0;
+	/* Offsets returned here are relative to `base` (the first chunk);
+	 * m_data_used is relative to m_data and includes the
+	 * SM_SIZEOF_OVERHEAD chunk-count header, so the chunk stream
+	 * occupies [0, stream_end) in base-relative offsets.  Bounding the
+	 * walk by stream_end is correct no matter where we resume from
+	 * (unlike an ordinal count, which would over-run when resuming
+	 * partway through the chunk list). */
+	const size_t stream_end = (size_t)map->m_data_used - SM_SIZEOF_OVERHEAD;
 
 	/*
-	 * Cursor fast-path.  If the cursor is valid, references a
-	 * still-existing chunk, and the lookup idx is at or after the
-	 * cursor's chunk start, resume the walk from the cursor instead
-	 * of from the head.  Otherwise (cursor stale or idx earlier than
-	 * the cursor's chunk start) fall through to a full walk from 0.
+	 * Cursor fast-path.  If the caller passed a valid cursor whose
+	 * cached chunk starts at or before idx, resume the walk from the
+	 * cached byte offset instead of from the head.  Otherwise walk
+	 * from chunk 0.  We never index chunks by ordinal here, so a
+	 * relocated buffer is fine as long as the offset is still in range.
 	 */
-	if (map->m_cursor_valid && map->m_cursor_chunk_index < count &&
-	    idx >= map->m_cursor_start_idx) {
-		p = base + map->m_cursor_offset;
-		i = map->m_cursor_chunk_index;
+	if (cur != NULL && cur->offset != SIZE_MAX &&
+	    cur->offset + sizeof(__sm_idx_t) <= stream_end &&
+	    idx >= cur->start_idx) {
+		/* Self-validate the cached offset before trusting it: a prior
+		 * mutation (a chunk shrinking to RLE, a leftward coalesce, a
+		 * separate) can shift or remove the cached chunk without the
+		 * caller resetting.  If the chunk now at the cached offset no
+		 * longer starts where we recorded, the cursor is stale -- walk
+		 * from the head instead. */
+		const __sm_idx_t at = __sm_load_idx(base + cur->offset);
+		if (at == cur->start_idx) {
+			p = base + cur->offset;
+		}
 	}
 
-	for (; i < count - 1; i++) {
+	/* Walk to the chunk that contains idx, or the last chunk if idx is
+	 * past the end. */
+	for (;;) {
 		const __sm_idx_t s = __sm_load_idx((const uint8_t *)p);
 		__sm_chunk_t chunk;
 		__sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
 		__sm_assert(s == __sm_get_chunk_aligned_offset(s));
-		if (idx >= s + __sm_chunk_get_capacity(&chunk)) {
-			p += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&chunk);
-		} else {
-			__sm_cursor_record(map, (size_t)(p - base), i, s);
-			return (p - base);
+		const size_t next_off = (size_t)(p - base) +
+		    SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&chunk);
+		if (idx >= s + __sm_chunk_get_capacity(&chunk) &&
+		    next_off < stream_end) {
+			p = base + next_off;
+			continue;
 		}
+		if (cur != NULL) {
+			cur->offset = (size_t)(p - base);
+			cur->start_idx = s;
+		}
+		return (p - base);
 	}
-
-	/* Fell through: p points at the last chunk (count - 1). */
-	{
-		const __sm_idx_t s = __sm_load_idx((const uint8_t *)p);
-		__sm_cursor_record(map, (size_t)(p - base), count - 1, s);
-	}
-	return (p - base);
 }
 
 /**
@@ -2076,7 +2130,7 @@ __sm_get_chunk_offset(const sm_t *map, const uint64_t idx)
 static void
 __sm_set_chunk_count(const sm_t *map, const size_t new_count)
 {
-	__sm_store_u32((uint8_t *)&map->m_data[0], (uint32_t)new_count);
+	__sm_store_u64((uint8_t *)&map->m_data[0], (uint64_t)new_count);
 }
 
 /**
@@ -2093,7 +2147,7 @@ __sm_set_chunk_count(const sm_t *map, const size_t new_count)
 static void
 __sm_append_data(sm_t *map, const uint8_t *buffer, const size_t buffer_size)
 {
-	__sm_assert(map->m_data_used + buffer_size <= map->m_capacity);
+	__sm_assert(map->m_data_used + buffer_size <= __sm_cap(map));
 
 	memcpy(&map->m_data[map->m_data_used], buffer, buffer_size);
 	map->m_data_used += buffer_size;
@@ -2116,21 +2170,8 @@ static void
 __sm_insert_data(sm_t *map, const size_t offset, const uint8_t *buffer,
     const size_t buffer_size)
 {
-	__sm_assert(map->m_data_used + buffer_size <= map->m_capacity);
+	__sm_assert(map->m_data_used + buffer_size <= __sm_cap(map));
 	__sm_assert(offset <= map->m_data_used);
-
-	/*
-	 * Invalidate the tail-chunk cursor if the insertion lands at or
-	 * before the cursor's chunk.  Insertions strictly after
-	 * m_cursor_offset either grow the cursor's chunk (offset inside
-	 * its body) or appear in a later chunk -- either way the cursor's
-	 * (offset, chunk_index, start) remain accurate.  Insertions at
-	 * exactly m_cursor_offset displace the cursor's chunk forward,
-	 * so we must invalidate.
-	 */
-	if (map->m_cursor_valid && offset <= map->m_cursor_offset) {
-		map->m_cursor_valid = 0;
-	}
 
 	uint8_t *p = __sm_get_chunk_data(map, offset);
 	memmove(p + buffer_size, p, map->m_data_used - offset);
@@ -2152,16 +2193,6 @@ static void
 __sm_remove_data(sm_t *map, const size_t offset, const size_t gap_size)
 {
 	__sm_assert(map->m_data_used >= gap_size);
-	/*
-	 * Mirror __sm_insert_data: removals at or before the cursor
-	 * either erase the cursor's chunk header outright (offset ==
-	 * cursor) or shift it leftward (offset < cursor).  In either
-	 * case the cached (offset, chunk_index) is no longer trustworthy.
-	 * Removals strictly after the cursor leave it valid.
-	 */
-	if (map->m_cursor_valid && offset <= map->m_cursor_offset) {
-		map->m_cursor_valid = 0;
-	}
 	uint8_t *p = __sm_get_chunk_data(map, offset);
 	memmove(p, p + gap_size, map->m_data_used - offset - gap_size);
 	map->m_data_used -= gap_size;
@@ -2225,7 +2256,7 @@ __sm_coalesce_chunk(sm_t *map, __sm_chunk_t *chunk, size_t offset,
 		/* Is there a previous chunk? */
 		if (offset > 0) {
 			const size_t adj_offset =
-			    __sm_get_chunk_offset(map, start - 1);
+			    __sm_get_chunk_offset(map, start - 1, NULL);
 			if (adj_offset < offset) {
 				uint8_t *adj_p =
 				    __sm_get_chunk_data(map, adj_offset);
@@ -2995,7 +3026,7 @@ __sm_separate_rle_chunk(sm_t *map, __sm_chunk_sep_t *sep, const uint64_t idx,
 		return (-1);
 	}
 	sep->expand_by = total - base;
-	if (map->m_data_used + sep->expand_by > map->m_capacity) {
+	if (map->m_data_used + sep->expand_by > __sm_cap(map)) {
 		errno = ENOSPC;
 		return (-1);
 	}
@@ -3030,9 +3061,8 @@ sm_clear(sm_t *map)
 	if (map == NULL) {
 		return;
 	}
-	memset(map->m_data, 0, map->m_capacity);
+	memset(map->m_data, 0, __sm_cap(map));
 	map->m_data_used = SM_SIZEOF_OVERHEAD;
-	__sm_cursor_invalidate(map);
 	__sm_set_chunk_count(map, 0);
 }
 
@@ -3067,15 +3097,13 @@ sparsemap(size_t size)
 sm_t *
 sm_create(size_t size)
 {
-	return (sm_create_with_allocator(size, (sm_allocator_t) { 0 }));
-}
-
-sm_t *
-sm_create_with_allocator(size_t size, sm_allocator_t a)
-{
 	if (size == 0) {
 		size = 1024;
 	}
+
+	/* Round up to an 8-byte boundary so the data region we allocate
+	 * and the (low-bit-tagged) stored capacity agree exactly. */
+	size = (size + 7u) & ~(size_t)7;
 
 	const size_t data_size = size * sizeof(uint8_t);
 
@@ -3084,19 +3112,7 @@ sm_create_with_allocator(size_t size, sm_allocator_t a)
 	const size_t padding = total_size % 8 == 0 ? 0 : 8 - (total_size % 8);
 	total_size += padding;
 
-	/* Resolve the effective allocator for this map.  An all-zero `a`
-	 * (caller passed nothing or used `(sm_allocator_t){0}`) means
-	 * "snapshot the global at construction time".  After this point
-	 * the resolved allocator is frozen into m_allocator and never
-	 * consulted from the global again, so the map keeps using the
-	 * same allocator across its lifetime even if the caller mutates
-	 * the global later. */
-	if (a.alloc == NULL && a.alloc_zero == NULL && a.realloc == NULL &&
-	    a.free == NULL) {
-		a = __sm_g_allocator;
-	}
-
-	sm_t *map = (sm_t *)__sm_alloc_zero(&a, total_size);
+	sm_t *map = (sm_t *)__sm_alloc_zero(total_size);
 	if (map) {
 		uint8_t *data = (uint8_t *)(((uintptr_t)map + sizeof(sm_t)) &
 		    ~(uintptr_t)7);
@@ -3106,8 +3122,7 @@ sm_create_with_allocator(size_t size, sm_allocator_t a)
 		 * buffer); override here because the buffer is contiguous with the
 		 * struct and we own both.
 		 */
-		map->m_alloc_kind = SM_OWNED_CONTIGUOUS;
-		map->m_allocator = a;
+		__sm_set_kind(map, SM_OWNED_CONTIGUOUS);
 		__sm_when_diag(
 		    { __sm_assert(IS_8_BYTE_ALIGNED(map->m_data)); });
 	}
@@ -3130,15 +3145,14 @@ sm_free(sm_t *map)
 	if (map == NULL) {
 		return;
 	}
-	const sm_allocator_t *a = &map->m_allocator;
-	switch (map->m_alloc_kind) {
+	switch (__sm_kind(map)) {
 	case SM_OWNED_SPLIT:
-		__sm_free(a, map->m_data);
+		__sm_free(map->m_data);
 		/* fallthrough */
 	case SM_OWNED_CONTIGUOUS:
 	case SM_WRAPPED:
 	default:
-		__sm_free(a, map);
+		__sm_free(map);
 		break;
 	}
 }
@@ -3163,8 +3177,7 @@ sm_owned_copy(const sm_t *map)
 		return (NULL);
 	}
 	out->m_data_used = map->m_data_used;
-	/* m_capacity is already cap; m_alloc_kind is SM_OWNED_CONTIGUOUS.
-	 * Cursor was zeroed by sm_create's calloc; leave it invalid. */
+	/* m_capacity is already cap; lineage is SM_OWNED_CONTIGUOUS. */
 	if (cap > 0 && map->m_data != NULL) {
 		memcpy(out->m_data, map->m_data, cap);
 	}
@@ -3187,10 +3200,8 @@ sm_copy(const sm_t *other)
 	const size_t cap = sm_get_capacity(other);
 	sm_t *map = sparsemap(cap);
 	if (map) {
-		map->m_capacity = other->m_capacity;
+		__sm_set_cap_kind(map, cap, SM_OWNED_CONTIGUOUS);
 		map->m_data_used = other->m_data_used;
-		/* m_alloc_kind is already SM_OWNED_CONTIGUOUS from sparsemap().
-		 * Cursor stays at its zero-initialized invalid state. */
 		memcpy(map->m_data, other->m_data, cap);
 	}
 	return (map);
@@ -3211,13 +3222,11 @@ sm_wrap(uint8_t *data, const size_t size)
 {
 	/* Wrap allocates only the struct (caller owns the data buffer);
 	 * route through the global allocator so sm_free works correctly. */
-	sm_t *map = (sm_t *)__sm_alloc_zero(&__sm_g_allocator, sizeof(sm_t));
+	sm_t *map = (sm_t *)__sm_alloc_zero(sizeof(sm_t));
 	if (map) {
 		map->m_data = data;
 		map->m_data_used = 0;
-		map->m_capacity = size;
-		map->m_alloc_kind = SM_WRAPPED;
-		map->m_allocator = __sm_g_allocator;
+		__sm_set_cap_kind(map, size, SM_WRAPPED);
 	}
 	return (map);
 }
@@ -3237,8 +3246,7 @@ sm_init(sm_t *map, uint8_t *data, const size_t size)
 {
 	map->m_data = data;
 	map->m_data_used = 0;
-	map->m_capacity = size;
-	__sm_cursor_invalidate(map);
+	__sm_set_cap_kind(map, size, SM_WRAPPED);
 	/*
 	 * Caller-allocated struct + caller-allocated buffer.  The buffer is
 	 * not owned by the library; sm_set_data_size will treat any
@@ -3246,7 +3254,6 @@ sm_init(sm_t *map, uint8_t *data, const size_t size)
 	 * to SM_OWNED_SPLIT).  sparsemap() overrides this to
 	 * SM_OWNED_CONTIGUOUS after calling us.
 	 */
-	map->m_alloc_kind = SM_WRAPPED;
 	sm_clear(map);
 }
 
@@ -3264,9 +3271,8 @@ void
 sm_open(sm_t *map, uint8_t *data, const size_t size)
 {
 	map->m_data = data;
-	__sm_cursor_invalidate(map);
 	/*
-	 * Set m_capacity and a temporary m_data_used = m_capacity *before*
+	 * Set m_capacity and a temporary m_data_used = capacity *before*
 	 * calling __sm_get_size_impl.  __sm_get_size_impl walks chunks via
 	 * __sm_get_chunk_count, which since v1.0.0 short-circuits to 0
 	 * when m_data_used < SM_SIZEOF_OVERHEAD (the empty-map guard for
@@ -3275,15 +3281,13 @@ sm_open(sm_t *map, uint8_t *data, const size_t size)
 	 * a stunt-map with m_data_used = 4 -- which then trips a size_t
 	 * underflow downstream when something tries to insert at the
 	 * supposed-end of the chunks region.
-	 */
-	map->m_capacity = size;
-	map->m_data_used = size;
-	map->m_data_used = __sm_get_size_impl(map);
-	/*
+	 *
 	 * sm_open is for deserializing into a caller-supplied
-	 * struct + buffer; lineage matches sm_init.
+	 * struct + buffer; lineage matches sm_init (SM_WRAPPED).
 	 */
-	map->m_alloc_kind = SM_WRAPPED;
+	__sm_set_cap_kind(map, size, SM_WRAPPED);
+	map->m_data_used = __sm_cap(map);
+	map->m_data_used = __sm_get_size_impl(map);
 }
 
 sm_t *
@@ -3302,9 +3306,9 @@ sm_open_copy(const uint8_t *data, size_t n, size_t slack)
 	if (n > 0) {
 		memcpy(sm_get_data(m), data, n);
 		/* sm_open re-derives m_data_used from the chunk count + walk;
-		 * temporarily set m_data_used = m_capacity so the empty-map guard
+		 * temporarily set m_data_used = capacity so the empty-map guard
 		 * in __sm_get_chunk_count doesn't short-circuit during the walk. */
-		m->m_data_used = cap;
+		m->m_data_used = __sm_cap(m);
 		m->m_data_used = __sm_get_size_impl(m);
 	}
 	/* sm_open's regular implementation transitions the lineage to
@@ -3312,7 +3316,7 @@ sm_open_copy(const uint8_t *data, size_t n, size_t slack)
 	 * because we got it from sm_create.  Restore the correct lineage so
 	 * sm_free does the right thing and so subsequent grows can use the
 	 * single-block realloc path. */
-	m->m_alloc_kind = SM_OWNED_CONTIGUOUS;
+	__sm_set_kind(m, SM_OWNED_CONTIGUOUS);
 	return (m);
 }
 
@@ -3367,20 +3371,19 @@ sm_set_data_size(sm_t *map, uint8_t *data, const size_t size)
 		if (data != map->m_data) {
 			map->m_data = data;
 		}
-		map->m_capacity = size;
-		map->m_alloc_kind = SM_WRAPPED;
-		/* New buffer (caller-supplied) means cursor offsets are stale. */
-		__sm_cursor_invalidate(map);
+		__sm_set_cap_kind(map, size, SM_WRAPPED);
 		return (map);
 	}
 
-	/* Library-managed resize.  Branch on lineage and direction.
-	 * Use the per-map allocator (held by value in m_allocator) for
-	 * every alloc. */
-	const sm_allocator_t *eff = &map->m_allocator;
-	switch (map->m_alloc_kind) {
+	/* Library-managed resize.  Round the requested size up to an
+	 * 8-byte boundary so the allocated buffer and the stored (low-bit-
+	 * tagged) capacity agree exactly; __sm_set_cap_kind rounds down,
+	 * so an already-aligned size round-trips unchanged. */
+	const size_t asize = (size + 7u) & ~(size_t)7;
+	const size_t cur_cap = __sm_cap(map);
+	switch (__sm_kind(map)) {
 	case SM_OWNED_CONTIGUOUS: {
-		if (size == map->m_capacity) {
+		if (size == cur_cap) {
 			return (map);
 		}
 		/*
@@ -3393,8 +3396,8 @@ sm_set_data_size(sm_t *map, uint8_t *data, const size_t size)
 		    total_size % 8 == 0 ? 0 : 8 - (total_size % 8);
 		total_size += padding;
 
-		const size_t old_capacity = map->m_capacity;
-		sm_t *m = (sm_t *)__sm_realloc(eff, map, total_size);
+		const size_t old_capacity = cur_cap;
+		sm_t *m = (sm_t *)__sm_realloc(map, total_size);
 		if (!m) {
 			/* Original block still valid; leave map untouched. */
 			return (NULL);
@@ -3406,37 +3409,34 @@ sm_set_data_size(sm_t *map, uint8_t *data, const size_t size)
 			memset(m->m_data + old_capacity, 0,
 			    size - old_capacity);
 		}
-		m->m_capacity = size;
+		__sm_set_cap_kind(m, size, SM_OWNED_CONTIGUOUS);
 		/*
 		 * m_data_used does not change on grow; on shrink the caller is
 		 * responsible for ensuring m_data_used <= size before calling.
 		 */
-		if (m->m_data_used > size) {
-			m->m_data_used = size;
-			m->m_cursor_valid = 0;
+		if (m->m_data_used > __sm_cap(m)) {
+			m->m_data_used = __sm_cap(m);
 		}
 		__sm_when_diag({ __sm_assert(IS_8_BYTE_ALIGNED(m->m_data)); });
 		return (m);
 	}
 
 	case SM_OWNED_SPLIT: {
-		if (size == map->m_capacity) {
+		if (size == cur_cap) {
 			return (map);
 		}
 		uint8_t *new_data =
-		    (uint8_t *)__sm_realloc(eff, map->m_data, size);
+		    (uint8_t *)__sm_realloc(map->m_data, size);
 		if (!new_data) {
 			return (NULL);
 		}
-		if (size > map->m_capacity) {
-			memset(new_data + map->m_capacity, 0,
-			    size - map->m_capacity);
+		if (size > cur_cap) {
+			memset(new_data + cur_cap, 0, size - cur_cap);
 		}
 		map->m_data = new_data;
-		map->m_capacity = size;
-		if (map->m_data_used > size) {
-			map->m_data_used = size;
-			map->m_cursor_valid = 0;
+		__sm_set_cap_kind(map, size, SM_OWNED_SPLIT);
+		if (map->m_data_used > __sm_cap(map)) {
+			map->m_data_used = __sm_cap(map);
 		}
 		return (map);
 	}
@@ -3445,13 +3445,13 @@ sm_set_data_size(sm_t *map, uint8_t *data, const size_t size)
 		/*
 		 * Caller owns m_data.  Two cases:
 		 *
-		 *   size <= m_capacity (shrink or same):
+		 *   size <= capacity (shrink or same):
 		 *     We do not own the buffer, so we cannot realloc/free it.  Just
-		 *     update m_capacity to record "use no more than `size` bytes
-		 *     of the caller's buffer".  The caller's buffer is unchanged
-		 *     and remains theirs to free.
+		 *     update the recorded capacity to "use no more than `size`
+		 *     bytes of the caller's buffer".  The caller's buffer is
+		 *     unchanged and remains theirs to free.
 		 *
-		 *   size > m_capacity (grow):
+		 *   size > capacity (grow):
 		 *     Allocate a fresh library-owned buffer of the requested size,
 		 *     copy the in-use prefix (m_data_used bytes), redirect m_data,
 		 *     transition lineage to SM_OWNED_SPLIT.  The caller's original
@@ -3459,34 +3459,29 @@ sm_set_data_size(sm_t *map, uint8_t *data, const size_t size)
 		 *
 		 *     This is the path that fixes the heisenbug from
 		 *     HEISENBUG_REPORT.md: pre-fix, the function silently set
-		 *     m_capacity = size without allocating storage, and the next
+		 *     the capacity without allocating storage, and the next
 		 *     sm_add corrupted the heap.
 		 */
-		if (size <= map->m_capacity) {
-			map->m_capacity = size;
-			if (map->m_data_used > size) {
-				map->m_data_used = size;
-				map->m_cursor_valid = 0;
+		if (size <= cur_cap) {
+			__sm_set_cap_kind(map, size, SM_WRAPPED);
+			if (map->m_data_used > __sm_cap(map)) {
+				map->m_data_used = __sm_cap(map);
 			}
 			return (map);
 		}
 
-		uint8_t *new_data = (uint8_t *)__sm_alloc_zero(eff, size);
+		uint8_t *new_data = (uint8_t *)__sm_alloc_zero(asize);
 		if (!new_data) {
 			return (NULL);
 		}
-		const size_t copy_bytes = map->m_data_used <= map->m_capacity ?
+		const size_t copy_bytes = map->m_data_used <= cur_cap ?
 		    map->m_data_used :
-		    map->m_capacity;
+		    cur_cap;
 		if (copy_bytes > 0 && map->m_data != NULL) {
 			memcpy(new_data, map->m_data, copy_bytes);
 		}
 		map->m_data = new_data;
-		map->m_capacity = size;
-		map->m_alloc_kind = SM_OWNED_SPLIT;
-		/* Buffer relocated; cursor offsets are still valid as offsets,
-		 * and we copied the in-use prefix verbatim.  Leave the cursor
-		 * untouched. */
+		__sm_set_cap_kind(map, asize, SM_OWNED_SPLIT);
 		return (map);
 	}
 	}
@@ -3511,14 +3506,14 @@ sm_set_data_size(sm_t *map, uint8_t *data, const size_t size)
 double
 sm_capacity_remaining(const sm_t *map)
 {
-	if (map->m_data_used >= map->m_capacity) {
+	const size_t cap = __sm_cap(map);
+	if (map->m_data_used >= cap) {
 		return (0);
 	}
-	if (map->m_capacity == 0) {
+	if (cap == 0) {
 		return (100.0);
 	}
-	return ((1.0 - ((double)map->m_data_used / (double)map->m_capacity)) *
-	    100.0);
+	return ((1.0 - ((double)map->m_data_used / (double)cap)) * 100.0);
 }
 
 /**
@@ -3533,7 +3528,7 @@ sm_capacity_remaining(const sm_t *map)
 size_t
 sm_get_capacity(const sm_t *map)
 {
-	return (map->m_capacity);
+	return (__sm_cap(map));
 }
 
 /* -------------------------------------------------------------------
@@ -3552,7 +3547,7 @@ sm_get_capacity(const sm_t *map)
  * @return True if the bit is set, false otherwise.
  */
 __attribute__((hot)) bool
-sm_contains(sm_t *map, uint64_t idx)
+sm_contains(const sm_t *map, uint64_t idx, sm_cursor_t *cur)
 {
 	/* Defensive: NULL or empty maps contain nothing.  Accepting NULL is
 	 * cheap insurance for consumers that pass the result of
@@ -3561,10 +3556,10 @@ sm_contains(sm_t *map, uint64_t idx)
 	if (map == NULL) {
 		return (false);
 	}
-	__sm_assert(sm_get_size(map) >= SM_SIZEOF_OVERHEAD);
+	__sm_assert(sm_get_size((sm_t *)map) >= SM_SIZEOF_OVERHEAD);
 
 	/* Get the __sm_chunk_t which manages this index */
-	const ssize_t offset = __sm_get_chunk_offset(map, idx);
+	const ssize_t offset = __sm_get_chunk_offset(map, idx, cur);
 
 	/* No __sm_chunk_t's available -> the bit is not set */
 	if (offset == -1) {
@@ -3615,7 +3610,7 @@ __sm_map_unset(sm_t *map, uint64_t idx, const bool coalesce)
 	SM_ENOUGH_SPACE(SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t));
 
 	/* Determine if there is a chunk that could contain this index. */
-	size_t offset = __sm_get_chunk_offset(map, idx);
+	size_t offset = __sm_get_chunk_offset(map, idx, NULL);
 	size_t chunk_offset = offset;
 
 	if ((ssize_t)offset == -1) {
@@ -3847,7 +3842,7 @@ __sparsemap_add(sm_t *map, const uint64_t idx, uint8_t *p, size_t offset,
  * @return Returns the adjusted index within the sparse bit map or the given index.
  */
 static __sm_idx_t
-__sm_map_set(sm_t *map, uint64_t idx, const bool coalesce)
+__sm_map_set(sm_t *map, uint64_t idx, const bool coalesce, sm_cursor_t *cur)
 {
 	__sm_chunk_t chunk;
 	uint64_t ret_idx = idx;
@@ -3862,7 +3857,7 @@ __sm_map_set(sm_t *map, uint64_t idx, const bool coalesce)
 	SM_ENOUGH_SPACE(SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t));
 
 	/* Determine if there is a chunk that could contain this index. */
-	size_t offset = __sm_get_chunk_offset(map, idx);
+	size_t offset = __sm_get_chunk_offset(map, idx, cur);
 
 	if ((ssize_t)offset == -1) {
 		/*
@@ -4065,7 +4060,30 @@ done:;
 __attribute__((hot)) uint64_t
 sm_add(sm_t *map, const uint64_t idx)
 {
-	return (__sm_map_set(map, idx, true));
+	return (__sm_map_set(map, idx, true, NULL));
+}
+
+/* Cursor-threading variant of sm_add for O(N) bulk construction.
+ * Internal only; the cursor accelerates ascending inserts.  See
+ * sm_add_many / sm_add_many_grow.
+ *
+ * Inserting a new chunk or coalescing existing ones changes the chunk
+ * layout at or before the cached chunk, which would leave a recorded
+ * cursor offset pointing at the wrong place (or past the end after a
+ * coalesce removes trailing chunks).  Detect that by comparing the
+ * chunk count before and after: on any change, reset the cursor so the
+ * next lookup walks from the head.  Pure in-place updates (the common
+ * case in an ascending run) leave the count unchanged and keep the
+ * cursor hot, preserving the amortized O(N) build cost. */
+static uint64_t
+__sm_add_c(sm_t *map, uint64_t idx, sm_cursor_t *cur)
+{
+	const size_t before = __sm_get_chunk_count(map);
+	uint64_t rc = __sm_map_set(map, idx, true, cur);
+	if (cur != NULL && __sm_get_chunk_count(map) != before) {
+		*cur = (sm_cursor_t)SM_CURSOR_INIT;
+	}
+	return (rc);
 }
 
 uint64_t
@@ -4708,13 +4726,13 @@ __sm_ensure_capacity(sm_t **resultp, size_t needed)
 	 * than three operations downstream when the heap finally notices.
 	 */
 	__sm_when_diag({
-		__sm_assert(result->m_alloc_kind == SM_OWNED_CONTIGUOUS ||
-		    result->m_alloc_kind == SM_OWNED_SPLIT);
+		__sm_assert(__sm_kind(result) == SM_OWNED_CONTIGUOUS ||
+		    __sm_kind(result) == SM_OWNED_SPLIT);
 	});
-	if (result->m_data_used + needed <= result->m_capacity) {
+	if (result->m_data_used + needed <= __sm_cap(result)) {
 		return (true);
 	}
-	size_t cap = result->m_capacity;
+	size_t cap = __sm_cap(result);
 	size_t new_cap = cap + (cap / 2 > needed ? cap / 2 : needed + 256);
 	sm_t *grown = sm_set_data_size(result, NULL, new_cap);
 	if (grown == NULL) {
@@ -5468,7 +5486,7 @@ __sm_chunk_prev_set(const __sm_chunk_t *chunk, uint64_t start,
 }
 
 uint64_t
-sm_next_member(const sm_t *map, uint64_t prev_idx)
+sm_next_member(const sm_t *map, uint64_t prev_idx, sm_cursor_t *cur)
 {
 	if (map == NULL)
 		return (SM_IDX_MAX);
@@ -5479,24 +5497,23 @@ sm_next_member(const sm_t *map, uint64_t prev_idx)
 
 	uint8_t *base = __sm_get_chunk_data(map, 0);
 	uint8_t *p = base;
-	size_t i = 0;
+	const size_t stream_end = map->m_data_used - SM_SIZEOF_OVERHEAD;
 
 	/*
 	 * Cursor fast-path.  Sequential forward iteration
-	 *   while ((i = sm_next_member(map, i)) != SM_IDX_MAX) ...
+	 *   while ((i = sm_next_member(map, i, &c)) != SM_IDX_MAX) ...
 	 * is the dominant scan-side hot path.  Without a cursor each
 	 * call walks from chunk 0 -- O(N) per call, O(N^2) per scan.
-	 * Resume from the most-recently-returned chunk when prev_idx is
-	 * not earlier than that chunk's start.
+	 * Resume from the cached chunk when prev_idx is not earlier than
+	 * that chunk's start.
 	 */
-	if (prev_idx != SM_IDX_MAX && map->m_cursor_valid &&
-	    map->m_cursor_chunk_index < count &&
-	    map->m_cursor_start_idx <= prev_idx) {
-		p = base + map->m_cursor_offset;
-		i = map->m_cursor_chunk_index;
+	if (prev_idx != SM_IDX_MAX && cur != NULL &&
+	    cur->offset != SIZE_MAX && cur->offset < stream_end &&
+	    cur->start_idx <= prev_idx) {
+		p = base + cur->offset;
 	}
 
-	for (; i < count; i++) {
+	while ((size_t)(p - base) < stream_end) {
 		const __sm_idx_t start = __sm_load_idx((const uint8_t *)p);
 		__sm_chunk_t chunk;
 		__sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
@@ -5509,7 +5526,10 @@ sm_next_member(const sm_t *map, uint64_t prev_idx)
 		const uint64_t hit =
 		    __sm_chunk_next_set(&chunk, start, prev_idx);
 		if (hit != SM_IDX_MAX) {
-			__sm_cursor_record(map, (size_t)(p - base), i, start);
+			if (cur != NULL) {
+				cur->offset = (size_t)(p - base);
+				cur->start_idx = start;
+			}
 			return (hit);
 		}
 		p += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&chunk);
@@ -5518,8 +5538,12 @@ sm_next_member(const sm_t *map, uint64_t prev_idx)
 }
 
 uint64_t
-sm_prev_member(const sm_t *map, uint64_t prev_idx)
+sm_prev_member(const sm_t *map, uint64_t prev_idx, sm_cursor_t *cur)
 {
+	/* The cursor accelerates forward (non-decreasing) lookups only;
+	 * reverse iteration always walks from the head, so cur is accepted
+	 * for API symmetry but unused. */
+	(void)cur;
 	if (map == NULL)
 		return (SM_IDX_MAX);
 	__sm_check_invariants(map);
@@ -5584,13 +5608,13 @@ sm_equals(const sm_t *a, const sm_t *b)
 	if (a_empty != b_empty)
 		return (false);
 
-	uint64_t ia = sm_next_member(a, SM_IDX_MAX);
-	uint64_t ib = sm_next_member(b, SM_IDX_MAX);
+	uint64_t ia = sm_next_member(a, SM_IDX_MAX, NULL);
+	uint64_t ib = sm_next_member(b, SM_IDX_MAX, NULL);
 	while (ia != SM_IDX_MAX && ib != SM_IDX_MAX) {
 		if (ia != ib)
 			return (false);
-		ia = sm_next_member(a, ia);
-		ib = sm_next_member(b, ib);
+		ia = sm_next_member(a, ia, NULL);
+		ib = sm_next_member(b, ib, NULL);
 	}
 	return (ia == ib);
 }
@@ -5603,15 +5627,15 @@ sm_is_subset(const sm_t *a, const sm_t *b)
 	if (b == NULL || sm_is_empty(b))
 		return (false);
 
-	uint64_t ia = sm_next_member(a, SM_IDX_MAX);
-	uint64_t ib = sm_next_member(b, SM_IDX_MAX);
+	uint64_t ia = sm_next_member(a, SM_IDX_MAX, NULL);
+	uint64_t ib = sm_next_member(b, SM_IDX_MAX, NULL);
 	while (ia != SM_IDX_MAX) {
 		while (ib != SM_IDX_MAX && ib < ia) {
-			ib = sm_next_member(b, ib);
+			ib = sm_next_member(b, ib, NULL);
 		}
 		if (ib != ia)
 			return (false);
-		ia = sm_next_member(a, ia);
+		ia = sm_next_member(a, ia, NULL);
 	}
 	return (true);
 }
@@ -5630,15 +5654,15 @@ sm_overlap(const sm_t *a, const sm_t *b)
 	if (sm_is_empty(a) || sm_is_empty(b))
 		return (false);
 
-	uint64_t ia = sm_next_member(a, SM_IDX_MAX);
-	uint64_t ib = sm_next_member(b, SM_IDX_MAX);
+	uint64_t ia = sm_next_member(a, SM_IDX_MAX, NULL);
+	uint64_t ib = sm_next_member(b, SM_IDX_MAX, NULL);
 	while (ia != SM_IDX_MAX && ib != SM_IDX_MAX) {
 		if (ia == ib)
 			return (true);
 		if (ia < ib)
-			ia = sm_next_member(a, ia);
+			ia = sm_next_member(a, ia, NULL);
 		else
-			ib = sm_next_member(b, ib);
+			ib = sm_next_member(b, ib, NULL);
 	}
 	return (false);
 }
@@ -5648,10 +5672,10 @@ sm_membership(const sm_t *map)
 {
 	if (map == NULL || sm_is_empty(map))
 		return (SM_EMPTY);
-	const uint64_t first = sm_next_member(map, SM_IDX_MAX);
+	const uint64_t first = sm_next_member(map, SM_IDX_MAX, NULL);
 	if (first == SM_IDX_MAX)
 		return (SM_EMPTY);
-	const uint64_t second = sm_next_member(map, first);
+	const uint64_t second = sm_next_member(map, first, NULL);
 	return ((second == SM_IDX_MAX) ? SM_SINGLETON : SM_MULTIPLE);
 }
 
@@ -5660,10 +5684,10 @@ sm_singleton_member(const sm_t *map)
 {
 	if (map == NULL || sm_is_empty(map))
 		return (SM_IDX_MAX);
-	const uint64_t first = sm_next_member(map, SM_IDX_MAX);
+	const uint64_t first = sm_next_member(map, SM_IDX_MAX, NULL);
 	if (first == SM_IDX_MAX)
 		return (SM_IDX_MAX);
-	const uint64_t second = sm_next_member(map, first);
+	const uint64_t second = sm_next_member(map, first, NULL);
 	return ((second == SM_IDX_MAX) ? first : SM_IDX_MAX);
 }
 
@@ -5689,19 +5713,19 @@ sm_union_cardinality(const sm_t *a, const sm_t *b)
 		return (sm_cardinality((sm_t *)a));
 
 	size_t count = 0;
-	uint64_t ia = sm_next_member(a, SM_IDX_MAX);
-	uint64_t ib = sm_next_member(b, SM_IDX_MAX);
+	uint64_t ia = sm_next_member(a, SM_IDX_MAX, NULL);
+	uint64_t ib = sm_next_member(b, SM_IDX_MAX, NULL);
 	while (ia != SM_IDX_MAX || ib != SM_IDX_MAX) {
 		if (ia == ib) {
 			count++;
-			ia = sm_next_member(a, ia);
-			ib = sm_next_member(b, ib);
+			ia = sm_next_member(a, ia, NULL);
+			ib = sm_next_member(b, ib, NULL);
 		} else if (ia != SM_IDX_MAX && (ib == SM_IDX_MAX || ia < ib)) {
 			count++;
-			ia = sm_next_member(a, ia);
+			ia = sm_next_member(a, ia, NULL);
 		} else {
 			count++;
-			ib = sm_next_member(b, ib);
+			ib = sm_next_member(b, ib, NULL);
 		}
 	}
 	return (count);
@@ -5713,17 +5737,17 @@ sm_intersection_cardinality(const sm_t *a, const sm_t *b)
 	if (sm_is_empty(a) || sm_is_empty(b))
 		return (0);
 	size_t count = 0;
-	uint64_t ia = sm_next_member(a, SM_IDX_MAX);
-	uint64_t ib = sm_next_member(b, SM_IDX_MAX);
+	uint64_t ia = sm_next_member(a, SM_IDX_MAX, NULL);
+	uint64_t ib = sm_next_member(b, SM_IDX_MAX, NULL);
 	while (ia != SM_IDX_MAX && ib != SM_IDX_MAX) {
 		if (ia == ib) {
 			count++;
-			ia = sm_next_member(a, ia);
-			ib = sm_next_member(b, ib);
+			ia = sm_next_member(a, ia, NULL);
+			ib = sm_next_member(b, ib, NULL);
 		} else if (ia < ib) {
-			ia = sm_next_member(a, ia);
+			ia = sm_next_member(a, ia, NULL);
 		} else {
-			ib = sm_next_member(b, ib);
+			ib = sm_next_member(b, ib, NULL);
 		}
 	}
 	return (count);
@@ -5738,20 +5762,20 @@ sm_difference_cardinality(const sm_t *a, const sm_t *b)
 		return (sm_cardinality((sm_t *)a));
 
 	size_t count = 0;
-	uint64_t ia = sm_next_member(a, SM_IDX_MAX);
-	uint64_t ib = sm_next_member(b, SM_IDX_MAX);
+	uint64_t ia = sm_next_member(a, SM_IDX_MAX, NULL);
+	uint64_t ib = sm_next_member(b, SM_IDX_MAX, NULL);
 	while (ia != SM_IDX_MAX) {
 		/* Advance b past anything < ia. */
 		while (ib != SM_IDX_MAX && ib < ia) {
-			ib = sm_next_member(b, ib);
+			ib = sm_next_member(b, ib, NULL);
 		}
 		if (ib == ia) {
 			/* In both, skip from a's count. */
-			ib = sm_next_member(b, ib);
+			ib = sm_next_member(b, ib, NULL);
 		} else {
 			count++;
 		}
-		ia = sm_next_member(a, ia);
+		ia = sm_next_member(a, ia, NULL);
 	}
 	return (count);
 }
@@ -5764,17 +5788,17 @@ sm_nonempty_difference(const sm_t *a, const sm_t *b)
 	if (sm_is_empty(b))
 		return (true);
 
-	uint64_t ia = sm_next_member(a, SM_IDX_MAX);
-	uint64_t ib = sm_next_member(b, SM_IDX_MAX);
+	uint64_t ia = sm_next_member(a, SM_IDX_MAX, NULL);
+	uint64_t ib = sm_next_member(b, SM_IDX_MAX, NULL);
 	while (ia != SM_IDX_MAX) {
 		while (ib != SM_IDX_MAX && ib < ia) {
-			ib = sm_next_member(b, ib);
+			ib = sm_next_member(b, ib, NULL);
 		}
 		if (ib != ia) {
 			return (true);
 		}
-		ia = sm_next_member(a, ia);
-		ib = sm_next_member(b, ib);
+		ia = sm_next_member(a, ia, NULL);
+		ib = sm_next_member(b, ib, NULL);
 	}
 	return (false);
 }
@@ -5787,36 +5811,124 @@ sm_jaccard_index(const sm_t *a, const sm_t *b)
 	if (sm_is_empty(a) && sm_is_empty(b))
 		return (0.0);
 	size_t intersect = 0, union_ = 0;
-	uint64_t ia = sm_next_member(a, SM_IDX_MAX);
-	uint64_t ib = sm_next_member(b, SM_IDX_MAX);
+	uint64_t ia = sm_next_member(a, SM_IDX_MAX, NULL);
+	uint64_t ib = sm_next_member(b, SM_IDX_MAX, NULL);
 	while (ia != SM_IDX_MAX || ib != SM_IDX_MAX) {
 		if (ia == ib) {
 			intersect++;
 			union_++;
-			ia = sm_next_member(a, ia);
-			ib = sm_next_member(b, ib);
+			ia = sm_next_member(a, ia, NULL);
+			ib = sm_next_member(b, ib, NULL);
 		} else if (ia != SM_IDX_MAX && (ib == SM_IDX_MAX || ia < ib)) {
 			union_++;
-			ia = sm_next_member(a, ia);
+			ia = sm_next_member(a, ia, NULL);
 		} else {
 			union_++;
-			ib = sm_next_member(b, ib);
+			ib = sm_next_member(b, ib, NULL);
 		}
 	}
 	return (union_ == 0 ? 0.0 : (double)intersect / (double)union_);
 }
 
+/* Ascending uint64_t comparator for the bulk-insert sort below. */
+static int
+__sm_cmp_u64(const void *a, const void *b)
+{
+	uint64_t x = *(const uint64_t *)a;
+	uint64_t y = *(const uint64_t *)b;
+	return ((x > y) - (x < y));
+}
+
 bool
 sm_add_many(sm_t *map, const uint64_t *arr, size_t n)
 {
+	uint64_t *sorted;
+	bool ok = true;
+
 	if (map == NULL || (arr == NULL && n > 0))
 		return (false);
+	if (n == 0)
+		return (true);
+	if (n == 1)
+		return (sm_add(map, arr[0]) != SM_IDX_MAX);
+
+	/*
+	 * Sort a private copy ascending before inserting.  The bulk path
+	 * threads an internal cursor that only makes ascending inserts O(N)
+	 * total; for unsorted input each insert would fall back to a full
+	 * chunk walk plus a byte-shift, making the loop O(N^2).  Sorting
+	 * first guarantees O(N log N + N) regardless of caller order.  The
+	 * caller's array is const and left untouched.
+	 */
+	sorted = (uint64_t *)__sm_alloc(n * sizeof(uint64_t));
+	if (sorted == NULL)
+		return (false);
+	memcpy(sorted, arr, n * sizeof(uint64_t));
+	qsort(sorted, n, sizeof(uint64_t), __sm_cmp_u64);
+	sm_cursor_t cur = SM_CURSOR_INIT;
 	for (size_t i = 0; i < n; i++) {
-		if (sm_add(map, arr[i]) == SM_IDX_MAX) {
-			return (false);
+		if (__sm_add_c(map, sorted[i], &cur) == SM_IDX_MAX) {
+			ok = false;
+			break;
 		}
 	}
-	return (true);
+	__sm_free(sorted);
+	return (ok);
+}
+
+/*
+ * Growing bulk insert: like sm_add_many but takes sm_t** and uses
+ * sm_add_grow, so the buffer is realloc'd geometrically on ENOSPC
+ * instead of failing.  Sorts a private copy first (same O(N) rationale
+ * as sm_add_many).  Returns true on success; false only if a scratch
+ * allocation fails or sm_add_grow exhausts its grow retries.
+ */
+bool
+sm_add_many_grow(sm_t **map, const uint64_t *arr, size_t n)
+{
+	uint64_t *sorted;
+	bool ok = true;
+
+	if (map == NULL || *map == NULL || (arr == NULL && n > 0))
+		return (false);
+	if (n == 0)
+		return (true);
+
+	sorted = (uint64_t *)__sm_alloc(n * sizeof(uint64_t));
+	if (sorted == NULL)
+		return (false);
+	memcpy(sorted, arr, n * sizeof(uint64_t));
+	if (n > 1)
+		qsort(sorted, n, sizeof(uint64_t), __sm_cmp_u64);
+	sm_cursor_t cur = SM_CURSOR_INIT;
+	for (size_t i = 0; i < n; i++) {
+		int retries = 0;
+		sm_t *before = *map;
+		while (__sm_add_c(*map, sorted[i], &cur) == SM_IDX_MAX) {
+			if (++retries > 16) {
+				ok = false;
+				break;
+			}
+			/* ENOSPC: grow geometrically with a 4 KiB floor. */
+			size_t new_cap = sm_get_capacity(*map) * 2;
+			if (new_cap < 4096)
+				new_cap = 4096;
+			sm_t *grown = sm_set_data_size(*map, NULL, new_cap);
+			if (grown == NULL) {
+				ok = false;
+				break;
+			}
+			*map = grown;
+		}
+		if (!ok)
+			break;
+		/* A grow may have relocated the buffer; the cursor's byte
+		 * offset is then meaningless.  Reset it when *map moved. */
+		if (*map != before)
+			cur = (sm_cursor_t)SM_CURSOR_INIT;
+	}
+	__sm_free(sorted);
+	return (ok);
 }
 
 void
@@ -5834,7 +5946,7 @@ sm_to_array(const sm_t *map, uint64_t *out, size_t *n_out)
 	}
 
 	uint64_t i = SM_IDX_MAX;
-	while ((i = sm_next_member(map, i)) != SM_IDX_MAX) {
+	while ((i = sm_next_member(map, i, NULL)) != SM_IDX_MAX) {
 		if (written >= cap)
 			break;
 		out[written++] = i;
@@ -5890,25 +6002,25 @@ sm_xor(const sm_t *a, const sm_t *b)
 		return (NULL);
 
 	/* Walk both lockstep, emit bits set in exactly one. */
-	uint64_t ia = sm_next_member(a, SM_IDX_MAX);
-	uint64_t ib = sm_next_member(b, SM_IDX_MAX);
+	uint64_t ia = sm_next_member(a, SM_IDX_MAX, NULL);
+	uint64_t ib = sm_next_member(b, SM_IDX_MAX, NULL);
 	while (ia != SM_IDX_MAX || ib != SM_IDX_MAX) {
 		if (ia == ib) {
 			/* In both: skip from XOR. */
-			ia = sm_next_member(a, ia);
-			ib = sm_next_member(b, ib);
+			ia = sm_next_member(a, ia, NULL);
+			ib = sm_next_member(b, ib, NULL);
 		} else if (ia != SM_IDX_MAX && (ib == SM_IDX_MAX || ia < ib)) {
 			if (sm_add(r, ia) == SM_IDX_MAX) {
 				sm_free(r);
 				return (NULL);
 			}
-			ia = sm_next_member(a, ia);
+			ia = sm_next_member(a, ia, NULL);
 		} else {
 			if (sm_add(r, ib) == SM_IDX_MAX) {
 				sm_free(r);
 				return (NULL);
 			}
-			ib = sm_next_member(b, ib);
+			ib = sm_next_member(b, ib, NULL);
 		}
 	}
 	if (sm_is_empty(r)) {
@@ -5955,7 +6067,7 @@ sm_extract_range(const sm_t *map, uint64_t lo, uint64_t hi)
 	 * sm_next_member supports a lower-exclusive bound; pass lo - 1 if
 	 * lo > 0, else SM_IDX_MAX (start sentinel). */
 	uint64_t cursor = (lo == 0) ? SM_IDX_MAX : lo - 1;
-	while ((cursor = sm_next_member(map, cursor)) != SM_IDX_MAX &&
+	while ((cursor = sm_next_member(map, cursor, NULL)) != SM_IDX_MAX &&
 	    cursor < hi) {
 		if (sm_add(r, cursor) == SM_IDX_MAX) {
 			/* Grow and retry once. */
@@ -5991,18 +6103,18 @@ sm_xor_cardinality(const sm_t *a, const sm_t *b)
 		return (sm_cardinality((sm_t *)a));
 
 	size_t count = 0;
-	uint64_t ia = sm_next_member(a, SM_IDX_MAX);
-	uint64_t ib = sm_next_member(b, SM_IDX_MAX);
+	uint64_t ia = sm_next_member(a, SM_IDX_MAX, NULL);
+	uint64_t ib = sm_next_member(b, SM_IDX_MAX, NULL);
 	while (ia != SM_IDX_MAX || ib != SM_IDX_MAX) {
 		if (ia == ib) {
-			ia = sm_next_member(a, ia);
-			ib = sm_next_member(b, ib);
+			ia = sm_next_member(a, ia, NULL);
+			ib = sm_next_member(b, ib, NULL);
 		} else if (ia != SM_IDX_MAX && (ib == SM_IDX_MAX || ia < ib)) {
 			count++;
-			ia = sm_next_member(a, ia);
+			ia = sm_next_member(a, ia, NULL);
 		} else {
 			count++;
-			ib = sm_next_member(b, ib);
+			ib = sm_next_member(b, ib, NULL);
 		}
 	}
 	return (count);
@@ -6069,7 +6181,7 @@ sm_hash(const sm_t *map)
 	if (sm_is_empty(map))
 		return (h);
 	uint64_t i = SM_IDX_MAX;
-	while ((i = sm_next_member(map, i)) != SM_IDX_MAX) {
+	while ((i = sm_next_member(map, i, NULL)) != SM_IDX_MAX) {
 		/* Mix all 8 bytes of the index. */
 		for (int b = 0; b < 8; b++) {
 			h ^= (i >> (b * 8)) & 0xffULL;
@@ -6084,15 +6196,15 @@ sm_compare(const sm_t *a, const sm_t *b)
 {
 	/* Lexicographic: walk both lockstep and return the difference at
 	 * the first point of divergence. */
-	uint64_t ia = sm_next_member(a, SM_IDX_MAX);
-	uint64_t ib = sm_next_member(b, SM_IDX_MAX);
+	uint64_t ia = sm_next_member(a, SM_IDX_MAX, NULL);
+	uint64_t ib = sm_next_member(b, SM_IDX_MAX, NULL);
 	while (ia != SM_IDX_MAX && ib != SM_IDX_MAX) {
 		if (ia < ib)
 			return (-1);
 		if (ia > ib)
 			return (1);
-		ia = sm_next_member(a, ia);
-		ib = sm_next_member(b, ib);
+		ia = sm_next_member(a, ia, NULL);
+		ib = sm_next_member(b, ib, NULL);
 	}
 	if (ia == SM_IDX_MAX && ib == SM_IDX_MAX)
 		return (0);
@@ -6105,20 +6217,20 @@ sm_subset_compare(const sm_t *a, const sm_t *b)
 	bool a_subset_b = true; /* every bit in a is in b */
 	bool b_subset_a = true; /* every bit in b is in a */
 
-	uint64_t ia = sm_next_member(a, SM_IDX_MAX);
-	uint64_t ib = sm_next_member(b, SM_IDX_MAX);
+	uint64_t ia = sm_next_member(a, SM_IDX_MAX, NULL);
+	uint64_t ib = sm_next_member(b, SM_IDX_MAX, NULL);
 	while (ia != SM_IDX_MAX || ib != SM_IDX_MAX) {
 		if (ia == ib) {
-			ia = sm_next_member(a, ia);
-			ib = sm_next_member(b, ib);
+			ia = sm_next_member(a, ia, NULL);
+			ib = sm_next_member(b, ib, NULL);
 		} else if (ia != SM_IDX_MAX && (ib == SM_IDX_MAX || ia < ib)) {
 			/* a has a bit b doesn't. */
 			a_subset_b = false;
-			ia = sm_next_member(a, ia);
+			ia = sm_next_member(a, ia, NULL);
 		} else {
 			/* b has a bit a doesn't. */
 			b_subset_a = false;
-			ib = sm_next_member(b, ib);
+			ib = sm_next_member(b, ib, NULL);
 		}
 		if (!a_subset_b && !b_subset_a) {
 			return (SM_REL_DIFFERENT);
@@ -6136,7 +6248,7 @@ sm_pop_first(sm_t *map)
 {
 	if (sm_is_empty(map))
 		return (SM_IDX_MAX);
-	const uint64_t lowest = sm_next_member(map, SM_IDX_MAX);
+	const uint64_t lowest = sm_next_member(map, SM_IDX_MAX, NULL);
 	if (lowest == SM_IDX_MAX)
 		return (SM_IDX_MAX);
 	if (sm_remove(map, lowest) == SM_IDX_MAX) {
@@ -6152,7 +6264,7 @@ sm_pop_last(sm_t *map)
 {
 	if (sm_is_empty(map))
 		return (SM_IDX_MAX);
-	const uint64_t highest = sm_prev_member(map, SM_IDX_MAX);
+	const uint64_t highest = sm_prev_member(map, SM_IDX_MAX, NULL);
 	if (highest == SM_IDX_MAX)
 		return (SM_IDX_MAX);
 	if (sm_remove(map, highest) == SM_IDX_MAX)
@@ -6184,7 +6296,7 @@ __sm_replace_buffer(sm_t *dst, sm_t *result)
 		return (dst);
 	}
 	const size_t result_size = result->m_data_used;
-	if (dst->m_capacity < result_size) {
+	if (__sm_cap(dst) < result_size) {
 		sm_t *grown = sm_set_data_size(dst, NULL, result_size + 64);
 		if (grown == NULL) {
 			sm_free(result);
@@ -6194,7 +6306,6 @@ __sm_replace_buffer(sm_t *dst, sm_t *result)
 	}
 	memcpy(dst->m_data, result->m_data, result_size);
 	dst->m_data_used = result_size;
-	__sm_cursor_invalidate(dst);
 	sm_free(result);
 	return (dst);
 }
@@ -6251,7 +6362,7 @@ sm_flip_range(sm_t *map, uint64_t lo, uint64_t hi)
 	if (map == NULL || lo >= hi)
 		return (lo >= hi);
 	for (uint64_t i = lo; i < hi; i++) {
-		const bool was_set = sm_contains(map, i);
+		const bool was_set = sm_contains(map, i, NULL);
 		if (sm_assign(map, i, !was_set) == SM_IDX_MAX) {
 			return (false);
 		}
@@ -6264,9 +6375,9 @@ sm_validate(const sm_t *map)
 {
 	if (map == NULL)
 		return (true);
-	if (map->m_data == NULL && map->m_capacity > 0)
+	if (map->m_data == NULL && __sm_cap(map) > 0)
 		return (false);
-	if (map->m_data_used > map->m_capacity)
+	if (map->m_data_used > __sm_cap(map))
 		return (false);
 	if (map->m_data_used == 0) {
 		return (true);
@@ -6360,12 +6471,12 @@ sm_shrink_to_fit(sm_t *map)
 {
 	if (map == NULL)
 		return (NULL);
-	if (map->m_alloc_kind == SM_WRAPPED)
+	if (__sm_kind(map) == SM_WRAPPED)
 		return (map);
 
 	const size_t target =
 	    map->m_data_used > 0 ? map->m_data_used : SM_SIZEOF_OVERHEAD;
-	if (target == map->m_capacity)
+	if (target == __sm_cap(map))
 		return (map);
 
 	return (sm_set_data_size(map, NULL, target));
@@ -7568,7 +7679,7 @@ sm_split(sm_t *map, uint64_t idx, sm_t *other)
 			memcpy(buf + SM_SIZEOF_OVERHEAD, src,
 			    SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t));
 			/* Set the number of chunks to 1 in our stunt map. */
-			__sm_store_u32((uint8_t *)buf, (uint32_t)1);
+			__sm_store_u64((uint8_t *)buf, (uint64_t)1);
 			/* And initialize the stunt double chunk we need to split. */
 			sm_open(&stunt, buf,
 			    (SM_SIZEOF_OVERHEAD * (unsigned long)3) +
@@ -7647,8 +7758,8 @@ sm_split(sm_t *map, uint64_t idx, sm_t *other)
 		__sm_store_idx((uint8_t *)dst, src_start);
 		for (size_t j = idx; j < src_start + SM_CHUNK_MAX_CAPACITY;
 		     j++) {
-			if (sm_contains(map, j)) {
-				__sm_map_set(other, j, false);
+			if (sm_contains(map, j, NULL)) {
+				__sm_map_set(other, j, false, NULL);
 				__sm_map_unset(map, j, false);
 			}
 		}
@@ -7678,10 +7789,6 @@ sm_split(sm_t *map, uint64_t idx, sm_t *other)
 	/* Update chunk counts and force recalculation of data sizes */
 	__sm_set_chunk_count(map, __sm_get_chunk_count(map) - chunks_to_move);
 	map->m_data_used = split_offset;
-	/* sm_split moves chunks across two maps; cursor caches on either
-	 * side are no longer trustworthy. */
-	__sm_cursor_invalidate(map);
-	__sm_cursor_invalidate(other);
 
 	__sm_assert(sm_get_size(map) >= SM_SIZEOF_OVERHEAD);
 	__sm_assert(sm_get_size(other) > SM_SIZEOF_OVERHEAD);
@@ -7733,85 +7840,47 @@ static size_t
 __sm_rank_vec(sm_t *map, uint64_t begin, uint64_t end, bool value,
     __sm_bitvec_t *vec)
 {
-	(void)vec; /* unused parameter */
+	(void)vec; /* retained for ABI/signature compatibility */
 	__sm_assert(sm_get_size(map) >= SM_SIZEOF_OVERHEAD);
-	size_t gap, pos = 0, result = 0, prev = 0, len = end - begin + 1;
 
 	if (begin > end) {
 		return (0);
 	}
 
-	if (begin == end) {
-		return (sm_contains(map, begin) == value ? 1 : 0);
-	}
+	/*
+	 * Range width as a count.  When [begin, end] spans the entire
+	 * 64-bit universe (begin == 0, end == UINT64_MAX) the +1
+	 * overflows to 0; size_t saturates instead so the derived unset
+	 * count below stays meaningful.  A full-universe unset query is
+	 * degenerate (the answer is ~2^64) but must not wrap.
+	 */
+	const uint64_t span_width = end - begin;
+	const size_t width =
+	    (span_width == UINT64_MAX) ? SIZE_MAX : (size_t)(span_width + 1);
 
+	/*
+	 * Rank is computed from the set-bit count only.  A bit is set
+	 * iff some chunk covers it, so the number of set bits in the
+	 * inclusive range [begin, end] is the sum, over every chunk, of
+	 * the matching bits in the overlap of [begin, end] with that
+	 * chunk's covered span [start, start + capacity).  The unset
+	 * count is then width - set; there is no cross-chunk gap
+	 * bookkeeping to get wrong.
+	 *
+	 * __sm_chunk_rank does the per-chunk work (it takes from/to
+	 * positions relative to the chunk start and is validated by the
+	 * get_position / RLE property tests).  We only ever ask it for
+	 * set bits here; unset is derived once at the end.
+	 */
 	const size_t count = __sm_get_chunk_count(map);
-
 	if (count == 0) {
-		if (value == false) {
-			/* The count/rank of unset bits in an empty map is inf, so what you requested is the answer. */
-			return (len);
-		}
+		return (value ? 0 : width);
 	}
 
+	size_t set = 0;
 	uint8_t *p = __sm_get_chunk_data(map, 0);
 	for (size_t i = 0; i < count; i++) {
-		__sm_idx_t start = __sm_load_idx((const uint8_t *)p);
-		/* [prev, start + pos), prev is the last bit examined 0-based. */
-		if (i == 0) {
-			gap = start;
-		} else {
-			if (prev + SM_CHUNK_MAX_CAPACITY == start) {
-				gap = 0;
-			} else {
-				gap = start - (prev + pos);
-			}
-		}
-		/* Start of this chunk is greater than the end of the desired range. */
-		if (start > end) {
-			if (value == true) {
-				/* We're counting set bits and this chunk starts after the range
-				 * [begin, end], we're done. */
-				return (result);
-			} else {
-				if (i == 0) {
-					/* We're counting unset bits and the first chunk starts after the
-					 * range meaning everything proceeding this chunk was zero and should
-					 * be counted, also we're done. */
-					result += (end - begin) + 1;
-					return (result);
-				} else {
-					/* We're counting unset bits and some chunk starts after the range, so
-					 * we've counted enough, we're done. */
-					if (pos > end) {
-						return (result);
-					} else {
-						if (end - pos < gap) {
-							result += end - pos;
-							return (result);
-						} else {
-							result += gap;
-							return (result);
-						}
-					}
-				}
-			}
-		} else {
-			/* The range and this chunk overlap. */
-			if (value == false) {
-				if (begin > gap) {
-					begin -= gap;
-				} else {
-					result += gap - begin;
-					begin = 0;
-				}
-			} else {
-				if (begin >= gap) {
-					begin -= gap;
-				}
-			}
-		}
-		prev = start;
+		const __sm_idx_t start = __sm_load_idx((const uint8_t *)p);
 		p += SM_SIZEOF_OVERHEAD;
 		__sm_chunk_t chunk;
 		__sm_chunk_init(&chunk, p);
@@ -7819,25 +7888,47 @@ __sm_rank_vec(sm_t *map, uint64_t begin, uint64_t end, bool value,
 		if (i + 1 < count) {
 			SM_PREFETCH(p + chunk_size + SM_SIZEOF_OVERHEAD);
 		}
+		const size_t cap = __sm_chunk_get_capacity(&chunk);
+		const uint64_t chunk_lo = start;
+		/* Inclusive top of the chunk's covered span.  cap >= 1, and we
+		 * form (cap - 1) as a distance so the comparison below never
+		 * overflows even when chunk_lo is near UINT64_MAX (the
+		 * top-of-universe case). */
+		const uint64_t span = (uint64_t)cap - 1;
+		const uint64_t chunk_hi_incl =
+		    (chunk_lo > UINT64_MAX - span) ? UINT64_MAX
+		                                  : chunk_lo + span;
 
-		/* Count all the set/unset inside this chunk within the range. */
+		/* Chunks are ordered ascending.  Once a chunk starts past
+		 * `end` no later chunk can overlap [begin, end]. */
+		if (chunk_lo > end) {
+			p += chunk_size;
+			break;
+		}
+		/* Skip chunks entirely below `begin`. */
+		if (chunk_hi_incl < begin) {
+			p += chunk_size;
+			continue;
+		}
+
+		/* Overlap of [begin, end] with [chunk_lo, chunk_hi_incl]. */
+		const uint64_t ov_lo = begin > chunk_lo ? begin : chunk_lo;
+		const uint64_t ov_hi_incl =
+		    (end < chunk_hi_incl) ? end : chunk_hi_incl;
+		/* Positions relative to the chunk start. */
+		const size_t from = (size_t)(ov_lo - chunk_lo);
+		const size_t to = (size_t)(ov_hi_incl - chunk_lo);
+
 		__sm_chunk_rank_t rank;
-		const size_t amt =
-		    __sm_chunk_rank(&rank, value, &chunk, begin, end - start);
-		result += amt;
-		pos = rank.pos;
-		begin = rank.pos > begin ? 0 : begin - rank.pos;
+		set += __sm_chunk_rank(&rank, true, &chunk, from, to);
 		p += chunk_size;
 	}
-	/* Count any additional unset bits that fall outside the last chunk but
-	 * within the range. */
-	if (value == false) {
-		size_t last = prev - 1 + pos;
-		if (end > last) {
-			result += end - last - begin;
-		}
+
+	if (value) {
+		return (set);
 	}
-	return (result);
+	__sm_assert((uint64_t)set <= width);
+	return ((size_t)(width - set));
 }
 
 size_t

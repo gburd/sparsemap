@@ -148,9 +148,9 @@ Sparsemap **does not** promise ABI stability of the `struct sparsemap`
 layout.  `sizeof(sm_t)` and the offsets of its fields may change in any
 minor release.  Consumers must:
 
-- Always allocate `sm_t` via `sm_create()`,
-  `sm_create_with_allocator()`, or `sm_wrap()` -- never embed it
-  inline in another struct, never `sizeof(sm_t)` for an on-disk
+- Always allocate `sm_t` via `sm_create()` or `sm_wrap()` -- never
+  embed it inline in another struct (unless you opt in with
+  `SM_EXPOSE_STRUCT`, see below), never `sizeof(sm_t)` for an on-disk
   format, never `memcpy(struct, ...)` it.
 - Treat the type as opaque: access only via `sm_*` accessors.
 - Recompile (not just relink) after upgrading sparsemap.
@@ -158,6 +158,33 @@ minor release.  Consumers must:
 The **wire format** produced by `sm_serialize` and consumed by
 `sm_open`/`sm_deserialize` *is* stable and is preserved across the
 3.x series.  This is the contract that matters for on-disk consumers.
+
+### Embedding `sm_t` by value (`SM_EXPOSE_STRUCT`)
+
+By default `sm_t` is an incomplete type, so the compiler rejects any
+attempt to embed it by value, take its `sizeof`, or otherwise depend
+on its layout.  A few consumers genuinely need the layout -- for
+example to place an `sm_t` inline inside a shared-memory control
+block rather than behind a pointer.  Define `SM_EXPOSE_STRUCT` before
+including the header to make the full definition visible:
+
+```c
+#define SM_EXPOSE_STRUCT
+#include <sparsemap/sm.h>
+
+struct my_state {
+    sm_t map;        /* embedded by value, not a pointer */
+    int  generation;
+};
+```
+
+This is an explicit opt-out of the ABI-opacity guarantee above: code
+that embeds `sm_t` by value must be **recompiled** whenever the
+struct layout changes (it may grow or shrink between minor releases).
+The struct definition lives in `sm.h`
+so an embedding consumer never has to copy it by hand -- doing so is
+how a stale duplicate drifts out of sync with the library.  The
+serialized wire format is identical whether or not the macro is set.
 
 ### Migrating from a pre-3.0 vendored copy
 
@@ -173,6 +200,36 @@ behavior, and the serialized wire format -- is unchanged from the
 latest pre-3.0 vendored copies.  See `docs/MIGRATION.md` for the full
 checklist.
 
+### Migrating from 4.x to 5.0
+
+5.0.0 shrinks `sm_t` from 112 bytes to **24** (the original
+`{capacity, used, data}` footprint) by removing per-map state.  Three
+source-level breaks, all mechanical:
+
+- **No per-map allocator.**  `sm_create_with_allocator()` is removed;
+  the allocator is process-global via `sm_set_allocator()` only
+  (CRoaring's model).  The hook struct is now a minimal
+  `{ malloc, realloc, free }` triple -- the old `alloc_zero`,
+  `aligned_alloc`, `aligned_free`, and `aux` fields are gone, and the
+  hooks no longer take an `aux` argument.  Replace any
+  `sm_create_with_allocator(n, hooks)` with
+  `sm_set_allocator(hooks); m = sm_create(n);`.
+- **The cursor is now caller-owned.**  `sm_contains`, `sm_next_member`,
+  and `sm_prev_member` take a trailing `sm_cursor_t *cur` argument and
+  are `const sm_t *`.  Pass `NULL` for no acceleration (a one-off
+  lookup), or declare `sm_cursor_t c = SM_CURSOR_INIT;` and thread
+  `&c` through a monotonic sweep on an unmutated map.  A cursor is
+  invalidated by any mutation; using a stale one is undefined --
+  reset it (or hold a lock) across writes.  `sm_rank` / `sm_select` /
+  `sm_span` are unchanged (they always walk from the head).
+- **Building with single `sm_add` in a loop is now O(N^2).**  The
+  ascending-build acceleration moved out of the struct; bulk builders
+  should call `sm_add_many()` / `sm_add_many_grow()`, which keep a
+  transient internal cursor and stay O(N).
+
+The serialized wire format is **unchanged**: 4.x bytes deserialize
+under 5.0.
+
 ## Future work: SIMD
 
 Sparsemap is scalar-only by design.  No `__builtin_popcount` chains,
@@ -183,11 +240,13 @@ cross-platform reproducibility outrank per-architecture peak
 performance for our consumer profile (PostgreSQL extensions,
 embedded indexers, undo logs).
 
-The `aligned_alloc` / `aligned_free` slots in `sm_allocator_t` exist
-so that adding SIMD later doesn't force another API break.  Two
-tiers of work are plausible if a real workload ever justifies it.
-Both are deferred until a downstream consumer profiles a hotspot in
-a sparsemap operation.
+The allocator hooks (`sm_set_allocator`) are deliberately a minimal
+`malloc`/`realloc`/`free` triple, matching CRoaring's
+`roaring_init_memory_hook`.  If a future SIMD effort needs aligned
+allocation it can add an aligned-alloc hook then; the current API
+carries no speculative slots.  Two tiers of SIMD work are plausible
+if a real workload ever justifies it.  Both are deferred until a
+downstream consumer profiles a hotspot in a sparsemap operation.
 
 ### Tier 1 — vectorize the inner loops without changing the wire format
 
@@ -202,8 +261,8 @@ a sparsemap operation.
     vectorized `vpand` / `vpor` / `vpxor` loop.
   - Roughly 500 LOC of intrinsics, runtime CPU dispatch via
     `__attribute__((target("avx2")))` plus a `cpuid` probe, and one
-    aligned scratch buffer per inner-loop call (uses
-    `sm_allocator_t::aligned_alloc`).
+    aligned scratch buffer per inner-loop call (an aligned-alloc
+    hook would be added to `sm_allocator_t` at that point).
   - Realistic gain: 1.5–3× on dense (mostly-MIXED) maps; near zero
     on sparse maps because the gather overhead eats the win.
 

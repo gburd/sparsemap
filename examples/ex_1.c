@@ -18,11 +18,9 @@
 
 /* !!! Duplicated here for testing purposes. Keep in sync, or suffer. !!! */
 struct sparsemap {
-  size_t m_capacity;
+  size_t m_capacity;  /* (capacity & ~7) bytes; low 3 bits = lineage */
   size_t m_data_used;
   uint8_t *m_data;
-  uint8_t m_alloc_kind;
-  sm_allocator_t m_allocator;
 };
 
 int
@@ -40,15 +38,15 @@ main()
   assert(sm_get_size(map) == size);
   sm_add(map, 0);
   assert(sm_get_size(map) == size + 4 + 8 + 8);
-  assert(sm_contains(map, 0) == true);
+  assert(sm_contains(map, 0, NULL) == true);
   assert(sm_get_size(map) == size + 4 + 8 + 8);
-  assert(sm_contains(map, 1) == false);
+  assert(sm_contains(map, 1, NULL) == false);
   sm_remove(map, 0);
   assert(sm_get_size(map) == size);
 
   sm_clear(map);
   sm_add(map, 64);
-  assert(sm_contains(map, 64) == true);
+  assert(sm_contains(map, 64, NULL) == true);
   assert(sm_get_size(map) == size + 4 + 8 + 8);
 
   sm_clear(map);
@@ -56,32 +54,32 @@ main()
 
   // set [0..100000]
   for (int i = 0; i < 100000; i++) {
-    assert(sm_contains(map, i) == false);
+    assert(sm_contains(map, i, NULL) == false);
     sm_add(map, i);
     if (i > 5) {
       for (int j = i - 5; j <= i; j++) {
-        assert(sm_contains(map, j) == true);
+        assert(sm_contains(map, j, NULL) == true);
       }
     }
 
-    assert(sm_contains(map, i) == true);
+    assert(sm_contains(map, i, NULL) == true);
   }
 
   fprintf(stderr, ".");
 
   for (int i = 0; i < 100000; i++) {
-    assert(sm_contains(map, i) == true);
+    assert(sm_contains(map, i, NULL) == true);
   }
 
   // unset [0..10000]
   for (int i = 0; i < 10000; i++) {
-    assert(sm_contains(map, i) == true);
+    assert(sm_contains(map, i, NULL) == true);
     sm_remove(map, i);
-    assert(sm_contains(map, i) == false);
+    assert(sm_contains(map, i, NULL) == false);
   }
 
   for (int i = 0; i < 10000; i++) {
-    assert(sm_contains(map, i) == false);
+    assert(sm_contains(map, i, NULL) == false);
   }
 
   sm_clear(map);
@@ -89,13 +87,13 @@ main()
 
   // set [10000..0]
   for (int i = 10000; i >= 0; i--) {
-    assert(sm_contains(map, i) == false);
+    assert(sm_contains(map, i, NULL) == false);
     sm_add(map, i);
-    assert(sm_contains(map, i) == true);
+    assert(sm_contains(map, i, NULL) == true);
   }
 
   for (int i = 10000; i >= 0; i--) {
-    assert(sm_contains(map, i) == true);
+    assert(sm_contains(map, i, NULL) == true);
     fprintf(stderr, ".");
   }
 
@@ -103,18 +101,18 @@ main()
   sm_t _sm3, *sm3 = &_sm3;
   sm_open(sm3, buffer, sizeof(buffer));
   for (int i = 0; i < 10000; i++) {
-    assert(sm_contains(sm3, i) == sm_contains(map, i));
+    assert(sm_contains(sm3, i, NULL) == sm_contains(map, i, NULL));
   }
 
   // unset [10000..0]
   for (int i = 10000; i >= 0; i--) {
-    assert(sm_contains(map, i) == true);
+    assert(sm_contains(map, i, NULL) == true);
     sm_remove(map, i);
-    assert(sm_contains(map, i) == false);
+    assert(sm_contains(map, i, NULL) == false);
   }
 
   for (int i = 10000; i >= 0; i--) {
-    assert(sm_contains(map, i) == false);
+    assert(sm_contains(map, i, NULL) == false);
   }
 
   fprintf(stderr, ".");
@@ -122,19 +120,19 @@ main()
 
   sm_add(map, 0);
   sm_add(map, 2048 * 2 + 1);
-  assert(sm_contains(map, 0) == true);
-  assert(sm_contains(map, 2048 * 2 + 0) == false);
-  assert(sm_contains(map, 2048 * 2 + 1) == true);
-  assert(sm_contains(map, 2048 * 2 + 2) == false);
+  assert(sm_contains(map, 0, NULL) == true);
+  assert(sm_contains(map, 2048 * 2 + 0, NULL) == false);
+  assert(sm_contains(map, 2048 * 2 + 1, NULL) == true);
+  assert(sm_contains(map, 2048 * 2 + 2, NULL) == false);
   sm_add(map, 2048);
-  assert(sm_contains(map, 0) == true);
-  assert(sm_contains(map, 2047) == false);
-  assert(sm_contains(map, 2048) == true);
-  assert(sm_contains(map, 2049) == false);
-  assert(sm_contains(map, 2048 * 2 + 2) == false);
-  assert(sm_contains(map, 2048 * 2 + 0) == false);
-  assert(sm_contains(map, 2048 * 2 + 1) == true);
-  assert(sm_contains(map, 2048 * 2 + 2) == false);
+  assert(sm_contains(map, 0, NULL) == true);
+  assert(sm_contains(map, 2047, NULL) == false);
+  assert(sm_contains(map, 2048, NULL) == true);
+  assert(sm_contains(map, 2049, NULL) == false);
+  assert(sm_contains(map, 2048 * 2 + 2, NULL) == false);
+  assert(sm_contains(map, 2048 * 2 + 0, NULL) == false);
+  assert(sm_contains(map, 2048 * 2 + 1, NULL) == true);
+  assert(sm_contains(map, 2048 * 2 + 2, NULL) == false);
 
   sm_clear(map);
   fprintf(stderr, ".");
@@ -175,12 +173,12 @@ main()
   }
   sm_split(map, 2048, sm2);
   for (int i = 0; i < 2048; i++) {
-    assert(sm_contains(map, i) == true);
-    assert(sm_contains(sm2, i) == false);
+    assert(sm_contains(map, i, NULL) == true);
+    assert(sm_contains(sm2, i, NULL) == false);
   }
   for (int i = 2048; i < 2048 * 2; i++) {
-    assert(sm_contains(map, i) == false);
-    assert(sm_contains(sm2, i) == true);
+    assert(sm_contains(map, i, NULL) == false);
+    assert(sm_contains(sm2, i, NULL) == true);
   }
   fprintf(stderr, ".");
 
@@ -189,16 +187,16 @@ main()
   sm_clear(map);
   for (int i = 0; i < 2048 * 3; i++) {
     sm_add(map, i);
-    assert(sm_contains(map, i) == true);
+    assert(sm_contains(map, i, NULL) == true);
   }
   sm_split(map, 64, sm2);
   for (int i = 0; i < 2048 * 3; i++) {
     if (i < 64) {
-      assert(sm_contains(map, i) == true);
-      assert(sm_contains(sm2, i) == false);
+      assert(sm_contains(map, i, NULL) == true);
+      assert(sm_contains(sm2, i, NULL) == false);
     } else {
-      assert(sm_contains(map, i) == false);
-      assert(sm_contains(sm2, i) == true);
+      assert(sm_contains(map, i, NULL) == false);
+      assert(sm_contains(sm2, i, NULL) == true);
     }
   }
 

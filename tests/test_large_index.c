@@ -62,7 +62,7 @@ main(void)
 	/* add / contains round-trip for every key (the original bug). */
 	for (size_t i = 0; i < NKEYS; i++) {
 		CHECK(sm_add_grow(&m, KEYS[i]) == KEYS[i]);
-		CHECK(sm_contains(m, KEYS[i]));
+		CHECK(sm_contains(m, KEYS[i], NULL));
 	}
 	CHECK(sm_cardinality(m) == NKEYS);
 
@@ -95,13 +95,13 @@ main(void)
 	CHECK(back != NULL);
 	CHECK(sm_equals(m, back));
 	for (size_t i = 0; i < NKEYS; i++)
-		CHECK(sm_contains(back, KEYS[i]));
+		CHECK(sm_contains(back, KEYS[i], NULL));
 	free(buf);
 	sm_free(back);
 
 	/* removing a >2^32 bit actually clears it. */
 	CHECK(sm_remove(m, KEYS[1]) == KEYS[1]);
-	CHECK(!sm_contains(m, KEYS[1]));
+	CHECK(!sm_contains(m, KEYS[1], NULL));
 	CHECK(sm_cardinality(m) == NKEYS - 1);
 
 	sm_free(m);

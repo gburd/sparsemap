@@ -14,7 +14,6 @@
 #include <common.h>
 #include <errno.h>
 #include <munit.h>
-#include <qc.h>
 #include <sm.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -28,17 +27,12 @@
 
 #define SELECT_FALSE
 
-char *QCC_showSparsemap(void *value, int len);
-char *QCC_showChunk(void *value, int len);
-
 /* !!! Duplicated here for testing purposes. Keep in sync, or suffer. !!! */
 /* !!! Duplicated here for testing purposes. Keep in sync, or suffer. !!! */
 struct sparsemap {
-  size_t m_capacity;
+  size_t m_capacity;  /* (capacity & ~7) bytes; low 3 bits = lineage */
   size_t m_data_used;
   uint8_t *m_data;
-  uint8_t m_alloc_kind;
-  sm_allocator_t m_allocator;
 };
 
 struct user_data {
@@ -68,7 +62,7 @@ populate_map(sm_t *map, int size, int max_value)
   before = sm_cardinality(map);
   for (i = 0; i < (size_t)size; i++) {
     sm_add(map, array[i]);
-    bool set = sm_contains(map, array[i]);
+    bool set = sm_contains(map, array[i], NULL);
     assert_true(set);
   }
   assert_true(sm_cardinality(map) == before + size);
@@ -105,7 +99,7 @@ test_api_new(const MunitParameter params[], void *data)
   (void)data;
 
   assert_ptr_not_null(map);
-  assert_true(map->m_capacity == 1024);
+  assert_true(sm_get_capacity(map) == 1024);
   assert_true(map->m_data_used == sizeof(uint64_t));
   assert_true((((uint8_t)map->m_data[0]) & 0x03) == 0x00);
 
@@ -122,11 +116,11 @@ test_api_new_realloc(const MunitParameter params[], void *data)
   (void)data;
 
   assert_ptr_not_null(map);
-  assert_true(map->m_capacity == 1024);
+  assert_true(sm_get_capacity(map) == 1024);
   assert_true(map->m_data_used == sizeof(uint64_t));
 
   map = sm_set_data_size(map, NULL, 2048);
-  assert_true(map->m_capacity == 2048);
+  assert_true(sm_get_capacity(map) == 2048);
   assert_true(map->m_data_used == sizeof(uint64_t));
 
   munit_free(map);
@@ -150,7 +144,7 @@ test_api_new_heap(const MunitParameter params[], void *data)
 
   sm_init(map, buf, 1024);
   assert_ptr_equal(buf, map->m_data);
-  assert_true(map->m_capacity == 1024);
+  assert_true(sm_get_capacity(map) == 1024);
   assert_true(map->m_data_used == sizeof(uint64_t));
 
   munit_free(map->m_data);
@@ -173,7 +167,7 @@ test_api_new_static(const MunitParameter params[], void *data)
 
   sm_init(map, buf, 1024);
   assert_ptr_equal(buf, map->m_data);
-  assert_true(map->m_capacity == 1024);
+  assert_true(sm_get_capacity(map) == 1024);
   assert_true(map->m_data_used == sizeof(uint64_t));
 
   munit_free(map->m_data);
@@ -192,7 +186,7 @@ test_api_new_stack(const MunitParameter params[], void *data)
 
   sm_init(map, buf, 1024);
   assert_ptr_equal(&buf, map->m_data);
-  assert_true(map->m_capacity == 1024);
+  assert_true(sm_get_capacity(map) == 1024);
   assert_true(map->m_data_used == sizeof(uint64_t));
 
   return MUNIT_OK;
@@ -226,9 +220,9 @@ test_api_clear(const MunitParameter params[], void *data)
   assert_ptr_not_null(map);
 
   sm_add(map, 42);
-  assert_true(sm_contains(map, 42));
+  assert_true(sm_contains(map, 42, NULL));
   sm_clear(map);
-  assert_false(sm_contains(map, 42));
+  assert_false(sm_contains(map, 42, NULL));
 
   return MUNIT_OK;
 }
@@ -261,9 +255,9 @@ test_api_open(const MunitParameter params[], void *data)
 
   assert_ptr_not_null(map);
 
-  sm_open(sm, (uint8_t *)map->m_data, map->m_capacity);
+  sm_open(sm, (uint8_t *)map->m_data, sm_get_capacity(map));
   for (int i = 0; i < 3 * 1024; i++) {
-    assert_true(sm_contains(sm, i) == sm_contains(map, i));
+    assert_true(sm_contains(sm, i, NULL) == sm_contains(map, i, NULL));
   }
 
   return MUNIT_OK;
@@ -296,11 +290,9 @@ test_api_set_data_size(const MunitParameter params[], void *data)
   (void)params;
 
   assert_ptr_not_null(map);
-  assert_true(map->m_capacity == 1024);
-  assert_true(map->m_capacity == sm_get_capacity(map));
+  assert_true(sm_get_capacity(map) == 1024);
   sm_set_data_size(map, NULL, 512);
-  assert_true(map->m_capacity == 512);
-  assert_true(map->m_capacity == sm_get_capacity(map));
+  assert_true(sm_get_capacity(map) == 512);
   return MUNIT_OK;
 }
 
@@ -394,7 +386,7 @@ test_api_get_capacity(const MunitParameter params[], void *data)
   assert_ptr_not_null(map);
 
   sm_add(map, 42);
-  assert_true(sm_contains(map, 42));
+  assert_true(sm_contains(map, 42, NULL));
   assert_true(sm_get_capacity(map) == 1024);
 
   return MUNIT_OK;
@@ -429,13 +421,13 @@ test_api_is_set(const MunitParameter params[], void *data)
   assert_ptr_not_null(map);
 
   sm_add(map, 42);
-  assert_true(sm_contains(map, 42));
+  assert_true(sm_contains(map, 42, NULL));
 
   sm_clear(map);
   size_t n = populate_map_rle(map, 0, 10, 2718);
 
   for (size_t i = 0; i < n; i++) {
-    assert_true(sm_contains(map, i));
+    assert_true(sm_contains(map, i, NULL));
   }
 
   return MUNIT_OK;
@@ -468,16 +460,16 @@ test_api_set(const MunitParameter params[], void *data)
 
   assert_ptr_not_null(map);
 
-  assert_false(sm_contains(map, 1));
-  assert_false(sm_contains(map, 8192));
+  assert_false(sm_contains(map, 1, NULL));
+  assert_false(sm_contains(map, 8192, NULL));
   sm_add(map, 1);
   sm_add(map, 8192);
-  assert_true(sm_contains(map, 1));
-  assert_true(sm_contains(map, 8192));
+  assert_true(sm_contains(map, 1, NULL));
+  assert_true(sm_contains(map, 8192, NULL));
   sm_remove(map, 1);
   sm_remove(map, 8192);
-  assert_false(sm_contains(map, 1));
-  assert_false(sm_contains(map, 8192));
+  assert_false(sm_contains(map, 1, NULL));
+  assert_false(sm_contains(map, 8192, NULL));
 
   return MUNIT_OK;
 }
@@ -724,10 +716,6 @@ test_api_get_start_offset_roll(const MunitParameter params[], void *data)
     sm_add(map, i);
     if (i > 2047) {
       sm_remove(map, i - 2048);
-      // if (sm_minimum(map) != i - 2047) {
-      //   fprintf(stdout, "\n%s\n", QCC_showSparsemap(map, 0));
-      //   fprintf(stdout, "%ld\t%ld\t%zu\n", i, i - 2047, sm_minimum(map));
-      // }
       assert_true(sm_minimum(map) == i - 2047);
     }
   }
@@ -827,19 +815,19 @@ test_api_split(const MunitParameter params[], void *data)
         assert_true(sm_add(map, i + seg) == i + seg);
       }
       for (uint64_t i = 0; i < 1024; i++) {
-        assert_true(sm_contains(map, i + seg));
-        assert_false(sm_contains(&portion, i + seg));
+        assert_true(sm_contains(map, i + seg, NULL));
+        assert_false(sm_contains(&portion, i + seg, NULL));
       }
 
       sm_split(map, seg + off, &portion);
 
       for (uint64_t i = seg; i < seg + 1024; i++) {
         if (i < seg + off) {
-          assert_true(sm_contains(map, i));
-          assert_false(sm_contains(&portion, i));
+          assert_true(sm_contains(map, i, NULL));
+          assert_false(sm_contains(&portion, i, NULL));
         } else {
-          assert_false(sm_contains(map, i));
-          assert_true(sm_contains(&portion, i));
+          assert_false(sm_contains(map, i, NULL));
+          assert_true(sm_contains(&portion, i, NULL));
         }
       }
       sm_clear(map);
@@ -851,19 +839,19 @@ test_api_split(const MunitParameter params[], void *data)
     assert_true(sm_add(map, i) == i);
   }
   for (uint64_t i = 0; i < 100; i++) {
-    assert_true(sm_contains(map, i));
-    assert_false(sm_contains(&portion, i));
+    assert_true(sm_contains(map, i, NULL));
+    assert_false(sm_contains(&portion, i, NULL));
   }
 
   offset = sm_split(map, SM_IDX_MAX, &portion);
 
   for (uint64_t i = 0; i < offset; i++) {
-    assert_true(sm_contains(map, i));
-    assert_false(sm_contains(&portion, i));
+    assert_true(sm_contains(map, i, NULL));
+    assert_false(sm_contains(&portion, i, NULL));
   }
   for (uint64_t i = offset + 1; i < sm_maximum(&portion); i++) {
-    assert_false(sm_contains(map, i));
-    assert_true(sm_contains(&portion, i));
+    assert_false(sm_contains(map, i, NULL));
+    assert_true(sm_contains(&portion, i, NULL));
   }
 
   sm_clear(&portion);
@@ -881,12 +869,12 @@ test_api_split(const MunitParameter params[], void *data)
   assert_true(sm_cardinality(&portion) == 7);
 
   for (uint64_t i = 0; i < offset - 24; i++) {
-    assert_true(sm_contains(map, i + 24));
-    assert_false(sm_contains(&portion, i + 24));
+    assert_true(sm_contains(map, i + 24, NULL));
+    assert_false(sm_contains(&portion, i + 24, NULL));
   }
   for (uint64_t i = offset - 24; i < 13; i++) {
-    assert_false(sm_contains(map, i + 24));
-    assert_true(sm_contains(&portion, i + 24));
+    assert_false(sm_contains(map, i + 24, NULL));
+    assert_true(sm_contains(&portion, i + 24, NULL));
   }
 
   return MUNIT_OK;
@@ -921,39 +909,39 @@ test_api_offset(const MunitParameter params[], void *data)
   sm_add(map, 30);
   sm_t *copy = sm_offset(map, 0);
   assert_ptr_not_null(copy);
-  assert_true(sm_contains(copy, 10));
-  assert_true(sm_contains(copy, 20));
-  assert_true(sm_contains(copy, 30));
+  assert_true(sm_contains(copy, 10, NULL));
+  assert_true(sm_contains(copy, 20, NULL));
+  assert_true(sm_contains(copy, 30, NULL));
   assert_size(sm_cardinality(copy), ==, 3);
   free(copy);
 
   /* Test 2: positive offset */
   sm_t *shifted = sm_offset(map, 100);
   assert_ptr_not_null(shifted);
-  assert_false(sm_contains(shifted, 10));
-  assert_false(sm_contains(shifted, 20));
-  assert_false(sm_contains(shifted, 30));
-  assert_true(sm_contains(shifted, 110));
-  assert_true(sm_contains(shifted, 120));
-  assert_true(sm_contains(shifted, 130));
+  assert_false(sm_contains(shifted, 10, NULL));
+  assert_false(sm_contains(shifted, 20, NULL));
+  assert_false(sm_contains(shifted, 30, NULL));
+  assert_true(sm_contains(shifted, 110, NULL));
+  assert_true(sm_contains(shifted, 120, NULL));
+  assert_true(sm_contains(shifted, 130, NULL));
   assert_size(sm_cardinality(shifted), ==, 3);
   free(shifted);
 
   /* Test 3: negative offset, no bits dropped */
   shifted = sm_offset(map, -5);
   assert_ptr_not_null(shifted);
-  assert_true(sm_contains(shifted, 5));
-  assert_true(sm_contains(shifted, 15));
-  assert_true(sm_contains(shifted, 25));
+  assert_true(sm_contains(shifted, 5, NULL));
+  assert_true(sm_contains(shifted, 15, NULL));
+  assert_true(sm_contains(shifted, 25, NULL));
   assert_size(sm_cardinality(shifted), ==, 3);
   free(shifted);
 
   /* Test 4: negative offset, some bits dropped */
   shifted = sm_offset(map, -15);
   assert_ptr_not_null(shifted);
-  assert_false(sm_contains(shifted, 0)); /* 10-15 < 0, dropped */
-  assert_true(sm_contains(shifted, 5));  /* 20-15 = 5 */
-  assert_true(sm_contains(shifted, 15)); /* 30-15 = 15 */
+  assert_false(sm_contains(shifted, 0, NULL)); /* 10-15 < 0, dropped */
+  assert_true(sm_contains(shifted, 5, NULL));  /* 20-15 = 5 */
+  assert_true(sm_contains(shifted, 15, NULL)); /* 30-15 = 15 */
   assert_size(sm_cardinality(shifted), ==, 2);
   free(shifted);
 
@@ -972,9 +960,9 @@ test_api_offset(const MunitParameter params[], void *data)
   sm_add(map, 2);
   shifted = sm_offset(map, 10000);
   assert_ptr_not_null(shifted);
-  assert_true(sm_contains(shifted, 10000));
-  assert_true(sm_contains(shifted, 10001));
-  assert_true(sm_contains(shifted, 10002));
+  assert_true(sm_contains(shifted, 10000, NULL));
+  assert_true(sm_contains(shifted, 10001, NULL));
+  assert_true(sm_contains(shifted, 10002, NULL));
   assert_size(sm_cardinality(shifted), ==, 3);
   free(shifted);
 
@@ -985,10 +973,10 @@ test_api_offset(const MunitParameter params[], void *data)
   }
   shifted = sm_offset(map, 64);
   assert_ptr_not_null(shifted);
-  assert_false(sm_contains(shifted, 63));
-  assert_true(sm_contains(shifted, 64));
-  assert_true(sm_contains(shifted, 5063));
-  assert_false(sm_contains(shifted, 5064));
+  assert_false(sm_contains(shifted, 63, NULL));
+  assert_true(sm_contains(shifted, 64, NULL));
+  assert_true(sm_contains(shifted, 5063, NULL));
+  assert_false(sm_contains(shifted, 5064, NULL));
   assert_size(sm_cardinality(shifted), ==, 5000);
   free(shifted);
 
@@ -999,11 +987,11 @@ test_api_offset(const MunitParameter params[], void *data)
   sm_add(map, 2000);
   shifted = sm_offset(map, 2048);
   assert_ptr_not_null(shifted);
-  assert_true(sm_contains(shifted, 2148));   /* 100 + 2048 */
-  assert_true(sm_contains(shifted, 2548));   /* 500 + 2048 */
-  assert_true(sm_contains(shifted, 4048));   /* 2000 + 2048 */
-  assert_false(sm_contains(shifted, 100));
-  assert_false(sm_contains(shifted, 500));
+  assert_true(sm_contains(shifted, 2148, NULL));   /* 100 + 2048 */
+  assert_true(sm_contains(shifted, 2548, NULL));   /* 500 + 2048 */
+  assert_true(sm_contains(shifted, 4048, NULL));   /* 2000 + 2048 */
+  assert_false(sm_contains(shifted, 100, NULL));
+  assert_false(sm_contains(shifted, 500, NULL));
   assert_size(sm_cardinality(shifted), ==, 3);
   free(shifted);
 
@@ -1015,12 +1003,12 @@ test_api_offset(const MunitParameter params[], void *data)
   sm_add(map, 64);
   shifted = sm_offset(map, 63);
   assert_ptr_not_null(shifted);
-  assert_true(sm_contains(shifted, 63));    /* 0 + 63 */
-  assert_true(sm_contains(shifted, 64));    /* 1 + 63 */
-  assert_true(sm_contains(shifted, 126));   /* 63 + 63 */
-  assert_true(sm_contains(shifted, 127));   /* 64 + 63 */
-  assert_false(sm_contains(shifted, 62));
-  assert_false(sm_contains(shifted, 128));
+  assert_true(sm_contains(shifted, 63, NULL));    /* 0 + 63 */
+  assert_true(sm_contains(shifted, 64, NULL));    /* 1 + 63 */
+  assert_true(sm_contains(shifted, 126, NULL));   /* 63 + 63 */
+  assert_true(sm_contains(shifted, 127, NULL));   /* 64 + 63 */
+  assert_false(sm_contains(shifted, 62, NULL));
+  assert_false(sm_contains(shifted, 128, NULL));
   assert_size(sm_cardinality(shifted), ==, 4);
   free(shifted);
 
@@ -1031,10 +1019,10 @@ test_api_offset(const MunitParameter params[], void *data)
   }
   shifted = sm_offset(map, 37);
   assert_ptr_not_null(shifted);
-  assert_false(sm_contains(shifted, 36));
-  assert_true(sm_contains(shifted, 37));     /* 0 + 37 */
-  assert_true(sm_contains(shifted, 10036));  /* 9999 + 37 */
-  assert_false(sm_contains(shifted, 10037));
+  assert_false(sm_contains(shifted, 36, NULL));
+  assert_true(sm_contains(shifted, 37, NULL));     /* 0 + 37 */
+  assert_true(sm_contains(shifted, 10036, NULL));  /* 9999 + 37 */
+  assert_false(sm_contains(shifted, 10037, NULL));
   assert_size(sm_cardinality(shifted), ==, 10000);
   free(shifted);
 
@@ -1045,9 +1033,9 @@ test_api_offset(const MunitParameter params[], void *data)
   sm_add(map, 4100);   /* in third chunk */
   shifted = sm_offset(map, -10);
   assert_ptr_not_null(shifted);
-  assert_false(sm_contains(shifted, 0));     /* 5 - 10 < 0, dropped */
-  assert_true(sm_contains(shifted, 2040));   /* 2050 - 10 */
-  assert_true(sm_contains(shifted, 4090));   /* 4100 - 10 */
+  assert_false(sm_contains(shifted, 0, NULL));     /* 5 - 10 < 0, dropped */
+  assert_true(sm_contains(shifted, 2040, NULL));   /* 2050 - 10 */
+  assert_true(sm_contains(shifted, 4090, NULL));   /* 4100 - 10 */
   assert_size(sm_cardinality(shifted), ==, 2);
   free(shifted);
 
@@ -1056,8 +1044,8 @@ test_api_offset(const MunitParameter params[], void *data)
   sm_add(map, 2047);
   shifted = sm_offset(map, 1);
   assert_ptr_not_null(shifted);
-  assert_false(sm_contains(shifted, 2047));
-  assert_true(sm_contains(shifted, 2048));   /* 2047 + 1 crosses chunk boundary */
+  assert_false(sm_contains(shifted, 2047, NULL));
+  assert_true(sm_contains(shifted, 2048, NULL));   /* 2047 + 1 crosses chunk boundary */
   assert_size(sm_cardinality(shifted), ==, 1);
   free(shifted);
 
@@ -1102,8 +1090,8 @@ test_api_merge(const MunitParameter params[], void *data)
   {
     sm_t *m = sm_union(map, other);
     assert_ptr_not_null(m);
-    assert_true(sm_contains(other, 0));
-    assert_true(sm_contains(m, 0));
+    assert_true(sm_contains(other, 0, NULL));
+    assert_true(sm_contains(m, 0, NULL));
     free(m);
   }
   sm_clear(map);
@@ -1115,7 +1103,7 @@ test_api_merge(const MunitParameter params[], void *data)
   {
     sm_t *m = sm_union(map, other);
     assert_ptr_not_null(m);
-    assert_true(sm_contains(m, 0));
+    assert_true(sm_contains(m, 0, NULL));
     free(m);
   }
   sm_clear(map);
@@ -1126,7 +1114,7 @@ test_api_merge(const MunitParameter params[], void *data)
   {
     sm_t *m = sm_union(map, other);
     assert_ptr_not_null(m);
-    assert_true(sm_contains(m, 0));
+    assert_true(sm_contains(m, 0, NULL));
     free(m);
   }
   sm_clear(map);
@@ -1136,7 +1124,7 @@ test_api_merge(const MunitParameter params[], void *data)
   {
     sm_t *m = sm_union(map, other);
     assert_ptr_not_null(m);
-    assert_true(sm_contains(m, 2049));
+    assert_true(sm_contains(m, 2049, NULL));
     free(m);
   }
   sm_clear(map);
@@ -1151,17 +1139,17 @@ test_api_merge(const MunitParameter params[], void *data)
   {
     sm_t *m = sm_union(map, other);
     assert_ptr_not_null(m);
-    assert_true(sm_contains(m, 1));
-    assert_true(sm_contains(m, 2049));
-    assert_true(sm_contains(m, 2050));
-    assert_true(sm_contains(m, 4097));
-    assert_true(sm_contains(m, 6113));
-    assert_true(sm_contains(m, 8193));
+    assert_true(sm_contains(m, 1, NULL));
+    assert_true(sm_contains(m, 2049, NULL));
+    assert_true(sm_contains(m, 2050, NULL));
+    assert_true(sm_contains(m, 4097, NULL));
+    assert_true(sm_contains(m, 6113, NULL));
+    assert_true(sm_contains(m, 8193, NULL));
     for (int i = 0; i < 10000; i++) {
       if (i == 2049 || i == 1 || i == 2050 || i == 4097 || i == 6113 || i == 8193)
         continue;
       else
-        assert_false(sm_contains(m, i));
+        assert_false(sm_contains(m, i, NULL));
     }
     free(m);
   }
@@ -1177,11 +1165,11 @@ test_api_merge(const MunitParameter params[], void *data)
   {
     sm_t *m = sm_union(map, other);
     assert_ptr_not_null(m);
-    assert(sm_contains(m, 0));
-    assert(sm_contains(m, 2048));
-    assert(sm_contains(m, 8193));
+    assert(sm_contains(m, 0, NULL));
+    assert(sm_contains(m, 2048, NULL));
+    assert(sm_contains(m, 8193, NULL));
     for (int i = 2049; i < 4096; i++) {
-      assert(sm_contains(m, i));
+      assert(sm_contains(m, i, NULL));
     }
     free(m);
   }
@@ -1194,18 +1182,18 @@ test_api_merge(const MunitParameter params[], void *data)
   sm_split(map, 2051, other);
   for (int i = 2049; i < 4096; i++) {
     if (i < 2051) {
-      assert_true(sm_contains(map, i));
-      assert_false(sm_contains(other, i));
+      assert_true(sm_contains(map, i, NULL));
+      assert_false(sm_contains(other, i, NULL));
     } else {
-      assert_false(sm_contains(map, i));
-      assert_true(sm_contains(other, i));
+      assert_false(sm_contains(map, i, NULL));
+      assert_true(sm_contains(other, i, NULL));
     }
   }
   {
     sm_t *m = sm_union(map, other);
     assert_ptr_not_null(m);
     for (int i = 2049; i < 4096; i++) {
-      assert_true(sm_contains(m, i));
+      assert_true(sm_contains(m, i, NULL));
     }
     free(m);
   }
@@ -1284,7 +1272,7 @@ test_api_select_false(const MunitParameter params[], void *data)
   for (size_t i = 0; i < 20; i++) {
     uint64_t f = sm_select(map, i, false);
     assert_true(f == off[i]);
-    assert_true(sm_contains(map, f) == false);
+    assert_true(sm_contains(map, f, NULL) == false);
   }
 
   return MUNIT_OK;
@@ -1512,7 +1500,7 @@ test_api_rle_edge_cases(const MunitParameter params[], void *data)
   /* Test 1: Single bit RLE */
   sm_clear(map);
   sm_add(map, 0);
-  assert_true(sm_contains(map, 0) == true);
+  assert_true(sm_contains(map, 0, NULL) == true);
   assert_true(sm_select(map, 0, true) == 0);
   assert_true(sm_cardinality(map) == 1);
 
@@ -1529,9 +1517,9 @@ test_api_rle_edge_cases(const MunitParameter params[], void *data)
   /* Test 3: is_set boundary check (the bug we fixed) */
   sm_clear(map);
   populate_map_rle(map, 0, 1, 1000);
-  assert_true(sm_contains(map, 0) == true);
-  assert_true(sm_contains(map, 999) == true);
-  assert_true(sm_contains(map, 1000) == false); /* Beyond run */
+  assert_true(sm_contains(map, 0, NULL) == true);
+  assert_true(sm_contains(map, 999, NULL) == true);
+  assert_true(sm_contains(map, 1000, NULL) == false); /* Beyond run */
 
   return MUNIT_OK;
 }
@@ -1774,7 +1762,7 @@ test_api_random_set_clear(const MunitParameter params[], void *data)
   /* Verify all bits in each range are set. */
   for (int r = 0; r < num_ranges; r++) {
     for (size_t i = 0; i < range_len[r]; i++) {
-      assert_true(sm_contains(map, range_start[r] + i));
+      assert_true(sm_contains(map, range_start[r] + i, NULL));
     }
   }
 
@@ -1870,9 +1858,9 @@ test_api_intersection(const MunitParameter params[], void *data)
     sm_t *r = sm_intersection(a, b);
     assert_ptr_not_null(r);
     assert_size(sm_cardinality(r), ==, 3);
-    assert_true(sm_contains(r, 10));
-    assert_true(sm_contains(r, 20));
-    assert_true(sm_contains(r, 30));
+    assert_true(sm_contains(r, 10, NULL));
+    assert_true(sm_contains(r, 20, NULL));
+    assert_true(sm_contains(r, 30, NULL));
     free(r);
     free(a);
     free(b);
@@ -1904,10 +1892,10 @@ test_api_intersection(const MunitParameter params[], void *data)
     assert_ptr_not_null(r);
     assert_size(sm_cardinality(r), ==, 50);
     for (int i = 50; i < 100; i++) {
-      assert_true(sm_contains(r, i));
+      assert_true(sm_contains(r, i, NULL));
     }
-    assert_false(sm_contains(r, 49));
-    assert_false(sm_contains(r, 100));
+    assert_false(sm_contains(r, 49, NULL));
+    assert_false(sm_contains(r, 100, NULL));
     free(r);
     free(a);
     free(b);
@@ -1926,10 +1914,10 @@ test_api_intersection(const MunitParameter params[], void *data)
     sm_t *r = sm_intersection(a, b);
     assert_ptr_not_null(r);
     assert_size(sm_cardinality(r), ==, 2000);
-    assert_true(sm_contains(r, 3000));
-    assert_true(sm_contains(r, 4999));
-    assert_false(sm_contains(r, 2999));
-    assert_false(sm_contains(r, 5000));
+    assert_true(sm_contains(r, 3000, NULL));
+    assert_true(sm_contains(r, 4999, NULL));
+    assert_false(sm_contains(r, 2999, NULL));
+    assert_false(sm_contains(r, 5000, NULL));
     free(r);
     free(a);
     free(b);
@@ -1951,10 +1939,10 @@ test_api_intersection(const MunitParameter params[], void *data)
     sm_t *r = sm_intersection(a, b);
     assert_ptr_not_null(r);
     assert_size(sm_cardinality(r), ==, 3);
-    assert_true(sm_contains(r, 100));
-    assert_true(sm_contains(r, 200));
-    assert_true(sm_contains(r, 300));
-    assert_false(sm_contains(r, 6000));
+    assert_true(sm_contains(r, 100, NULL));
+    assert_true(sm_contains(r, 200, NULL));
+    assert_true(sm_contains(r, 300, NULL));
+    assert_false(sm_contains(r, 6000, NULL));
     free(r);
     free(a);
     free(b);
@@ -1996,9 +1984,9 @@ test_api_difference(const MunitParameter params[], void *data)
     sm_t *r = sm_difference(a, b);
     assert_ptr_not_null(r);
     assert_size(sm_cardinality(r), ==, 3);
-    assert_true(sm_contains(r, 10));
-    assert_true(sm_contains(r, 20));
-    assert_true(sm_contains(r, 30));
+    assert_true(sm_contains(r, 10, NULL));
+    assert_true(sm_contains(r, 20, NULL));
+    assert_true(sm_contains(r, 30, NULL));
     free(r);
     free(a);
     free(b);
@@ -2028,8 +2016,8 @@ test_api_difference(const MunitParameter params[], void *data)
     sm_t *r = sm_difference(a, b);
     assert_ptr_not_null(r);
     assert_size(sm_cardinality(r), ==, 2);
-    assert_true(sm_contains(r, 10));
-    assert_true(sm_contains(r, 20));
+    assert_true(sm_contains(r, 10, NULL));
+    assert_true(sm_contains(r, 20, NULL));
     free(r);
     free(a);
     free(b);
@@ -2049,9 +2037,9 @@ test_api_difference(const MunitParameter params[], void *data)
     assert_ptr_not_null(r);
     assert_size(sm_cardinality(r), ==, 50);
     for (int i = 0; i < 50; i++) {
-      assert_true(sm_contains(r, i));
+      assert_true(sm_contains(r, i, NULL));
     }
-    assert_false(sm_contains(r, 50));
+    assert_false(sm_contains(r, 50, NULL));
     free(r);
     free(a);
     free(b);
@@ -2070,9 +2058,9 @@ test_api_difference(const MunitParameter params[], void *data)
     sm_t *r = sm_difference(a, b);
     assert_ptr_not_null(r);
     assert_size(sm_cardinality(r), ==, 3000);
-    assert_true(sm_contains(r, 0));
-    assert_true(sm_contains(r, 2999));
-    assert_false(sm_contains(r, 3000));
+    assert_true(sm_contains(r, 0, NULL));
+    assert_true(sm_contains(r, 2999, NULL));
+    assert_false(sm_contains(r, 3000, NULL));
     free(r);
     free(a);
     free(b);
@@ -2094,13 +2082,13 @@ test_api_difference(const MunitParameter params[], void *data)
     assert_ptr_not_null(r);
     assert_size(sm_cardinality(r), ==, 44);
     for (int i = 0; i < 20; i++) {
-      assert_true(sm_contains(r, i));
+      assert_true(sm_contains(r, i, NULL));
     }
     for (int i = 20; i < 40; i++) {
-      assert_false(sm_contains(r, i));
+      assert_false(sm_contains(r, i, NULL));
     }
     for (int i = 40; i < 64; i++) {
-      assert_true(sm_contains(r, i));
+      assert_true(sm_contains(r, i, NULL));
     }
     free(r);
     free(a);
@@ -2157,83 +2145,6 @@ static MunitTest api_test_suite[] = {
 };
 // clang-format on
 
-/* -------------------------- Quickcheck, Property Based Tests */
-
-extern QCC_GenValue *QCC_genChunk();
-extern QCC_GenValue *QCC_genSparsemap();
-extern QCC_TestStatus _tst_chunk_calc_vector_size_equality(QCC_GenValue **vals, int len, QCC_Stamp **stamp);
-extern QCC_TestStatus _tst_chunk_get_position(QCC_GenValue **vals, int len, QCC_Stamp **stamp);
-extern QCC_TestStatus _tst_chunk_get_capacity(QCC_GenValue **vals, int len, QCC_Stamp **stamp);
-extern QCC_TestStatus _tst_get_chunk_offset(QCC_GenValue **vals, int len, QCC_Stamp **stamp);
-extern QCC_TestStatus _tst_rle_select_rank_consistency(QCC_GenValue **vals, int len, QCC_Stamp **stamp);
-extern QCC_TestStatus _tst_rle_scan_completeness(QCC_GenValue **vals, int len, QCC_Stamp **stamp);
-
-static MunitResult
-qc__sm_chunk_calc_vector_size(const MunitParameter params[], void *data)
-{
-  (void)params;
-  (void)data;
-
-  return QCC_testForAll(1000, 1000, _tst_chunk_calc_vector_size_equality, 1, QCC_genInt);
-}
-
-static MunitResult
-qc__sm_chunk_get_position(const MunitParameter params[], void *data)
-{
-  (void)params;
-  (void)data;
-
-  return QCC_testForAll(100, 1000, _tst_chunk_get_position, 1, QCC_genChunk);
-}
-
-static MunitResult
-qc__sm_chunk_get_capacity(const MunitParameter params[], void *data)
-{
-  (void)params;
-  (void)data;
-
-  return QCC_testForAll(100, 1000, _tst_chunk_get_capacity, 1, QCC_genChunk);
-}
-
-static MunitResult
-qc__sm_get_chunk_offset(const MunitParameter params[], void *data)
-{
-  (void)params;
-  (void)data;
-
-  return QCC_testForAll(100, 1000, _tst_get_chunk_offset, 2, QCC_genInt, QCC_genSparsemap);
-}
-
-static MunitResult
-qc_rle_select_rank_consistency(const MunitParameter params[], void *data)
-{
-  (void)params;
-  (void)data;
-
-  return QCC_testForAll(100, 1000, _tst_rle_select_rank_consistency, 1, QCC_genSparsemap);
-}
-
-static MunitResult
-qc_rle_scan_completeness(const MunitParameter params[], void *data)
-{
-  (void)params;
-  (void)data;
-
-  return QCC_testForAll(100, 1000, _tst_rle_scan_completeness, 1, QCC_genSparsemap);
-}
-
-// clang-format off
-static MunitTest qc_test_suite[] = {
-  { (char *)"/__sm_chunk_calc_vector_size", qc__sm_chunk_calc_vector_size, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
-  { (char *)"/__sm_chunk_get_position", qc__sm_chunk_get_position, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
-  { (char *)"/__sm_chunk_get_capacity", qc__sm_chunk_get_capacity, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
-  { (char *)"/__sm_get_chunk_offset", qc__sm_get_chunk_offset, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
-  { (char *)"/rle_select_rank_consistency", qc_rle_select_rank_consistency, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
-  { (char *)"/rle_scan_completeness", qc_rle_scan_completeness, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
-  { NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
-};
-// clang-format off
-
 /* -------------------------- Integration Tests */
 
 static void *
@@ -2271,8 +2182,8 @@ test_integration_rle_transition(const MunitParameter params[], void *data)
     sm_add(map, i); /* Set every other bit: 0, 2, 4, ..., 98 */
   }
   assert_true(sm_cardinality(map) == 50);
-  assert_true(sm_contains(map, 0) == true);
-  assert_true(sm_contains(map, 1) == false);
+  assert_true(sm_contains(map, 0, NULL) == true);
+  assert_true(sm_contains(map, 1, NULL) == false);
 
   /* Verify select works on sparse chunk */
   assert_true(sm_select(map, 0, true) == 0);
@@ -2287,9 +2198,9 @@ test_integration_rle_transition(const MunitParameter params[], void *data)
   assert_true(sm_cardinality(map) == 3000);
 
   /* Verify all operations work on RLE chunk */
-  assert_true(sm_contains(map, 0) == true);
-  assert_true(sm_contains(map, 2999) == true);
-  assert_true(sm_contains(map, 3000) == false);
+  assert_true(sm_contains(map, 0, NULL) == true);
+  assert_true(sm_contains(map, 2999, NULL) == true);
+  assert_true(sm_contains(map, 3000, NULL) == false);
 
   /* Verify select on RLE */
   assert_true(sm_select(map, 0, true) == 0);
@@ -2310,9 +2221,9 @@ test_integration_rle_transition(const MunitParameter params[], void *data)
   /* Phase 3: Modify chunk (clear bit in middle to split RLE back to sparse) */
   sm_remove(map, 1500); /* Creates gap, should convert to sparse */
   assert_true(sm_cardinality(map) == 2999);
-  assert_true(sm_contains(map, 1499) == true);
-  assert_true(sm_contains(map, 1500) == false);
-  assert_true(sm_contains(map, 1501) == true);
+  assert_true(sm_contains(map, 1499, NULL) == true);
+  assert_true(sm_contains(map, 1500, NULL) == false);
+  assert_true(sm_contains(map, 1501, NULL) == true);
 
   /* Verify operations still work after transition back to sparse */
   assert_true(sm_select(map, 0, true) == 0);
@@ -2461,7 +2372,7 @@ test_scale_fuzz(const MunitParameter params[], void *data)
   }
   assert_true(sm_cardinality(map) == expected_count);
   for (size_t i = 0; i < 2048; i++) {
-    assert_true(sm_contains(map, i) == bits[i]);
+    assert_true(sm_contains(map, i, NULL) == bits[i]);
   }
   return MUNIT_OK;
 }
@@ -2544,13 +2455,13 @@ test_scale_spans_come_spans_go(const MunitParameter params[], void *data)
           continue;
         }
         for (int j = b; j < s; j++) {
-          assert_true(sm_contains(map, j) == true);
+          assert_true(sm_contains(map, j, NULL) == true);
         }
         for (int j = b; j < s; j++) {
           sm_remove(map, j);
         }
         for (int j = b; j < s; j++) {
-          assert_true(sm_contains(map, j) == false);
+          assert_true(sm_contains(map, j, NULL) == false);
         }
         break;
       } while (true);
@@ -2764,7 +2675,6 @@ static MunitTest perf_test_suite[] = {
 // clang-format off
 static MunitSuite other_test_suite[] = {
   { "/api", api_test_suite, NULL, 1, MUNIT_SUITE_OPTION_NONE },
-  { "/qc", qc_test_suite, NULL, 1, MUNIT_SUITE_OPTION_NONE },
   { "/integration", integration_test_suite, NULL, 1, MUNIT_SUITE_OPTION_NONE },
   { "/perf", perf_test_suite, NULL, 1, MUNIT_SUITE_OPTION_NONE },
   { "/scale", scale_test_suite, NULL, 1, MUNIT_SUITE_OPTION_NONE },
@@ -2787,8 +2697,6 @@ main(int argc, char *argv[MUNIT_ARRAY_PARAM(argc + 1)])
   /* Disable buffering on std{out,err} to avoid having to call fflush(). */
   setvbuf(stdout, NULL, _IONBF, 0);
   setvbuf(stderr, NULL, _IONBF, 0);
-
-  QCC_init(0);
 
   return munit_suite_main(&main_test_suite, (void *)&info, argc, argv);
 }

@@ -101,3 +101,6 @@ core.*
 # Rust build artifacts
 /rust/target/
 rust/Cargo.lock
+# Hegel-c build scratch
+.hegel-c/
+.hegel/

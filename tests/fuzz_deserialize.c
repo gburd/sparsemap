@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT
  *
- * tests/fuzz_deserialize.c — libFuzzer harness for the deserialize
+ * tests/fuzz_deserialize.c -- libFuzzer harness for the deserialize
  * path.  Two distinct entry points get attacked:
  *
  *   sm_open(map, data, size):
@@ -49,18 +49,18 @@ exercise_readonly(sm_t *m)
     (void)sm_is_empty(m);
 
     /* Membership at boundaries. */
-    (void)sm_contains(m, 0);
-    (void)sm_contains(m, 1);
-    (void)sm_contains(m, 63);
-    (void)sm_contains(m, 64);
-    (void)sm_contains(m, 65535);
-    (void)sm_contains(m, SM_IDX_MAX - 1);
+    (void)sm_contains(m, 0, NULL);
+    (void)sm_contains(m, 1, NULL);
+    (void)sm_contains(m, 63, NULL);
+    (void)sm_contains(m, 64, NULL);
+    (void)sm_contains(m, 65535, NULL);
+    (void)sm_contains(m, SM_IDX_MAX - 1, NULL);
 
     /* Iteration: visit up to 256 set bits, then stop.  prev_idx =
      * SM_IDX_MAX is the documented sentinel for "start at first set". */
     uint64_t idx = SM_IDX_MAX;
     for (int i = 0; i < 256; i++) {
-        idx = sm_next_member(m, idx);
+        idx = sm_next_member(m, idx, NULL);
         if (idx == SM_IDX_MAX) break;
     }
 

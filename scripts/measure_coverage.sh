@@ -1,7 +1,7 @@
 #!/bin/sh
 # SPDX-License-Identifier: MIT
 #
-# scripts/measure_coverage.sh — run the test suite under gcov, then
+# scripts/measure_coverage.sh -- run the test suite under gcov, then
 # emit an lcov HTML report under coverage/.
 #
 # Usage: scripts/measure_coverage.sh [BUILDDIR]
@@ -27,7 +27,7 @@ fi
 
 ninja -C "$BUILDDIR"
 
-# Run all tests, but don't fail the script on a single test failure —
+# Run all tests, but don't fail the script on a single test failure --
 # we still want the coverage report.  CI's regular build job is the
 # pass/fail gate.
 meson test -C "$BUILDDIR" --print-errorlogs || true
@@ -42,7 +42,7 @@ geninfo -o coverage/coverage.info \
         --ignore-errors source \
         "$BUILDDIR" 2>/dev/null
 
-# Strip system / test / generated paths from the report — we only
+# Strip system / test / generated paths from the report -- we only
 # care about the library implementation.
 lcov --extract coverage/coverage.info '*sm.c' \
      --output-file coverage/coverage.info \

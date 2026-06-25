@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT
  *
- * tests/test_portability.c — verify the SWAR fallbacks in
+ * tests/test_portability.c -- verify the SWAR fallbacks in
  * src/sm_portability.h agree with the GCC/Clang builtins for a
  * battery of representative inputs.
  *

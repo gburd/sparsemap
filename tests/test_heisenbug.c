@@ -42,7 +42,7 @@
 #include <sm.h>
 
 /*
- * Local macros — no munit dependency.  Standalone test, intended to
+ * Local macros -- no munit dependency.  Standalone test, intended to
  * be wired into the meson test runner in Phase 3 with a TAP-style
  * adapter, and to be compilable with `cc test_heisenbug.c -lsparsemap`
  * for quick reproduction outside the build system.
@@ -55,7 +55,7 @@ static int g_total = 0;
 #define EXPECT(cond, msg) do {                                          \
         g_total++;                                                      \
         if (!(cond)) {                                                  \
-            fprintf(stderr, "  FAIL: %s:%d: %s — expected %s\n",        \
+            fprintf(stderr, "  FAIL: %s:%d: %s -- expected %s\n",        \
                     __FILE__, __LINE__, msg, #cond);                    \
             g_failures++;                                               \
             return 1;                                                   \
@@ -146,7 +146,7 @@ CASE(test_wrap_then_grow_via_set_data_size_null)
 
     /* Verify the bits we set are observable. */
     for (uint64_t i = 0; i < 100; i++) {
-        EXPECT(sm_contains(grown, i * 8),
+        EXPECT(sm_contains(grown, i * 8, NULL),
                "set bit reads back as set");
     }
 
@@ -199,7 +199,7 @@ CASE(test_wrap_then_swap_buffer)
      * via sm_clear.  At minimum, the first SM_SIZEOF_OVERHEAD
      * bytes must be zero (chunk count 0); bytes after that may be
      * anything.  Just verify the library didn't write into `small`
-     * past byte 4 — for our purposes, bytes [4, 256) should still
+     * past byte 4 -- for our purposes, bytes [4, 256) should still
      * be zero from the initial memset.
      */
     int small_unchanged_past_overhead = 1;
@@ -249,7 +249,7 @@ CASE(test_owned_copy_normalizes_lineage)
     EXPECT(sm_cardinality(owned) == 50,
            "copy has same cardinality");
     for (uint64_t i = 0; i < 50; i++) {
-        EXPECT(sm_contains(owned, i * 16),
+        EXPECT(sm_contains(owned, i * 16, NULL),
                "copy contains same bits");
     }
 
@@ -306,11 +306,11 @@ CASE(test_union_with_wrapped_input_grows_result)
     EXPECT(u != NULL, "union returns a non-NULL result");
 
     /* Spot-check a few bits from each side. */
-    EXPECT(sm_contains(u, 0), "bit from a");
-    EXPECT(sm_contains(u, 64), "bit from a");
-    EXPECT(sm_contains(u, 1000000), "bit from b");
-    EXPECT(sm_contains(u, 1000064), "bit from b");
-    EXPECT(!sm_contains(u, 1), "unset bit");
+    EXPECT(sm_contains(u, 0, NULL), "bit from a");
+    EXPECT(sm_contains(u, 64, NULL), "bit from a");
+    EXPECT(sm_contains(u, 1000000, NULL), "bit from b");
+    EXPECT(sm_contains(u, 1000064, NULL), "bit from b");
+    EXPECT(!sm_contains(u, 1, NULL), "unset bit");
 
     free(u);
     free(b);
@@ -343,12 +343,12 @@ CASE(test_intersection_difference_with_wrapped)
     sm_t *diff = sm_difference(a, b);
 
     /* Even-index bits are in both (i*100 == i*100 + 0); odd-index aren't. */
-    EXPECT(sm_contains(intr, 0), "even index in intersection");
-    EXPECT(sm_contains(intr, 200), "even index in intersection");
-    EXPECT(!sm_contains(intr, 100), "odd index NOT in intersection");
+    EXPECT(sm_contains(intr, 0, NULL), "even index in intersection");
+    EXPECT(sm_contains(intr, 200, NULL), "even index in intersection");
+    EXPECT(!sm_contains(intr, 100, NULL), "odd index NOT in intersection");
 
-    EXPECT(!sm_contains(diff, 0), "even index NOT in difference");
-    EXPECT(sm_contains(diff, 100), "odd index in difference");
+    EXPECT(!sm_contains(diff, 0, NULL), "even index NOT in difference");
+    EXPECT(sm_contains(diff, 100, NULL), "odd index in difference");
 
     sm_free(intr);
     sm_free(diff);
@@ -361,7 +361,7 @@ CASE(test_intersection_difference_with_wrapped)
 /*  Driver                                                            */
 /* ------------------------------------------------------------------ */
 
-/* Driver — registers all tests including owned_copy normalization. */
+/* Driver -- registers all tests including owned_copy normalization. */
 int main(void)
 {
     fprintf(stderr, "test_heisenbug:\n");
