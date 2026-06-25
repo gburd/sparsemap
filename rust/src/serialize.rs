@@ -10,7 +10,7 @@
 //!   5      1    flags       bit0 = 1 if the body is little-endian
 //!   6      2    reserved    0
 //!   8      8    cardinality hint (recomputed on read)
-//!  16      8    chunk-count header (u32 count + 4 zero pad)
+//!  16      8    chunk-count header (u64 little-endian)
 //!  24    ...    chunks
 //! ```
 //!
@@ -28,6 +28,13 @@
 //! Version 2 of the wire format (sparsemap 4.0.0+).  Earlier 4-byte-
 //! start v1 buffers are not read; consumers should re-serialize through
 //! the C 4.0.0 (or later) library, which produces v2.
+//!
+//! The chunk-count header is a full 64-bit value (sparsemap 5.1.0+).
+//! It was a u32 in the low 4 bytes of the 8-byte slot through 5.0,
+//! with the high 4 bytes always zero; reading and writing the whole
+//! slot as u64 is byte-identical for any count < 2^32 (every real
+//! map), so v2 buffers stay mutually readable across 5.0 and 5.1.
+//! The wider count removes the 2^32-chunk ceiling.
 
 use crate::{Chunk, SparseMap, BITS_PER_WORD, CHUNK_BITS, WORDS_PER_CHUNK};
 use alloc::boxed::Box;
@@ -39,8 +46,10 @@ const HEADER_LEN: usize = 16;
 const FLAG_LE: u8 = 0x01;
 /* On-disk overhead (chunk-count header and per-chunk start width) is
  * 8 bytes, matching the C library's SM_SIZEOF_OVERHEAD =
- * sizeof(uint64_t).  The count is a u32 in the low 4 bytes of the
- * 8-byte header (the high 4 are zero padding). */
+ * sizeof(uint64_t).  The count occupies the full 8-byte header as a
+ * little-endian u64 (sparsemap 5.1.0+; wire-compatible with the
+ * earlier u32-in-low-4-bytes encoding because the high bytes were
+ * always zero). */
 const OVERHEAD: usize = 8;
 const RLE_FLAG_BITS: u64 = 0b01 << 62;
 const RLE_FLAG_MASK: u64 = 0b11 << 62;
@@ -98,12 +107,12 @@ impl SparseMap {
         out.extend_from_slice(&[0, 0]); // reserved
         out.extend_from_slice(&self.cardinality().to_le_bytes());
 
-        // Body: 8-byte chunk-count header (u32 count + 4 zero pad), then
+        // Body: 8-byte chunk-count header (little-endian u64), then
         // chunks.
         let count_pos = out.len();
         out.extend_from_slice(&[0u8; OVERHEAD]);
 
-        let mut count: u32 = 0;
+        let mut count: u64 = 0;
         for (&base, chunk) in &self.chunks {
             match chunk {
                 Chunk::Dense(w) => {
@@ -124,7 +133,7 @@ impl SparseMap {
                 }
             }
         }
-        out[count_pos..count_pos + 4].copy_from_slice(&count.to_le_bytes());
+        out[count_pos..count_pos + OVERHEAD].copy_from_slice(&count.to_le_bytes());
         out
     }
 
@@ -136,7 +145,7 @@ impl SparseMap {
     /// Returns a [`DecodeError`] for any malformed input rather than
     /// panicking; arbitrary bytes are safe to feed in.
     pub fn from_bytes(buf: &[u8]) -> Result<SparseMap, DecodeError> {
-        if buf.len() < HEADER_LEN + 4 {
+        if buf.len() < HEADER_LEN + OVERHEAD {
             return Err(DecodeError::TooShort);
         }
         let magic = u32::from_le_bytes(buf[0..4].try_into().unwrap());
@@ -150,7 +159,7 @@ impl SparseMap {
         let le = buf[5] & FLAG_LE != 0;
 
         let body = &buf[HEADER_LEN..];
-        let count = read_u32(body, 0, le).ok_or(DecodeError::Corrupt)?;
+        let count = read_u64(body, 0, le).ok_or(DecodeError::Corrupt)?;
         // Chunks begin after the 8-byte chunk-count header.
         let mut pos = OVERHEAD;
 
@@ -285,16 +294,6 @@ fn write_rle_chunk(out: &mut Vec<u8>, start: u64, cap: u64, len: u64) {
     let desc = RLE_FLAG_BITS | ((cap & RLE_MAX_SPAN) << 31) | (len & RLE_MAX_SPAN);
     out.extend_from_slice(&start.to_le_bytes());
     out.extend_from_slice(&desc.to_le_bytes());
-}
-
-fn read_u32(b: &[u8], at: usize, le: bool) -> Option<u32> {
-    let s = b.get(at..at + 4)?;
-    let a: [u8; 4] = s.try_into().unwrap();
-    Some(if le {
-        u32::from_le_bytes(a)
-    } else {
-        u32::from_be_bytes(a)
-    })
 }
 
 fn read_u64(b: &[u8], at: usize, le: bool) -> Option<u64> {

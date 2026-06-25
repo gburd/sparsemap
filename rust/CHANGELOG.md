@@ -4,6 +4,44 @@ All notable changes to the Rust `sparsemap` crate are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com), and
 the crate follows [SemVer](https://semver.org).
 
+## [5.1.0] - 2026-06-24
+
+Version realigned with the C `sparsemap` library, which is at 5.1.0.
+There is no 5.0.0 of this crate: C 5.0.0 was an internal struct-shrink
+of the C `sm_t` (per-map allocator removed, cursor externalized,
+lineage folded into the capacity word) with no effect on the wire
+format or on any behavior this crate can observe -- the Rust port
+models a map as a `BTreeMap`, not the C byte struct, so it had nothing
+to change.  Jumping straight to 5.1.0 keeps the two version numbers in
+lockstep.
+
+### Changed
+
+- **The chunk-count header is now a full 64-bit value** (parity with C
+  `sparsemap` 5.1.0).  Through 4.x it was a `u32` in the low 4 bytes of
+  the 8-byte header slot, capping a serialized map at `2^32 - 1`
+  (~4.29 billion) chunks; for pathologically sparse, scattered data
+  (one set bit per 2048-bit chunk) that count -- not the `2^64` index
+  space -- was the binding ceiling on cardinality.  Reading and writing
+  the whole slot as a little-endian `u64` removes the limit.
+
+### Compatibility
+
+- **Wire format is unchanged at version `2`; no break.**  The header
+  slot's high 4 bytes were always zero for any count `< 2^32`, so a
+  5.1.0 writer emits bytes identical to 4.x for every real map, and a
+  5.1.0 reader sees the same value in any 4.x buffer.  Verified: the
+  checked-in C fixtures (emitted by C 4.0.0) are byte-for-byte
+  identical to those emitted by C 5.1.0, and both read/write cross-FFI
+  directions pass against C 5.1.0.
+
+### Verified
+
+- All unit, doc, and `proptest` model tests pass; `clippy -D warnings`
+  and `rustfmt` clean; `no_std` build green.
+- Read- and write-direction wire compatibility against C `sparsemap`
+  5.1.0.
+
 ## [4.0.0] - 2026-06-04
 
 ### Fixed

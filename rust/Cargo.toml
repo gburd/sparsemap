@@ -1,6 +1,6 @@
 [package]
 name = "sparsemap"
-version = "4.0.0"
+version = "5.1.0"
 edition = "2021"
 rust-version = "1.77"
 description = "A sparse, compressed bitmap with run-length encoding, optimized for long runs of consecutive bits.  100% safe Rust, no_std, zero dependencies; reads the C sparsemap library's serialized format."
