@@ -1413,6 +1413,40 @@ CASE(test_serialize_roundtrip)
     return 0;
 }
 
+/*
+ * v5.1 widened the in-body chunk-count header from uint32_t to
+ * uint64_t.  This stays byte-compatible with v5.0 only because the
+ * count's high 4 bytes are always zero for any count < 2^32 (every
+ * real map).  Lock that invariant down: a freshly serialized map's
+ * body must have a zero high word in its count slot, so v5.0 and
+ * v5.1 emit identical bytes and each reads the other's streams.
+ */
+CASE(test_serialize_count_slot_wire_compat)
+{
+    sm_t *m = sm_create(4096);
+    for (uint64_t i = 0; i < 5000; i++) sm_add(m, i * 7);  /* many chunks */
+    const size_t need = sm_serialized_size(m);
+    uint8_t *buf = malloc(need);
+    EXPECT(buf != NULL, "buffer allocated");
+    EXPECT(sm_serialize(m, buf, need) == need, "serialize fills buffer");
+
+    /* Body begins after the 16-byte wire header; its first 8 bytes are
+     * the chunk-count slot.  Low 4 = count, high 4 = must be zero. */
+    uint32_t count_lo, count_hi;
+    memcpy(&count_lo, buf + 16, 4);
+    memcpy(&count_hi, buf + 20, 4);
+    EXPECT(count_hi == 0, "count-slot high word is zero (v5.0 wire compat)");
+    EXPECT(count_lo > 0, "count-slot low word holds the chunk count");
+
+    /* And the widened reader still round-trips it. */
+    sm_t *r = sm_deserialize(buf, need);
+    EXPECT(r != NULL && sm_equals(m, r), "round-trip preserves bits");
+
+    free(buf);
+    sm_free(m); sm_free(r);
+    return 0;
+}
+
 CASE(test_serialize_empty)
 {
     sm_t *m = sm_create(1024);
@@ -2993,6 +3027,7 @@ int main(void)
 
     /* serialize / deserialize */
     RUN(test_serialize_roundtrip);
+    RUN(test_serialize_count_slot_wire_compat);
     RUN(test_serialize_empty);
     RUN(test_deserialize_validation);
 
