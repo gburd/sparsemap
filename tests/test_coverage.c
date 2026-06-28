@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include <sm.h>
 
@@ -1944,6 +1945,54 @@ CASE(test_add_many)
     return 0;
 }
 
+/*
+ * Regression guard for the v5.1.1 bulk-insert fix.
+ *
+ * sm_add_many_grow threads a transient cursor so an ascending bulk
+ * build stays O(N).  Through v5.1.0 a blanket cursor reset on every
+ * chunk-count change defeated that: with scattered data (one bit per
+ * 2048-bit window, so every insert makes a new chunk) the locator
+ * walked from the head each time -- O(N^2).  At N=160k that was ~9000x
+ * slower than the fixed O(N) path.
+ *
+ * We assert the *shape* of the cost, not an absolute time: build a
+ * scattered map at N and at 8*N and require the per-element time to
+ * grow sub-linearly with N (the O(N^2) bug grew it ~8x; O(N) keeps it
+ * flat).  The 3x ceiling leaves wide margin against CI jitter while
+ * still failing decisively on a return of the quadratic behavior.
+ */
+static double
+__bulk_ns_per_elem(size_t n)
+{
+    uint64_t *a = malloc(n * sizeof(uint64_t));
+    if (a == NULL) return -1.0;
+    for (size_t i = 0; i < n; i++) a[i] = (uint64_t)i * 4096; /* 1 bit/window */
+    sm_t *m = sm_create(64);
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    bool ok = sm_add_many_grow(&m, a, n);
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    double per = ok && sm_cardinality(m) == n
+        ? ((double)(t1.tv_sec - t0.tv_sec) * 1e9 +
+           (double)(t1.tv_nsec - t0.tv_nsec)) / (double)n
+        : -1.0;
+    sm_free(m);
+    free(a);
+    return per;
+}
+
+CASE(test_add_many_grow_is_linear)
+{
+    const size_t n = 20000;
+    double small = __bulk_ns_per_elem(n);
+    double large = __bulk_ns_per_elem(n * 8);
+    EXPECT(small > 0.0 && large > 0.0, "bulk builds succeeded with correct cardinality");
+    /* O(N): per-element time ~flat.  O(N^2): would grow ~8x.  Allow 3x. */
+    EXPECT(large < small * 3.0 + 50.0,
+           "sm_add_many_grow stays ~O(N) for scattered ascending input");
+    return 0;
+}
+
 CASE(test_to_array)
 {
     sm_t *m = sm_create(2048);
@@ -2999,6 +3048,7 @@ int main(void)
     RUN(test_nonempty_difference);
     RUN(test_jaccard_index);
     RUN(test_add_many);
+    RUN(test_add_many_grow_is_linear);
     RUN(test_to_array);
 
     /* Phase B continued: range, xor, constructors, hash, compare */
