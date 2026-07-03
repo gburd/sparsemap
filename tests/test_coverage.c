@@ -1993,6 +1993,75 @@ CASE(test_add_many_grow_is_linear)
     return 0;
 }
 
+/*
+ * Regression guard for the coalesce left-neighbor head-walk fix.
+ *
+ * The scattered guard above (one bit per window) does NOT exercise
+ * coalescing -- its chunks never saturate to runs.  This one builds K
+ * fully-set 2048-bit windows separated by empty windows: every window
+ * fill drives __sm_coalesce_chunk with run_length > 0, which used to
+ * locate its left neighbor with a from-the-head __sm_get_chunk_offset
+ * (NULL cursor) -- O(chunks) per insert, O(N^2) overall, independent
+ * of the lookup-path cursor.  Threading the cursor's prev_offset hint
+ * restores O(N).  Measured pre-fix: ns/elem doubled per doubling of N
+ * (~417 -> ~4872 across N=205k..3.3M); post-fix flat/decreasing.
+ */
+static double
+__saturated_ns_per_elem(size_t k)
+{
+    const size_t n = k * 2048;
+    uint64_t *a = malloc(n * sizeof(uint64_t));
+    if (a == NULL) return -1.0;
+    size_t j = 0;
+    for (size_t w = 0; w < k; w++)
+        for (size_t b = 0; b < 2048; b++)
+            a[j++] = (uint64_t)(2 * w) * 2048 + b; /* even windows full, odd empty */
+    sm_t *m = sm_create(64);
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    bool ok = sm_add_many_grow(&m, a, n);
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    double per = ok && sm_cardinality(m) == n
+        ? ((double)(t1.tv_sec - t0.tv_sec) * 1e9 +
+           (double)(t1.tv_nsec - t0.tv_nsec)) / (double)n
+        : -1.0;
+    sm_free(m);
+    free(a);
+    return per;
+}
+
+CASE(test_coalesce_is_linear)
+{
+    double small = __saturated_ns_per_elem(200);
+    double large = __saturated_ns_per_elem(1600); /* 8x the chunks */
+    EXPECT(small > 0.0 && large > 0.0, "saturated builds succeeded with correct cardinality");
+    /* O(N): per-element ~flat.  O(N^2) coalesce head-walk: would grow ~8x. */
+    EXPECT(large < small * 3.0 + 50.0,
+           "coalesce stays ~O(N) for saturated ascending runs");
+    return 0;
+}
+
+/*
+ * Regression for the 1 << amt -> UINT64_C(1) << amt fix in sm_select's
+ * forward scan (MSVC C4334 flagged the 32-bit shift; amt can reach 64,
+ * so 1 << amt is UB and cannot test bits 32..63).  A dense run makes
+ * __sm_rank_vec return a vec with high bits set, so select must scan
+ * past bit 31 correctly.
+ */
+CASE(test_select_high_bit_scan)
+{
+    sm_t *m = sm_create(1024);
+    for (uint64_t i = 0; i < 200; i++)
+        sm_add_grow(&m, i); /* dense run spanning multiple 64-bit words */
+    EXPECT(sm_cardinality(m) == 200, "dense run cardinality");
+    bool all_ok = true;
+    for (uint64_t i = 0; i < 200; i++)
+        if (sm_select(m, i, true) != i) all_ok = false;
+    EXPECT(all_ok, "select(n) == n for a dense 0..199 run (scan crosses bit 31/63)");
+    sm_free(m);
+    return 0;
+}
+
 CASE(test_to_array)
 {
     sm_t *m = sm_create(2048);
@@ -3049,6 +3118,8 @@ int main(void)
     RUN(test_jaccard_index);
     RUN(test_add_many);
     RUN(test_add_many_grow_is_linear);
+    RUN(test_coalesce_is_linear);
+    RUN(test_select_high_bit_scan);
     RUN(test_to_array);
 
     /* Phase B continued: range, xor, constructors, hash, compare */

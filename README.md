@@ -155,6 +155,12 @@ minor release.  Consumers must:
 - Treat the type as opaque: access only via `sm_*` accessors.
 - Recompile (not just relink) after upgrading sparsemap.
 
+The same recompile-not-relink rule applies to `sm_cursor_t`: it is a
+complete, caller-stack-allocated type, and a minor release may add a
+trailing field (as 5.2.0 did, for a coalescing performance hint).
+Always initialize with `SM_CURSOR_INIT` and recompile after upgrading;
+never persist a cursor or depend on its `sizeof`.
+
 The **wire format** produced by `sm_serialize` and consumed by
 `sm_open`/`sm_deserialize` *is* stable and is preserved across the
 3.x series.  This is the contract that matters for on-disk consumers.
