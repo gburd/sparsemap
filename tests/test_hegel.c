@@ -837,6 +837,107 @@ prop_constructors(hegel_test_case *tc, void *ctx)
 	sm_free(fa);
 }
 
+/*
+ * Property: run-oriented construction.  prop_model draws individual
+ * scattered bits, which rarely build the contiguous runs that become
+ * RLE chunks and almost never produce the set-gap-set-within-one-window
+ * shape that broke __sm_separate_rle_chunk (multi-run cardinality/rank
+ * undercount and serialize crash, fixed post-5.2.0).  This property
+ * instead draws a sequence of [start, start+len) runs separated by gaps
+ * -- deliberately overlapping windows, straddling 2048-bit boundaries,
+ * and leaving intra-window gaps -- then checks cardinality, rank over
+ * random sub-ranges, serialize round-trip, and per-bit contains against
+ * the dense bool[] oracle.  This is the shape that exercises the RLE
+ * build / coalesce / separate paths hardest.
+ */
+static void
+prop_runs_model(hegel_test_case *tc, void *ctx)
+{
+	(void)ctx;
+	bool *oracle = calloc(U, sizeof(*oracle));
+	assert(oracle != NULL);
+	sm_t *m = fresh();
+
+	/* 1..12 runs, each 1..4096 bits, gaps 0..2048 (so runs land in the
+	 * same window, adjacent windows, or straddle boundaries). */
+	int nruns = (int)hegel_draw_int(tc, hegel_integers(1, 12));
+	uint64_t pos = (uint64_t)hegel_draw_int(tc, hegel_integers(0, 2048));
+	for (int r = 0; r < nruns; r++) {
+		uint64_t len = (uint64_t)hegel_draw_int(tc,
+		    hegel_integers(1, 4096));
+		for (uint64_t i = 0; i < len && pos + i < U; i++) {
+			m = oracle_add(m, oracle, pos + i);
+		}
+		pos += len;
+		uint64_t gap = (uint64_t)hegel_draw_int(tc,
+		    hegel_integers(0, 2048));
+		pos += gap;
+		if (pos >= U)
+			break;
+	}
+
+	/* Optionally clear a random sub-range (exercises separate on removes). */
+	if (hegel_draw_int(tc, hegel_integers(0, 1))) {
+		uint64_t clo = (uint64_t)hegel_draw_int(tc,
+		    hegel_integers(0, U - 1));
+		uint64_t chi = (uint64_t)hegel_draw_int(tc,
+		    hegel_integers(0, U - 1));
+		if (clo > chi) {
+			uint64_t t = clo;
+			clo = chi;
+			chi = t;
+		}
+		for (uint64_t b = clo; b <= chi; b++) {
+			sm_remove(m, b);
+			oracle[b] = false;
+		}
+	}
+
+	/* Cardinality + per-bit contains against the oracle. */
+	size_t want_card = 0;
+	for (uint64_t b = 0; b < U; b++) {
+		assert(sm_contains(m, b, NULL) == oracle[b]);
+		if (oracle[b])
+			want_card++;
+	}
+	assert(sm_cardinality(m) == want_card);
+
+	/* rank over several random inclusive sub-ranges. */
+	for (int q = 0; q < 8; q++) {
+		uint64_t lo = (uint64_t)hegel_draw_int(tc,
+		    hegel_integers(0, U - 1));
+		uint64_t hi = (uint64_t)hegel_draw_int(tc,
+		    hegel_integers(0, U - 1));
+		if (lo > hi) {
+			uint64_t t = lo;
+			lo = hi;
+			hi = t;
+		}
+		size_t set = 0;
+		for (uint64_t b = lo; b <= hi; b++)
+			if (oracle[b])
+				set++;
+		assert(sm_rank(m, lo, hi, true) == set);
+	}
+
+	/* serialize round-trip must preserve the exact set (this crashed
+	 * pre-fix on the corrupt multi-run stream). */
+	size_t n = sm_serialized_size(m);
+	uint8_t *buf = malloc(n ? n : 1);
+	assert(buf != NULL);
+	sm_serialize(m, buf, n);
+	sm_t *e = sm_deserialize(buf, n);
+	assert(e != NULL);
+	assert(sm_cardinality(e) == want_card);
+	for (uint64_t b = 0; b < U; b++)
+		assert(sm_contains(e, b, NULL) == oracle[b]);
+
+	free(buf);
+	sm_free(e);
+	sm_free(m);
+	free(oracle);
+}
+
 static int
 run(hegel_session *s, void (*fn)(hegel_test_case *, void *), const char *name)
 {
@@ -885,6 +986,9 @@ main(void)
 	rc |= run(s, prop_hash_compare, "hash_compare");
 	rc |= run(s, prop_lineage_roundtrip, "lineage_roundtrip");
 	rc |= run(s, prop_constructors, "constructors");
+	/* Run-oriented model: exercises RLE build / coalesce / separate on
+	 * runs, gaps, and set-gap-set-within-a-window shapes. */
+	rc |= run(s, prop_runs_model, "runs_model");
 	hegel_session_free(s);
 	return (rc);
 }
