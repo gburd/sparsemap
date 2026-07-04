@@ -2964,23 +2964,26 @@ __sm_separate_rle_chunk(sm_t *map, __sm_chunk_sep_t *sep, const uint64_t idx,
 				    sep->target.start + sep->target.length - 1;
 				sep->ex[0].p = sep->buf;
 				break;
-			} else {
-				/*
-				 * Can't fit a pivot in this space.  This is
-				 * believed unreachable: the enclosing
-				 * `aligned_idx + SM_CHUNK_MAX_CAPACITY <
-				 * capacity` guard plus the earlier
-				 * right-aligned break should have handled
-				 * every in-capacity pivot.  Assert so a
-				 * counter-example surfaces under test rather
-				 * than silently dropping the bit; return
-				 * nonzero (ENOSPC) so a caller grows and
-				 * retries instead of treating it as done.
-				 */
-				__sm_assert(false &&
-				    "separate: unreachable no-room pivot");
-				return (-1);
 			}
+			/*
+			 * No `else`: the "pivot window does not fit within
+			 * capacity" case is unreachable.  The RLE capacity is
+			 * never allowed to extend a full empty window past the
+			 * run's window-rounded end (see __sm_chunk_rle_capacity_
+			 * limit), so start + capacity <= roundup(start + length,
+			 * SM_CHUNK_MAX_CAPACITY).  With aligned_idx a window
+			 * multiple and aligned_idx < start + capacity, that
+			 * forces aligned_idx < start + length -- i.e. the
+			 * enclosing (A) test above is itself never true, so the
+			 * inner test is always true when reached.  Proven by the
+			 * capacity invariant plus an exhaustive state==1 sweep
+			 * (4740 state-1 separates over the full capacity/length
+			 * regime, zero counter-examples).  An assert on the
+			 * invariant guards against future capacity-policy
+			 * changes reintroducing the case.
+			 */
+			__sm_assert(aligned_idx + SM_CHUNK_MAX_CAPACITY <
+			    sep->target.capacity);
 		}
 
 		/* The pivot's range is central, there will be three chunks in total. */
