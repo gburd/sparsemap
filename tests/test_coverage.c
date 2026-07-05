@@ -3201,6 +3201,212 @@ CASE(test_stress_setops)
     return 0;
 }
 
+/* ------------------------------------------------------------------ */
+/*  Point-lookup / rank / select acceleration (Ideas 3, 4, 5)         */
+/*                                                                    */
+/*  Differential: every accelerator must agree with the plain path    */
+/*  (sm_contains / sm_rank / sm_select) on every probe, for a broad    */
+/*  range of map shapes.  This is the correctness gate.               */
+/* ------------------------------------------------------------------ */
+
+/* Check every accelerator against the plain path for one built map.
+ * `bits` is the sorted ascending set-bit list (cardinality `card`);
+ * `probes` is a sorted ascending probe list (`nprobes`). */
+static int accel_diff_one(sm_t *m, const uint64_t *bits, size_t card,
+    const uint64_t *probes, size_t nprobes)
+{
+    /* --- Idea 5: sm_contains_many == per-element sm_contains. --- */
+    bool *many = malloc((nprobes ? nprobes : 1) * sizeof(bool));
+    EXPECT(many != NULL, "malloc many");
+    sm_contains_many(m, probes, many, nprobes);
+    for (size_t i = 0; i < nprobes; i++) {
+        EXPECT(many[i] == sm_contains(m, probes[i], NULL),
+            "contains_many mismatch");
+    }
+    free(many);
+
+    /* --- Idea 3: sm_contains_cached == sm_contains, in scrambled
+     * order (exercises the MRU replacement, not just sequential). --- */
+    sm_cursor_cached_t cache = SM_CURSOR_CACHED_INIT;
+    for (size_t i = 0; i < nprobes; i++) {
+        /* deterministic scramble across the probe set */
+        size_t j = (i * 2654435761u) % (nprobes ? nprobes : 1);
+        EXPECT(sm_contains_cached(m, probes[j], &cache)
+            == sm_contains(m, probes[j], NULL),
+            "contains_cached mismatch");
+    }
+    /* NULL cache is a legal no-accel fallback. */
+    for (size_t i = 0; i < nprobes; i++) {
+        EXPECT(sm_contains_cached(m, probes[i], NULL)
+            == sm_contains(m, probes[i], NULL),
+            "contains_cached(NULL) mismatch");
+    }
+
+    /* --- Idea 4: locator contains / rank(true) / select(true). --- */
+    sm_locator_t *loc = sm_locator_build(m);
+    if (loc == NULL) {
+        /* Empty map: build returns NULL by contract.  Nothing to test. */
+        EXPECT(card == 0, "locator NULL but map non-empty");
+        return 0;
+    }
+    for (size_t i = 0; i < nprobes; i++) {
+        EXPECT(sm_locator_contains(loc, probes[i])
+            == sm_contains(m, probes[i], NULL),
+            "locator_contains mismatch");
+    }
+    /* rank(0, x, true) over the probe cut points. */
+    for (size_t i = 0; i < nprobes; i++) {
+        uint64_t x = probes[i];
+        EXPECT(sm_locator_rank(loc, 0, x, true) == sm_rank(m, 0, x, true),
+            "locator_rank(0,x,true) mismatch");
+        /* value=false must fall back correctly. */
+        EXPECT(sm_locator_rank(loc, 0, x, false)
+            == sm_rank(m, 0, x, false),
+            "locator_rank(0,x,false) fallback mismatch");
+    }
+    /* rank over sub-ranges [bits[a], bits[b]]. */
+    if (card > 0) {
+        for (size_t a = 0; a < card; a += (card / 7 + 1)) {
+            for (size_t b = a; b < card; b += (card / 7 + 1)) {
+                EXPECT(sm_locator_rank(loc, bits[a], bits[b], true)
+                    == sm_rank(m, bits[a], bits[b], true),
+                    "locator_rank(sub,true) mismatch");
+            }
+        }
+    }
+    /* select(n, true) for every n < cardinality, plus one past the end. */
+    for (size_t n = 0; n < card; n++) {
+        EXPECT(sm_locator_select(loc, n, true) == sm_select(m, n, true),
+            "locator_select(true) mismatch");
+    }
+    EXPECT(sm_locator_select(loc, card, true) == sm_select(m, card, true),
+        "locator_select past-end mismatch");
+    /* value=false select must fall back correctly (spot-check a few). */
+    for (uint64_t n = 0; n < 32; n++) {
+        EXPECT(sm_locator_select(loc, n, false) == sm_select(m, n, false),
+            "locator_select(false) fallback mismatch");
+    }
+
+    /* --- Staleness: mutate, then confirm queries stay CORRECT. ---
+     * Under SPARSEMAP_DIAGNOSTIC a stale query is a contract violation
+     * that __sm_assert()s by design, so this correct-fallback check
+     * only runs in production builds (where the fallback is silent). */
+#ifndef SPARSEMAP_DIAGNOSTIC
+    if (card > 0) {
+        uint64_t hole = bits[card / 2];
+        sm_remove(m, hole);       /* mutate without rebuilding loc */
+        /* loc is now stale; every query must fall back to the truth. */
+        for (size_t i = 0; i < nprobes; i++) {
+            EXPECT(sm_locator_contains(loc, probes[i])
+                == sm_contains(m, probes[i], NULL),
+                "stale locator_contains wrong");
+        }
+        EXPECT(sm_locator_rank(loc, 0, hole, true)
+            == sm_rank(m, 0, hole, true), "stale locator_rank wrong");
+        EXPECT(sm_locator_select(loc, 0, true)
+            == sm_select(m, 0, true), "stale locator_select wrong");
+        sm_add(m, hole); /* restore for any later reuse */
+    }
+#endif
+
+    sm_locator_free(loc);
+    return 0;
+}
+
+/* Build a probe set: every set bit, its neighbors, and evenly spaced
+ * gaps, all sorted ascending and deduplicated. */
+static int cmp_u64(const void *a, const void *b)
+{
+    uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
+    return (x < y) ? -1 : (x > y) ? 1 : 0;
+}
+
+static int accel_diff_shape(uint64_t *bits, size_t card, size_t cap_hint)
+{
+    sm_t *m = sm_create(cap_hint);
+    EXPECT(m != NULL, "sm_create");
+    for (size_t i = 0; i < card; i++) {
+        sm_add_grow(&m, bits[i]);
+    }
+
+    /* Probes: each set bit, +/-1 around it, and a scattering of gaps. */
+    size_t maxp = card * 3 + 64;
+    uint64_t *probes = malloc(maxp * sizeof(uint64_t));
+    EXPECT(probes != NULL, "malloc probes");
+    size_t np = 0;
+    for (size_t i = 0; i < card; i++) {
+        if (bits[i] > 0) probes[np++] = bits[i] - 1;
+        probes[np++] = bits[i];
+        probes[np++] = bits[i] + 1;
+    }
+    uint64_t span = card ? bits[card - 1] + 4096 : 8192;
+    for (int k = 0; k < 64; k++) {
+        probes[np++] = (uint64_t)k * (span / 64 + 1);
+    }
+    qsort(probes, np, sizeof(uint64_t), cmp_u64);
+    /* dedup in place */
+    size_t w = 0;
+    for (size_t i = 0; i < np; i++) {
+        if (w == 0 || probes[i] != probes[w - 1]) probes[w++] = probes[i];
+    }
+    np = w;
+
+    int rc = accel_diff_one(m, bits, card, probes, np);
+    free(probes);
+    sm_free(m);
+    return rc;
+}
+
+CASE(test_accel_differential)
+{
+    /* empty */
+    EXPECT(accel_diff_shape(NULL, 0, 2048) == 0, "empty");
+
+    /* single bit */
+    { uint64_t b[] = { 100 };
+      EXPECT(accel_diff_shape(b, 1, 2048) == 0, "single"); }
+
+    /* dense run */
+    { uint64_t *b = malloc(4096 * sizeof(uint64_t));
+      for (uint64_t i = 0; i < 4096; i++) b[i] = 500 + i;
+      EXPECT(accel_diff_shape(b, 4096, 8192) == 0, "dense_run");
+      free(b); }
+
+    /* sparse scattered across many chunks */
+    { uint64_t *b = malloc(300 * sizeof(uint64_t));
+      for (uint64_t i = 0; i < 300; i++) b[i] = i * 733 + 7;
+      EXPECT(accel_diff_shape(b, 300, 4096) == 0, "sparse_scattered"); free(b); }
+
+    /* multi-chunk mixed runs */
+    { uint64_t *b = malloc(5000 * sizeof(uint64_t));
+      size_t n = 0;
+      for (int run = 0; run < 20; run++) {
+          uint64_t start = (uint64_t)run * 3000 + 11;
+          for (uint64_t i = 0; i < 100 + (uint64_t)run * 5; i++)
+              b[n++] = start + i;
+      }
+      EXPECT(accel_diff_shape(b, n, 8192) == 0, "multichunk"); free(b); }
+
+    /* worst case: every other bit over several chunks */
+    { uint64_t *b = malloc(4000 * sizeof(uint64_t));
+      for (uint64_t i = 0; i < 4000; i++) b[i] = i * 2;
+      EXPECT(accel_diff_shape(b, 4000, 8192) == 0, "every_other"); free(b); }
+
+    /* large indices > 2^32 */
+    { uint64_t base = (uint64_t)1 << 33;
+      uint64_t *b = malloc(500 * sizeof(uint64_t));
+      for (uint64_t i = 0; i < 500; i++) b[i] = base + i * 4099;
+      EXPECT(accel_diff_shape(b, 500, 4096) == 0, "large_index"); free(b); }
+
+    /* large indices spanning a run > 2^32 (RLE + high bits) */
+    { uint64_t base = ((uint64_t)1 << 34) + 12345;
+      uint64_t *b = malloc(3000 * sizeof(uint64_t));
+      for (uint64_t i = 0; i < 3000; i++) b[i] = base + i;
+      EXPECT(accel_diff_shape(b, 3000, 8192) == 0, "large_index_run"); free(b); }
+
+    return 0;
+}
+
 int main(void)
 {
     fprintf(stderr, "test_coverage:\n");
@@ -3383,6 +3589,9 @@ int main(void)
     /* scan */
     RUN(test_scan_basic);
     RUN(test_scan_with_skip);
+
+    /* point-lookup / rank / select acceleration (Ideas 3, 4, 5) */
+    RUN(test_accel_differential);
 
     fprintf(stderr, "  %d/%d expectations passed, %d failures\n",
             g_total - g_failures, g_total, g_failures);

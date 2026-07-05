@@ -938,6 +938,130 @@ prop_runs_model(hegel_test_case *tc, void *ctx)
 	free(oracle);
 }
 
+/*
+ * Property: the point-lookup / rank / select accelerators (Ideas 3, 4,
+ * 5) agree with both the dense bool[] oracle and the plain sm_contains
+ * / sm_rank / sm_select path on a random map.  Also exercises the
+ * staleness fallback: after a mutation the locator (not rebuilt) must
+ * still return correct results.
+ */
+static void
+prop_accel(hegel_test_case *tc, void *ctx)
+{
+	(void)ctx;
+	bool *oracle = calloc(U, sizeof(*oracle));
+	assert(oracle != NULL);
+	sm_t *m = draw_map(tc, oracle);
+
+	/* Cardinality + ascending set-bit list from the oracle. */
+	size_t card = 0;
+	for (uint64_t b = 0; b < U; b++)
+		if (oracle[b])
+			card++;
+	uint64_t *bits = malloc((card ? card : 1) * sizeof(uint64_t));
+	assert(bits != NULL);
+	size_t bi = 0;
+	for (uint64_t b = 0; b < U; b++)
+		if (oracle[b])
+			bits[bi++] = b;
+
+	/* Build a sorted probe list: every set bit +/- 1 and evenly-spaced
+	 * gaps, all ascending. */
+	size_t maxp = card * 3 + 128;
+	uint64_t *probes = malloc(maxp * sizeof(uint64_t));
+	assert(probes != NULL);
+	size_t np = 0;
+	for (size_t i = 0; i < card; i++) {
+		if (bits[i] > 0)
+			probes[np++] = bits[i] - 1;
+		probes[np++] = bits[i];
+		if (bits[i] + 1 < U)
+			probes[np++] = bits[i] + 1;
+	}
+	for (int k = 0; k < 128; k++)
+		probes[np++] = (uint64_t)k * (U / 128);
+	/* insertion of gap probes may leave duplicates/order breaks; sort. */
+	for (size_t i = 1; i < np; i++) {
+		uint64_t v = probes[i];
+		size_t j = i;
+		while (j > 0 && probes[j - 1] > v) {
+			probes[j] = probes[j - 1];
+			j--;
+		}
+		probes[j] = v;
+	}
+	size_t w = 0;
+	for (size_t i = 0; i < np; i++)
+		if (w == 0 || probes[i] != probes[w - 1])
+			probes[w++] = probes[i];
+	np = w;
+
+	/* Idea 5: batch contains == oracle == plain contains. */
+	bool *many = malloc((np ? np : 1) * sizeof(bool));
+	assert(many != NULL);
+	sm_contains_many(m, probes, many, np);
+	for (size_t i = 0; i < np; i++) {
+		bool want = probes[i] < U ? oracle[probes[i]] : false;
+		assert(many[i] == want);
+		assert(many[i] == sm_contains(m, probes[i], NULL));
+	}
+
+	/* Idea 3: cached contains in scrambled order == oracle. */
+	sm_cursor_cached_t cache = SM_CURSOR_CACHED_INIT;
+	for (size_t i = 0; i < np; i++) {
+		size_t j = (i * 2654435761u) % (np ? np : 1);
+		bool want = probes[j] < U ? oracle[probes[j]] : false;
+		assert(sm_contains_cached(m, probes[j], &cache) == want);
+	}
+
+	/* Idea 4: locator contains / rank(true) / select(true). */
+	sm_locator_t *loc = sm_locator_build(m);
+	if (loc == NULL) {
+		/* Empty map. */
+		assert(card == 0);
+	} else {
+		for (size_t i = 0; i < np; i++) {
+			bool want = probes[i] < U ? oracle[probes[i]] : false;
+			assert(sm_locator_contains(loc, probes[i]) == want);
+		}
+		for (size_t i = 0; i < np; i++) {
+			uint64_t x = probes[i];
+			assert(sm_locator_rank(loc, 0, x, true)
+			    == sm_rank(m, 0, x, true));
+			assert(sm_locator_rank(loc, 0, x, false)
+			    == sm_rank(m, 0, x, false));
+		}
+		for (size_t n = 0; n < card; n++)
+			assert(sm_locator_select(loc, n, true)
+			    == sm_select(m, n, true));
+		assert(sm_locator_select(loc, card, true)
+		    == sm_select(m, card, true));
+
+		/* Staleness: mutate without rebuilding; stay correct.
+		 * Guarded out under SPARSEMAP_DIAGNOSTIC where a stale query
+		 * asserts by contract. */
+#ifndef SPARSEMAP_DIAGNOSTIC
+		if (card > 0) {
+			uint64_t hole = bits[card / 2];
+			sm_remove(m, hole);
+			for (size_t i = 0; i < np; i++) {
+				assert(sm_locator_contains(loc, probes[i])
+				    == sm_contains(m, probes[i], NULL));
+			}
+			assert(sm_locator_rank(loc, 0, hole, true)
+			    == sm_rank(m, 0, hole, true));
+		}
+#endif
+		sm_locator_free(loc);
+	}
+
+	free(many);
+	free(probes);
+	free(bits);
+	sm_free(m);
+	free(oracle);
+}
+
 static int
 run(hegel_session *s, void (*fn)(hegel_test_case *, void *), const char *name)
 {
@@ -989,6 +1113,8 @@ main(void)
 	/* Run-oriented model: exercises RLE build / coalesce / separate on
 	 * runs, gaps, and set-gap-set-within-a-window shapes. */
 	rc |= run(s, prop_runs_model, "runs_model");
+	/* Point-lookup / rank / select accelerators (Ideas 3, 4, 5). */
+	rc |= run(s, prop_accel, "accel");
 	hegel_session_free(s);
 	return (rc);
 }
