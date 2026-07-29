@@ -76,15 +76,16 @@ hegel_opt = get_option('hegel')
 # in the plain and coverage builds.
 sanitize = get_option('b_sanitize')
 if not hegel_opt.disabled() and sanitize == 'none'
+  # Official hegeldev/hegel-rust hegel-c: an in-process FFI (libhegel,
+  # header <hegel.h>).  No server, no libcbor/zlib.  The dev shell
+  # (flake.nix) exposes the header dir and libhegel via CFLAGS/LDFLAGS
+  # env; cc.find_library picks it up.
   hegel_lib = cc.find_library('hegel', required : false)
-  cbor_lib = cc.find_library('cbor', required : false)
-  z_lib = cc.find_library('z', required : false)
-  have_hegel = hegel_lib.found() and cbor_lib.found() and z_lib.found() \
-    and cc.has_header('hegel/hegel.h')
+  have_hegel = hegel_lib.found() and cc.has_header('hegel.h')
   if have_hegel
     test_hegel = executable('test_hegel',
       'test_hegel.c',
-      dependencies : [libsparsemap_dep, hegel_lib, cbor_lib, z_lib],
+      dependencies : [libsparsemap_dep, hegel_lib],
     )
     test('hegel', test_hegel, timeout : 300)
 
@@ -94,13 +95,13 @@ if not hegel_opt.disabled() and sanitize == 'none'
     # _tst_chunk_* properties.
     test_hegel_white = executable('test_hegel_white',
       'test_hegel_white.c',
-      dependencies : [hegel_lib, cbor_lib, z_lib],
+      dependencies : [hegel_lib],
       include_directories : inc,
       c_args : ['-Wno-unused-function', '-Wno-unused-parameter'],
     )
     test('hegel_white', test_hegel_white, timeout : 300)
   elif hegel_opt.enabled()
-    error('hegel=enabled but hegel-c (hegel/hegel.h + libhegel + libcbor + libz) was not found')
+    error('hegel=enabled but the official hegel-c (hegel.h + libhegel) was not found')
   endif
 endif
 

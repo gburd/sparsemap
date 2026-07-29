@@ -18,15 +18,19 @@
  */
 #include <sm.h>
 
-#include <hegel/generators.h>
-#include <hegel/hegel.h>
-
 #include <assert.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* Compatibility layer over the official hegeldev/hegel-rust hegel-c FFI
+ * (see tests/hegel_compat.h).  Included after <assert.h> because it
+ * redefines assert() into a shrink-friendly property-failure signal.
+ * This TU owns the shim's run-state definition. */
+#define HEGEL_COMPAT_IMPL
+#include "hegel_compat.h"
 
 /*
  * Bounded universe.  65536 bits span 32 chunks of 2048 bits each, so
@@ -837,17 +841,242 @@ prop_constructors(hegel_test_case *tc, void *ctx)
 	sm_free(fa);
 }
 
+/*
+ * Property: run-oriented construction.  prop_model draws individual
+ * scattered bits, which rarely build the contiguous runs that become
+ * RLE chunks and almost never produce the set-gap-set-within-one-window
+ * shape that broke __sm_separate_rle_chunk (multi-run cardinality/rank
+ * undercount and serialize crash, fixed post-5.2.0).  This property
+ * instead draws a sequence of [start, start+len) runs separated by gaps
+ * -- deliberately overlapping windows, straddling 2048-bit boundaries,
+ * and leaving intra-window gaps -- then checks cardinality, rank over
+ * random sub-ranges, serialize round-trip, and per-bit contains against
+ * the dense bool[] oracle.  This is the shape that exercises the RLE
+ * build / coalesce / separate paths hardest.
+ */
+static void
+prop_runs_model(hegel_test_case *tc, void *ctx)
+{
+	(void)ctx;
+	bool *oracle = calloc(U, sizeof(*oracle));
+	assert(oracle != NULL);
+	sm_t *m = fresh();
+
+	/* 1..12 runs, each 1..4096 bits, gaps 0..2048 (so runs land in the
+	 * same window, adjacent windows, or straddle boundaries). */
+	int nruns = (int)hegel_draw_int(tc, hegel_integers(1, 12));
+	uint64_t pos = (uint64_t)hegel_draw_int(tc, hegel_integers(0, 2048));
+	for (int r = 0; r < nruns; r++) {
+		uint64_t len = (uint64_t)hegel_draw_int(tc,
+		    hegel_integers(1, 4096));
+		for (uint64_t i = 0; i < len && pos + i < U; i++) {
+			m = oracle_add(m, oracle, pos + i);
+		}
+		pos += len;
+		uint64_t gap = (uint64_t)hegel_draw_int(tc,
+		    hegel_integers(0, 2048));
+		pos += gap;
+		if (pos >= U)
+			break;
+	}
+
+	/* Optionally clear a random sub-range (exercises separate on removes). */
+	if (hegel_draw_int(tc, hegel_integers(0, 1))) {
+		uint64_t clo = (uint64_t)hegel_draw_int(tc,
+		    hegel_integers(0, U - 1));
+		uint64_t chi = (uint64_t)hegel_draw_int(tc,
+		    hegel_integers(0, U - 1));
+		if (clo > chi) {
+			uint64_t t = clo;
+			clo = chi;
+			chi = t;
+		}
+		for (uint64_t b = clo; b <= chi; b++) {
+			sm_remove(m, b);
+			oracle[b] = false;
+		}
+	}
+
+	/* Cardinality + per-bit contains against the oracle. */
+	size_t want_card = 0;
+	for (uint64_t b = 0; b < U; b++) {
+		assert(sm_contains(m, b, NULL) == oracle[b]);
+		if (oracle[b])
+			want_card++;
+	}
+	assert(sm_cardinality(m) == want_card);
+
+	/* rank over several random inclusive sub-ranges. */
+	for (int q = 0; q < 8; q++) {
+		uint64_t lo = (uint64_t)hegel_draw_int(tc,
+		    hegel_integers(0, U - 1));
+		uint64_t hi = (uint64_t)hegel_draw_int(tc,
+		    hegel_integers(0, U - 1));
+		if (lo > hi) {
+			uint64_t t = lo;
+			lo = hi;
+			hi = t;
+		}
+		size_t set = 0;
+		for (uint64_t b = lo; b <= hi; b++)
+			if (oracle[b])
+				set++;
+		assert(sm_rank(m, lo, hi, true) == set);
+	}
+
+	/* serialize round-trip must preserve the exact set (this crashed
+	 * pre-fix on the corrupt multi-run stream). */
+	size_t n = sm_serialized_size(m);
+	uint8_t *buf = malloc(n ? n : 1);
+	assert(buf != NULL);
+	sm_serialize(m, buf, n);
+	sm_t *e = sm_deserialize(buf, n);
+	assert(e != NULL);
+	assert(sm_cardinality(e) == want_card);
+	for (uint64_t b = 0; b < U; b++)
+		assert(sm_contains(e, b, NULL) == oracle[b]);
+
+	free(buf);
+	sm_free(e);
+	sm_free(m);
+	free(oracle);
+}
+
+/*
+ * Property: the point-lookup / rank / select accelerators (Ideas 3, 4,
+ * 5) agree with both the dense bool[] oracle and the plain sm_contains
+ * / sm_rank / sm_select path on a random map.  Also exercises the
+ * staleness fallback: after a mutation the locator (not rebuilt) must
+ * still return correct results.
+ */
+static void
+prop_accel(hegel_test_case *tc, void *ctx)
+{
+	(void)ctx;
+	bool *oracle = calloc(U, sizeof(*oracle));
+	assert(oracle != NULL);
+	sm_t *m = draw_map(tc, oracle);
+
+	/* Cardinality + ascending set-bit list from the oracle. */
+	size_t card = 0;
+	for (uint64_t b = 0; b < U; b++)
+		if (oracle[b])
+			card++;
+	uint64_t *bits = malloc((card ? card : 1) * sizeof(uint64_t));
+	assert(bits != NULL);
+	size_t bi = 0;
+	for (uint64_t b = 0; b < U; b++)
+		if (oracle[b])
+			bits[bi++] = b;
+
+	/* Build a sorted probe list: every set bit +/- 1 and evenly-spaced
+	 * gaps, all ascending. */
+	size_t maxp = card * 3 + 128;
+	uint64_t *probes = malloc(maxp * sizeof(uint64_t));
+	assert(probes != NULL);
+	size_t np = 0;
+	for (size_t i = 0; i < card; i++) {
+		if (bits[i] > 0)
+			probes[np++] = bits[i] - 1;
+		probes[np++] = bits[i];
+		if (bits[i] + 1 < U)
+			probes[np++] = bits[i] + 1;
+	}
+	for (int k = 0; k < 128; k++)
+		probes[np++] = (uint64_t)k * (U / 128);
+	/* insertion of gap probes may leave duplicates/order breaks; sort. */
+	for (size_t i = 1; i < np; i++) {
+		uint64_t v = probes[i];
+		size_t j = i;
+		while (j > 0 && probes[j - 1] > v) {
+			probes[j] = probes[j - 1];
+			j--;
+		}
+		probes[j] = v;
+	}
+	size_t w = 0;
+	for (size_t i = 0; i < np; i++)
+		if (w == 0 || probes[i] != probes[w - 1])
+			probes[w++] = probes[i];
+	np = w;
+
+	/* Idea 5: batch contains == oracle == plain contains. */
+	bool *many = malloc((np ? np : 1) * sizeof(bool));
+	assert(many != NULL);
+	sm_contains_many(m, probes, many, np);
+	for (size_t i = 0; i < np; i++) {
+		bool want = probes[i] < U ? oracle[probes[i]] : false;
+		assert(many[i] == want);
+		assert(many[i] == sm_contains(m, probes[i], NULL));
+	}
+
+	/* Idea 3: cached contains in scrambled order == oracle. */
+	sm_cursor_cached_t cache = SM_CURSOR_CACHED_INIT;
+	for (size_t i = 0; i < np; i++) {
+		size_t j = (i * 2654435761u) % (np ? np : 1);
+		bool want = probes[j] < U ? oracle[probes[j]] : false;
+		assert(sm_contains_cached(m, probes[j], &cache) == want);
+	}
+
+	/* Idea 4: locator contains / rank(true) / select(true). */
+	sm_locator_t *loc = sm_locator_build(m);
+	if (loc == NULL) {
+		/* Empty map. */
+		assert(card == 0);
+	} else {
+		for (size_t i = 0; i < np; i++) {
+			bool want = probes[i] < U ? oracle[probes[i]] : false;
+			assert(sm_locator_contains(loc, probes[i]) == want);
+		}
+		for (size_t i = 0; i < np; i++) {
+			uint64_t x = probes[i];
+			assert(sm_locator_rank(loc, 0, x, true)
+			    == sm_rank(m, 0, x, true));
+			assert(sm_locator_rank(loc, 0, x, false)
+			    == sm_rank(m, 0, x, false));
+		}
+		for (size_t n = 0; n < card; n++)
+			assert(sm_locator_select(loc, n, true)
+			    == sm_select(m, n, true));
+		assert(sm_locator_select(loc, card, true)
+		    == sm_select(m, card, true));
+
+		/* Staleness: mutate without rebuilding; stay correct.
+		 * Guarded out under SPARSEMAP_DIAGNOSTIC where a stale query
+		 * asserts by contract. */
+#ifndef SPARSEMAP_DIAGNOSTIC
+		if (card > 0) {
+			uint64_t hole = bits[card / 2];
+			sm_remove(m, hole);
+			for (size_t i = 0; i < np; i++) {
+				assert(sm_locator_contains(loc, probes[i])
+				    == sm_contains(m, probes[i], NULL));
+			}
+			assert(sm_locator_rank(loc, 0, hole, true)
+			    == sm_rank(m, 0, hole, true));
+		}
+#endif
+		sm_locator_free(loc);
+	}
+
+	free(many);
+	free(probes);
+	free(bits);
+	sm_free(m);
+	free(oracle);
+}
+
 static int
 run(hegel_session *s, void (*fn)(hegel_test_case *, void *), const char *name)
 {
 	hegel_settings settings = HEGEL_DEFAULT_SETTINGS;
 	settings.max_examples = 200;
 	hegel_results r = hegel_run_test(s, fn, NULL, &settings);
-	int ok = r.passed ? 0 : 1;
-	if (!ok)
+	int failed = r.passed ? 0 : 1;
+	if (failed)
 		fprintf(stderr, "hegel property FAILED: %s\n", name);
 	hegel_results_free(&r);
-	return (ok);
+	return (failed);
 }
 
 int
@@ -885,6 +1114,11 @@ main(void)
 	rc |= run(s, prop_hash_compare, "hash_compare");
 	rc |= run(s, prop_lineage_roundtrip, "lineage_roundtrip");
 	rc |= run(s, prop_constructors, "constructors");
+	/* Run-oriented model: exercises RLE build / coalesce / separate on
+	 * runs, gaps, and set-gap-set-within-a-window shapes. */
+	rc |= run(s, prop_runs_model, "runs_model");
+	/* Point-lookup / rank / select accelerators (Ideas 3, 4, 5). */
+	rc |= run(s, prop_accel, "accel");
 	hegel_session_free(s);
 	return (rc);
 }

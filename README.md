@@ -155,6 +155,21 @@ minor release.  Consumers must:
 - Treat the type as opaque: access only via `sm_*` accessors.
 - Recompile (not just relink) after upgrading sparsemap.
 
+The same recompile-not-relink rule applies to `sm_cursor_t`: it is a
+complete, caller-stack-allocated type, and a minor release may add a
+trailing field (as 5.2.0 did, for a coalescing performance hint).
+Always initialize with `SM_CURSOR_INIT` and recompile after upgrading;
+never persist a cursor or depend on its `sizeof`.
+
+The same applies to `sm_cursor_cached_t` (the 5.3.0 fixed-size MRU
+lookup cache): initialize with `SM_CURSOR_CACHED_INIT`, recompile after
+upgrading, and reset it after any mutation.  `sm_locator_t` (the 5.3.0
+transient O(sqrt n) point-lookup / rank / select index) is opaque --
+build it with `sm_locator_build`, use it only through the `sm_locator_*`
+functions, free it with `sm_locator_free`, and rebuild it after any
+mutation (a stale locator still returns correct results, just without
+the speedup).
+
 The **wire format** produced by `sm_serialize` and consumed by
 `sm_open`/`sm_deserialize` *is* stable and is preserved across the
 3.x series.  This is the contract that matters for on-disk consumers.

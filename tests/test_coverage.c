@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include <sm.h>
 
@@ -1204,6 +1205,42 @@ CASE(test_add_grow)
     return 0;
 }
 
+CASE(test_add_grow_cursor)
+{
+    /* Ascending build through a threaded cursor: same result as
+     * sm_add_grow, and the cursor survives the buffer relocation that
+     * the tiny initial capacity forces. */
+    sm_t *m = sm_create(64); /* tiny: will need to grow */
+    sm_cursor_t cur = SM_CURSOR_INIT;
+    for (uint64_t i = 0; i < 5000; i++) {
+        EXPECT(sm_add_grow_cursor(&m, i, &cur) == i, "add_grow_cursor ok");
+    }
+    EXPECT(sm_cardinality(m) == 5000, "all 5000 added via cursor");
+    EXPECT(sm_contains(m, 0, NULL) && sm_contains(m, 4999, NULL),
+        "first and last present");
+    /* Every bit in [0,5000) is set, nothing outside. */
+    EXPECT(!sm_contains(m, 5000, NULL), "5000 absent");
+    EXPECT(sm_rank(m, 0, 2500, true) == 2501, "rank matches dense run");
+    sm_free(m);
+
+    /* A NULL cursor opts out of acceleration but must still work. */
+    sm_t *n = sm_create(64);
+    for (uint64_t i = 0; i < 300; i++) {
+        EXPECT(sm_add_grow_cursor(&n, i * 100, NULL) == i * 100,
+            "add_grow_cursor NULL-cursor ok");
+    }
+    EXPECT(sm_cardinality(n) == 300, "NULL-cursor path added all");
+    sm_free(n);
+
+    /* NULL / NULL-pointee guards, same as sm_add_grow. */
+    sm_cursor_t c2 = SM_CURSOR_INIT;
+    EXPECT(sm_add_grow_cursor(NULL, 0, &c2) == SM_IDX_MAX, "NULL mapp");
+    sm_t *null_map2 = NULL;
+    EXPECT(sm_add_grow_cursor(&null_map2, 0, &c2) == SM_IDX_MAX,
+        "NULL *mapp");
+    return 0;
+}
+
 /* Allocator instrumentation: count malloc / realloc / free calls so we
  * can verify the process-global hooks are actually being called. */
 static struct {
@@ -1944,6 +1981,156 @@ CASE(test_add_many)
     return 0;
 }
 
+/*
+ * Regression guard for the v5.1.1 bulk-insert fix.
+ *
+ * sm_add_many_grow threads a transient cursor so an ascending bulk
+ * build stays O(N).  Through v5.1.0 a blanket cursor reset on every
+ * chunk-count change defeated that: with scattered data (one bit per
+ * 2048-bit window, so every insert makes a new chunk) the locator
+ * walked from the head each time -- O(N^2).  At N=160k that was ~9000x
+ * slower than the fixed O(N) path.
+ *
+ * We assert the *shape* of the cost, not an absolute time: build a
+ * scattered map at N and at 8*N and require the per-element time to
+ * grow sub-linearly with N (the O(N^2) bug grew it ~8x; O(N) keeps it
+ * flat).  The 3x ceiling leaves wide margin against CI jitter while
+ * still failing decisively on a return of the quadratic behavior.
+ */
+static double
+__bulk_ns_per_elem(size_t n)
+{
+    uint64_t *a = malloc(n * sizeof(uint64_t));
+    if (a == NULL) return -1.0;
+    for (size_t i = 0; i < n; i++) a[i] = (uint64_t)i * 4096; /* 1 bit/window */
+    sm_t *m = sm_create(64);
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    bool ok = sm_add_many_grow(&m, a, n);
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    double per = ok && sm_cardinality(m) == n
+        ? ((double)(t1.tv_sec - t0.tv_sec) * 1e9 +
+           (double)(t1.tv_nsec - t0.tv_nsec)) / (double)n
+        : -1.0;
+    sm_free(m);
+    free(a);
+    return per;
+}
+
+CASE(test_add_many_grow_is_linear)
+{
+    const size_t n = 20000;
+    double small = __bulk_ns_per_elem(n);
+    double large = __bulk_ns_per_elem(n * 8);
+    EXPECT(small > 0.0 && large > 0.0, "bulk builds succeeded with correct cardinality");
+    /* O(N): per-element time ~flat.  O(N^2): would grow ~8x.  Allow 3x. */
+    EXPECT(large < small * 3.0 + 50.0,
+           "sm_add_many_grow stays ~O(N) for scattered ascending input");
+    return 0;
+}
+
+/*
+ * Regression guard for the coalesce left-neighbor head-walk fix.
+ *
+ * The scattered guard above (one bit per window) does NOT exercise
+ * coalescing -- its chunks never saturate to runs.  This one builds K
+ * fully-set 2048-bit windows separated by empty windows: every window
+ * fill drives __sm_coalesce_chunk with run_length > 0, which used to
+ * locate its left neighbor with a from-the-head __sm_get_chunk_offset
+ * (NULL cursor) -- O(chunks) per insert, O(N^2) overall, independent
+ * of the lookup-path cursor.  Threading the cursor's prev_offset hint
+ * restores O(N).  Measured pre-fix: ns/elem doubled per doubling of N
+ * (~417 -> ~4872 across N=205k..3.3M); post-fix flat/decreasing.
+ */
+static double
+__saturated_ns_per_elem(size_t k)
+{
+    const size_t n = k * 2048;
+    uint64_t *a = malloc(n * sizeof(uint64_t));
+    if (a == NULL) return -1.0;
+    size_t j = 0;
+    for (size_t w = 0; w < k; w++)
+        for (size_t b = 0; b < 2048; b++)
+            a[j++] = (uint64_t)(2 * w) * 2048 + b; /* even windows full, odd empty */
+    sm_t *m = sm_create(64);
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    bool ok = sm_add_many_grow(&m, a, n);
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    double per = ok && sm_cardinality(m) == n
+        ? ((double)(t1.tv_sec - t0.tv_sec) * 1e9 +
+           (double)(t1.tv_nsec - t0.tv_nsec)) / (double)n
+        : -1.0;
+    sm_free(m);
+    free(a);
+    return per;
+}
+
+CASE(test_coalesce_is_linear)
+{
+    double small = __saturated_ns_per_elem(200);
+    double large = __saturated_ns_per_elem(1600); /* 8x the chunks */
+    EXPECT(small > 0.0 && large > 0.0, "saturated builds succeeded with correct cardinality");
+    /* O(N): per-element ~flat.  O(N^2) coalesce head-walk: would grow ~8x. */
+    EXPECT(large < small * 3.0 + 50.0,
+           "coalesce stays ~O(N) for saturated ascending runs");
+    return 0;
+}
+
+/*
+ * Regression for the ILP32 RLE-capacity truncation.
+ *
+ * __sm_chunk_rle_set_capacity packs the capacity into descriptor bits
+ * 61:31 via `capacity << 31`.  When capacity was a 32-bit size_t (ILP32)
+ * this shifted a 32-bit value left by 31, dropping every bit above the
+ * first and writing a garbage capacity -- corrupting the chunk stream
+ * the moment a run crossed the first 2048-bit chunk boundary (a dense
+ * build of 2049+ bits collapsed to cardinality 0).  The cast to
+ * __sm_bitvec_t before the shift fixes it.
+ *
+ * This is invisible on LP64 (the shift is already 64-bit), so the guard
+ * that actually bites runs in the i686 CI job; here it documents intent
+ * and exercises the multi-chunk RLE path end to end.
+ */
+CASE(test_multichunk_rle_roundtrip)
+{
+    sm_t *d = sm_create(64);
+    const uint64_t n = 20000; /* ~10 chunks; forces RLE capacity packing */
+    for (uint64_t i = 0; i < n; i++)
+        sm_add_grow(&d, i);
+    EXPECT(sm_cardinality(d) == n, "dense multi-chunk run cardinality");
+    bool member_ok = true;
+    for (uint64_t i = 0; i < n; i++)
+        if (!sm_contains(d, i, NULL)) member_ok = false;
+    EXPECT(member_ok, "every bit of a multi-chunk run is present");
+    EXPECT(sm_select(d, 2048, true) == 2048, "select across the first chunk boundary");
+    EXPECT(sm_select(d, n - 1, true) == n - 1, "select last bit of a multi-chunk run");
+    EXPECT(sm_rank(d, 0, 4095, true) == 4096, "rank spanning two chunks");
+    sm_free(d);
+    return 0;
+}
+
+/*
+ * Regression for the 1 << amt -> UINT64_C(1) << amt fix in sm_select's
+ * forward scan (MSVC C4334 flagged the 32-bit shift; amt can reach 64,
+ * so 1 << amt is UB and cannot test bits 32..63).  A dense run makes
+ * __sm_rank_vec return a vec with high bits set, so select must scan
+ * past bit 31 correctly.
+ */
+CASE(test_select_high_bit_scan)
+{
+    sm_t *m = sm_create(1024);
+    for (uint64_t i = 0; i < 200; i++)
+        sm_add_grow(&m, i); /* dense run spanning multiple 64-bit words */
+    EXPECT(sm_cardinality(m) == 200, "dense run cardinality");
+    bool all_ok = true;
+    for (uint64_t i = 0; i < 200; i++)
+        if (sm_select(m, i, true) != i) all_ok = false;
+    EXPECT(all_ok, "select(n) == n for a dense 0..199 run (scan crosses bit 31/63)");
+    sm_free(m);
+    return 0;
+}
+
 CASE(test_to_array)
 {
     sm_t *m = sm_create(2048);
@@ -2674,6 +2861,169 @@ CASE(test_stress_randomized)
  * __sm_separate_rle_chunk, __sm_flush_carry, __sm_merge_carry,
  * __sm_chunk_scan, and the sparse<->RLE transition branches that
  * the set-op stress test doesn't reach. */
+/*
+ * Regression for the flat-byte codec chunk-stream corruption in the
+ * RLE separate path (present in v5.2.0 and earlier).  Four distinct
+ * defects, all in __sm_separate_rle_chunk, that desynced the sequential
+ * chunk walk (sm_cardinality / sm_rank / sm_serialize) while
+ * sm_contains -- which self-bounds by the stream end -- still answered
+ * correctly:
+ *
+ *  1. state==1 right-aligned "set a bit beyond the run": pivot.size was
+ *     over-counted by one vector when the run tail ended on a vector
+ *     boundary (no run-tail MIXED consumed the reserved payload slot),
+ *     inflating expand_by and inserting 8 stray bytes.
+ *  2. the internal ENOSPC check omitted the SM_SIZEOF_OVERHEAD slack
+ *     that __sm_insert_data's over-length memmove actually needs, so an
+ *     exact-fit separate overran the buffer instead of returning ENOSPC
+ *     for sm_add_grow to retry.
+ *  3. the right-side RLE capacity used aligned_idx (the pivot's start)
+ *     instead of the right chunk's own start, over-counting capacity by
+ *     one window so the right RLE's index range overran the following
+ *     chunk.
+ *  4. state==0 right-aligned clear: a run-tail MIXED collided with the
+ *     cleared-bit MIXED (both written to m_data[1]) and pivot.size was
+ *     left one vector short.
+ *  5. the sparse ex-chunk builder used `lrl > 64` instead of `>= 64`,
+ *     dropping a full ONES vector for an exactly-one-vector run.
+ *
+ * The explicit asserts below are the reduced triggers; the loop is a
+ * deterministic differential fuzz over runs + removes that share and
+ * cross 2048-bit windows.
+ */
+static size_t
+__ref_card(const uint8_t *ref, size_t n)
+{
+    size_t c = 0;
+    for (size_t i = 0; i < n; i++) c += ref[i] ? 1 : 0;
+    return c;
+}
+
+CASE(test_rle_separate_stream_corruption)
+{
+    /* Bug 1: set-gap-set within one window the preceding chunk was RLE
+     * up to.  Pre-fix sm_cardinality returned 6479, want 7287, and
+     * sm_serialize segfaulted. */
+    {
+        sm_t *m = sm_create(64 * 1024);
+        for (uint64_t i = 773; i < 6272; i++) sm_add_grow(&m, i);
+        for (uint64_t i = 7212; i < 9000; i++) sm_add_grow(&m, i);
+        EXPECT(sm_cardinality(m) == 7287, "set-gap-set in shared window: cardinality");
+        EXPECT(sm_rank(m, 0, 8999, true) == 7287, "set-gap-set: rank over range");
+        size_t ssz = sm_serialized_size(m);
+        uint8_t *buf = (uint8_t *)malloc(ssz);
+        size_t w = sm_serialize(m, buf, ssz);
+        sm_t *m2 = sm_deserialize(buf, w);
+        EXPECT(m2 != NULL, "set-gap-set: serialize round-trips");
+        if (m2 != NULL) {
+            EXPECT(sm_cardinality(m2) == 7287, "set-gap-set: deserialized cardinality");
+            sm_free(m2);
+        }
+        free(buf);
+        sm_free(m);
+    }
+
+    /* Bug 3: removing the first bit of an RLE run splits it; the right
+     * RLE's capacity must not overrun the following sparse chunk.  A
+     * distant bit (12288-range) must survive removing bit 6144. */
+    {
+        sm_t *m = sm_create(256);
+        for (uint64_t i = 4096; i < 6144; i++)
+            if ((i % 64) < 40) sm_add_grow(&m, i);
+        for (uint64_t i = 6144; i < 11216; i++) sm_add_grow(&m, i);
+        for (uint64_t i = 12000; i < 14000; i++) sm_add_grow(&m, i);
+        bool before = sm_contains(m, 13296, NULL);
+        sm_remove(m, 6144);
+        EXPECT(before && sm_contains(m, 13296, NULL),
+               "distant bit survives RLE first-bit removal");
+        EXPECT(sm_validate(m), "valid after RLE first-bit split");
+        sm_free(m);
+    }
+
+    /* Bug 4 + 5: central / right-aligned RLE splits on removal where the
+     * right fragment is exactly one vector and the pivot needs two
+     * payloads. */
+    {
+        sm_t *m = sm_create(256);
+        for (uint64_t i = 38912; i < 47168; i++) sm_add_grow(&m, i);
+        EXPECT(sm_contains(m, 47104, NULL), "pre: last-window bit set");
+        sm_remove(m, 46516); /* central split, right fragment = 1 vector */
+        EXPECT(sm_contains(m, 47104, NULL),
+               "one-vector right fragment retains its bits");
+        EXPECT(sm_validate(m), "valid after central one-vector split");
+        sm_free(m);
+    }
+
+    /* Deterministic differential fuzz: runs + removes that share and
+     * cross windows, some forcing RLE, over a bounded universe. */
+    {
+        enum { UNIV = 40000, CASES = 600 };
+        uint8_t *ref = (uint8_t *)calloc(UNIV, 1);
+        int mismatches = 0;
+        for (int seed = 1; seed <= CASES && mismatches == 0; seed++) {
+            prng_seed((uint64_t)seed * 0x9e37U + 1U);
+            memset(ref, 0, UNIV);
+            sm_t *m = sm_create((prng() & 1) ? 256 : 8192);
+            int nops = 2 + (int)(prng() % 5);
+            for (int op = 0; op < nops; op++) {
+                int mode = (int)(prng() % 3);
+                if (mode == 2) {
+                    uint64_t s = prng() % (UNIV - 1);
+                    uint64_t l = 1 + prng() % 4000;
+                    for (uint64_t i = s; i < s + l && i < UNIV; i++) {
+                        if (sm_remove(m, i) != SM_IDX_MAX) ref[i] = 0;
+                    }
+                } else if (mode == 1) {
+                    uint64_t s = prng() % (UNIV - 1);
+                    uint64_t l = 1 + prng() % 9000;
+                    for (uint64_t i = s; i < s + l && i < UNIV; i++) {
+                        if (sm_add_grow(&m, i) != SM_IDX_MAX) ref[i] = 1;
+                    }
+                } else {
+                    uint64_t base = (prng() % (UNIV / 2048)) * 2048;
+                    int subs = 2 + (int)(prng() % 3);
+                    for (int k = 0; k < subs; k++) {
+                        uint64_t s = base + prng() % 2048;
+                        uint64_t l = 1 + prng() % 2048;
+                        for (uint64_t i = s; i < s + l && i < UNIV; i++) {
+                            if (sm_add_grow(&m, i) != SM_IDX_MAX) ref[i] = 1;
+                        }
+                    }
+                }
+            }
+            size_t want = __ref_card(ref, UNIV);
+            if (sm_cardinality(m) != want) mismatches++;
+            for (uint64_t i = 0; i < UNIV; i++) {
+                if (sm_contains(m, i, NULL) != (bool)ref[i]) { mismatches++; break; }
+            }
+            /* a couple of sub-range ranks */
+            for (int t = 0; t < 3 && mismatches == 0; t++) {
+                uint64_t x = prng() % UNIV, y = prng() % UNIV;
+                if (x > y) { uint64_t z = x; x = y; y = z; }
+                size_t rw = 0;
+                for (uint64_t i = x; i <= y; i++) rw += ref[i] ? 1 : 0;
+                if (sm_rank(m, x, y, true) != rw) mismatches++;
+            }
+            size_t ssz = sm_serialized_size(m);
+            uint8_t *buf = (uint8_t *)malloc(ssz);
+            size_t w = sm_serialize(m, buf, ssz);
+            sm_t *m2 = sm_deserialize(buf, w);
+            if (m2 == NULL) {
+                mismatches++;
+            } else {
+                if (sm_cardinality(m2) != want) mismatches++;
+                sm_free(m2);
+            }
+            free(buf);
+            sm_free(m);
+        }
+        free(ref);
+        EXPECT(mismatches == 0,
+               "differential fuzz: cardinality/contains/rank/serialize agree");
+    }
+    return 0;
+}
+
 CASE(test_stress_rle_paths)
 {
     sm_t *m = sm_create(8192);
@@ -2887,6 +3237,212 @@ CASE(test_stress_setops)
     return 0;
 }
 
+/* ------------------------------------------------------------------ */
+/*  Point-lookup / rank / select acceleration (Ideas 3, 4, 5)         */
+/*                                                                    */
+/*  Differential: every accelerator must agree with the plain path    */
+/*  (sm_contains / sm_rank / sm_select) on every probe, for a broad    */
+/*  range of map shapes.  This is the correctness gate.               */
+/* ------------------------------------------------------------------ */
+
+/* Check every accelerator against the plain path for one built map.
+ * `bits` is the sorted ascending set-bit list (cardinality `card`);
+ * `probes` is a sorted ascending probe list (`nprobes`). */
+static int accel_diff_one(sm_t *m, const uint64_t *bits, size_t card,
+    const uint64_t *probes, size_t nprobes)
+{
+    /* --- Idea 5: sm_contains_many == per-element sm_contains. --- */
+    bool *many = malloc((nprobes ? nprobes : 1) * sizeof(bool));
+    EXPECT(many != NULL, "malloc many");
+    sm_contains_many(m, probes, many, nprobes);
+    for (size_t i = 0; i < nprobes; i++) {
+        EXPECT(many[i] == sm_contains(m, probes[i], NULL),
+            "contains_many mismatch");
+    }
+    free(many);
+
+    /* --- Idea 3: sm_contains_cached == sm_contains, in scrambled
+     * order (exercises the MRU replacement, not just sequential). --- */
+    sm_cursor_cached_t cache = SM_CURSOR_CACHED_INIT;
+    for (size_t i = 0; i < nprobes; i++) {
+        /* deterministic scramble across the probe set */
+        size_t j = (i * 2654435761u) % (nprobes ? nprobes : 1);
+        EXPECT(sm_contains_cached(m, probes[j], &cache)
+            == sm_contains(m, probes[j], NULL),
+            "contains_cached mismatch");
+    }
+    /* NULL cache is a legal no-accel fallback. */
+    for (size_t i = 0; i < nprobes; i++) {
+        EXPECT(sm_contains_cached(m, probes[i], NULL)
+            == sm_contains(m, probes[i], NULL),
+            "contains_cached(NULL) mismatch");
+    }
+
+    /* --- Idea 4: locator contains / rank(true) / select(true). --- */
+    sm_locator_t *loc = sm_locator_build(m);
+    if (loc == NULL) {
+        /* Empty map: build returns NULL by contract.  Nothing to test. */
+        EXPECT(card == 0, "locator NULL but map non-empty");
+        return 0;
+    }
+    for (size_t i = 0; i < nprobes; i++) {
+        EXPECT(sm_locator_contains(loc, probes[i])
+            == sm_contains(m, probes[i], NULL),
+            "locator_contains mismatch");
+    }
+    /* rank(0, x, true) over the probe cut points. */
+    for (size_t i = 0; i < nprobes; i++) {
+        uint64_t x = probes[i];
+        EXPECT(sm_locator_rank(loc, 0, x, true) == sm_rank(m, 0, x, true),
+            "locator_rank(0,x,true) mismatch");
+        /* value=false must fall back correctly. */
+        EXPECT(sm_locator_rank(loc, 0, x, false)
+            == sm_rank(m, 0, x, false),
+            "locator_rank(0,x,false) fallback mismatch");
+    }
+    /* rank over sub-ranges [bits[a], bits[b]]. */
+    if (card > 0) {
+        for (size_t a = 0; a < card; a += (card / 7 + 1)) {
+            for (size_t b = a; b < card; b += (card / 7 + 1)) {
+                EXPECT(sm_locator_rank(loc, bits[a], bits[b], true)
+                    == sm_rank(m, bits[a], bits[b], true),
+                    "locator_rank(sub,true) mismatch");
+            }
+        }
+    }
+    /* select(n, true) for every n < cardinality, plus one past the end. */
+    for (size_t n = 0; n < card; n++) {
+        EXPECT(sm_locator_select(loc, n, true) == sm_select(m, n, true),
+            "locator_select(true) mismatch");
+    }
+    EXPECT(sm_locator_select(loc, card, true) == sm_select(m, card, true),
+        "locator_select past-end mismatch");
+    /* value=false select must fall back correctly (spot-check a few). */
+    for (uint64_t n = 0; n < 32; n++) {
+        EXPECT(sm_locator_select(loc, n, false) == sm_select(m, n, false),
+            "locator_select(false) fallback mismatch");
+    }
+
+    /* --- Staleness: mutate, then confirm queries stay CORRECT. ---
+     * Under SPARSEMAP_DIAGNOSTIC a stale query is a contract violation
+     * that __sm_assert()s by design, so this correct-fallback check
+     * only runs in production builds (where the fallback is silent). */
+#ifndef SPARSEMAP_DIAGNOSTIC
+    if (card > 0) {
+        uint64_t hole = bits[card / 2];
+        sm_remove(m, hole);       /* mutate without rebuilding loc */
+        /* loc is now stale; every query must fall back to the truth. */
+        for (size_t i = 0; i < nprobes; i++) {
+            EXPECT(sm_locator_contains(loc, probes[i])
+                == sm_contains(m, probes[i], NULL),
+                "stale locator_contains wrong");
+        }
+        EXPECT(sm_locator_rank(loc, 0, hole, true)
+            == sm_rank(m, 0, hole, true), "stale locator_rank wrong");
+        EXPECT(sm_locator_select(loc, 0, true)
+            == sm_select(m, 0, true), "stale locator_select wrong");
+        sm_add(m, hole); /* restore for any later reuse */
+    }
+#endif
+
+    sm_locator_free(loc);
+    return 0;
+}
+
+/* Build a probe set: every set bit, its neighbors, and evenly spaced
+ * gaps, all sorted ascending and deduplicated. */
+static int cmp_u64(const void *a, const void *b)
+{
+    uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
+    return (x < y) ? -1 : (x > y) ? 1 : 0;
+}
+
+static int accel_diff_shape(uint64_t *bits, size_t card, size_t cap_hint)
+{
+    sm_t *m = sm_create(cap_hint);
+    EXPECT(m != NULL, "sm_create");
+    for (size_t i = 0; i < card; i++) {
+        sm_add_grow(&m, bits[i]);
+    }
+
+    /* Probes: each set bit, +/-1 around it, and a scattering of gaps. */
+    size_t maxp = card * 3 + 64;
+    uint64_t *probes = malloc(maxp * sizeof(uint64_t));
+    EXPECT(probes != NULL, "malloc probes");
+    size_t np = 0;
+    for (size_t i = 0; i < card; i++) {
+        if (bits[i] > 0) probes[np++] = bits[i] - 1;
+        probes[np++] = bits[i];
+        probes[np++] = bits[i] + 1;
+    }
+    uint64_t span = card ? bits[card - 1] + 4096 : 8192;
+    for (int k = 0; k < 64; k++) {
+        probes[np++] = (uint64_t)k * (span / 64 + 1);
+    }
+    qsort(probes, np, sizeof(uint64_t), cmp_u64);
+    /* dedup in place */
+    size_t w = 0;
+    for (size_t i = 0; i < np; i++) {
+        if (w == 0 || probes[i] != probes[w - 1]) probes[w++] = probes[i];
+    }
+    np = w;
+
+    int rc = accel_diff_one(m, bits, card, probes, np);
+    free(probes);
+    sm_free(m);
+    return rc;
+}
+
+CASE(test_accel_differential)
+{
+    /* empty */
+    EXPECT(accel_diff_shape(NULL, 0, 2048) == 0, "empty");
+
+    /* single bit */
+    { uint64_t b[] = { 100 };
+      EXPECT(accel_diff_shape(b, 1, 2048) == 0, "single"); }
+
+    /* dense run */
+    { uint64_t *b = malloc(4096 * sizeof(uint64_t));
+      for (uint64_t i = 0; i < 4096; i++) b[i] = 500 + i;
+      EXPECT(accel_diff_shape(b, 4096, 8192) == 0, "dense_run");
+      free(b); }
+
+    /* sparse scattered across many chunks */
+    { uint64_t *b = malloc(300 * sizeof(uint64_t));
+      for (uint64_t i = 0; i < 300; i++) b[i] = i * 733 + 7;
+      EXPECT(accel_diff_shape(b, 300, 4096) == 0, "sparse_scattered"); free(b); }
+
+    /* multi-chunk mixed runs */
+    { uint64_t *b = malloc(5000 * sizeof(uint64_t));
+      size_t n = 0;
+      for (int run = 0; run < 20; run++) {
+          uint64_t start = (uint64_t)run * 3000 + 11;
+          for (uint64_t i = 0; i < 100 + (uint64_t)run * 5; i++)
+              b[n++] = start + i;
+      }
+      EXPECT(accel_diff_shape(b, n, 8192) == 0, "multichunk"); free(b); }
+
+    /* worst case: every other bit over several chunks */
+    { uint64_t *b = malloc(4000 * sizeof(uint64_t));
+      for (uint64_t i = 0; i < 4000; i++) b[i] = i * 2;
+      EXPECT(accel_diff_shape(b, 4000, 8192) == 0, "every_other"); free(b); }
+
+    /* large indices > 2^32 */
+    { uint64_t base = (uint64_t)1 << 33;
+      uint64_t *b = malloc(500 * sizeof(uint64_t));
+      for (uint64_t i = 0; i < 500; i++) b[i] = base + i * 4099;
+      EXPECT(accel_diff_shape(b, 500, 4096) == 0, "large_index"); free(b); }
+
+    /* large indices spanning a run > 2^32 (RLE + high bits) */
+    { uint64_t base = ((uint64_t)1 << 34) + 12345;
+      uint64_t *b = malloc(3000 * sizeof(uint64_t));
+      for (uint64_t i = 0; i < 3000; i++) b[i] = base + i;
+      EXPECT(accel_diff_shape(b, 3000, 8192) == 0, "large_index_run"); free(b); }
+
+    return 0;
+}
+
 int main(void)
 {
     fprintf(stderr, "test_coverage:\n");
@@ -2999,6 +3555,10 @@ int main(void)
     RUN(test_nonempty_difference);
     RUN(test_jaccard_index);
     RUN(test_add_many);
+    RUN(test_add_many_grow_is_linear);
+    RUN(test_coalesce_is_linear);
+    RUN(test_multichunk_rle_roundtrip);
+    RUN(test_select_high_bit_scan);
     RUN(test_to_array);
 
     /* Phase B continued: range, xor, constructors, hash, compare */
@@ -3040,6 +3600,7 @@ int main(void)
     /* v2.1 additions */
     RUN(test_open_copy);
     RUN(test_add_grow);
+    RUN(test_add_grow_cursor);
     RUN(test_allocator_global);
     RUN(test_allocator_grow);
 
@@ -3060,10 +3621,14 @@ int main(void)
     RUN(test_stress_randomized);
     RUN(test_stress_setops);
     RUN(test_stress_rle_paths);
+    RUN(test_rle_separate_stream_corruption);
 
     /* scan */
     RUN(test_scan_basic);
     RUN(test_scan_with_skip);
+
+    /* point-lookup / rank / select acceleration (Ideas 3, 4, 5) */
+    RUN(test_accel_differential);
 
     fprintf(stderr, "  %d/%d expectations passed, %d failures\n",
             g_total - g_failures, g_total, g_failures);

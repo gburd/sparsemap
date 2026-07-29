@@ -134,6 +134,39 @@ jobs:
       - name: Test (under qemu)
         run: meson test -C builddir --print-errorlogs --timeout-multiplier 5
 
+  # 32-bit (ILP32) build: catches size_t-truncation bugs that LP64 hosts
+  # cannot see.  i686 runs natively on the x86-64 runner (no qemu), via
+  # gcc -m32 + multilib.
+  ilp32:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install 32-bit toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-multilib meson ninja-build pkg-config
+      - name: Write meson ILP32 cross file
+        run: |
+          mkdir -p .ci
+          cat > .ci/ilp32.ini <<EOF
+          [binaries]
+          c = ['gcc', '-m32']
+          ar = 'ar'
+          strip = 'strip'
+
+          [host_machine]
+          system = 'linux'
+          cpu_family = 'x86'
+          cpu = 'i686'
+          endian = 'little'
+          EOF
+      - name: Setup meson (ILP32)
+        run: meson setup builddir-ilp32 --cross-file .ci/ilp32.ini
+      - name: Build
+        run: ninja -C builddir-ilp32
+      - name: Test
+        run: meson test -C builddir-ilp32 --print-errorlogs
+
   version-consistency:
     runs-on: ubuntu-latest
     steps:

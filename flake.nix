@@ -4,17 +4,9 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-24.05";
     utils.url = "github:numtide/flake-utils";
-
-    # The Hegel property-testing server.  Pinned to v0.9.1 to match
-    # the protocol the bundled hegel-c client speaks (the C submodule
-    # in the hegel monorepo was protocol-synced to hegel-core v0.9).
-    # Exposed to the test harness via HEGEL_SERVER_COMMAND; the client
-    # spawns it over a stdin/stdout pipe, which v0.9.x auto-detects.
-    hegel-core.url =
-      "git+https://github.com/hegeldev/hegel-core?dir=nix&ref=refs/tags/v0.9.1";
   };
 
-  outputs = { self, nixpkgs, hegel-core, ... } @inputs:
+  outputs = { self, nixpkgs, ... } @inputs:
     inputs.utils.lib.eachSystem [
       "x86_64-linux" "i686-linux" "aarch64-linux"
       "x86_64-darwin" "aarch64-darwin"
@@ -24,11 +16,36 @@
             overlays = [];
             config.allowUnfree = true;
           };
-          # The Hegel server binary for this system, if hegel-core
-          # provides one (it covers the flakeExposed systems).
-          hegelBin =
-            if (hegel-core.packages ? ${system})
-            then pkgs.lib.getExe hegel-core.packages.${system}.default
+          # Official Hegel C library (hegeldev/hegel-rust/hegel-c): an
+          # in-process FFI -- a prebuilt libhegel shared object plus the
+          # tagged <hegel.h>.  No server, no libcbor/zlib (this replaces
+          # the deprecated gburd/hegel-c socket client).  Pinned to the
+          # v0.30.3 release; the property tests link -lhegel against it.
+          hegelVersion = "v0.30.3";
+          hegelAsset = {
+            "x86_64-linux"   = { f = "libhegel-linux-amd64.so";    h = "sha256-sN6OXYTMhN8QjBMfLo6Mzq8zkMIB0zr/ExKCifxuHgI="; };
+            "aarch64-linux"  = { f = "libhegel-linux-arm64.so";    h = null; };
+            "x86_64-darwin"  = { f = "libhegel-darwin-arm64.dylib"; h = null; };
+            "aarch64-darwin" = { f = "libhegel-darwin-arm64.dylib"; h = null; };
+          };
+          hegelLib =
+            if (hegelAsset ? ${system}) && (hegelAsset.${system}.h != null)
+            then
+              let a = hegelAsset.${system};
+                  soName = if pkgs.stdenv.isDarwin then "libhegel.dylib" else "libhegel.so";
+                  header = pkgs.fetchurl {
+                    url = "https://raw.githubusercontent.com/hegeldev/hegel-rust/${hegelVersion}/hegel-c/include/hegel.h";
+                    hash = "sha256-zmldwtgH+yF9Ung1HRMaffb3pv+GCLfUJy9m6Xd0sno=";
+                  };
+                  so = pkgs.fetchurl {
+                    url = "https://github.com/hegeldev/hegel-rust/releases/download/${hegelVersion}/${a.f}";
+                    hash = a.h;
+                  };
+              in pkgs.runCommand "libhegel-${hegelVersion}" { } ''
+                mkdir -p $out/include $out/lib
+                cp ${header} $out/include/hegel.h
+                cp ${so} $out/lib/${soName}
+              ''
             else null;
       in {
         flake-utils.inputs.systems.follows = "system";
@@ -84,38 +101,15 @@
             echo "sparsemap dev shell -- meson primary, autotools kept for legacy branches"
             echo "  build:  meson setup builddir && ninja -C builddir"
             echo "  test:   meson test -C builddir --print-errorlogs"
-            ${pkgs.lib.optionalString (hegelBin != null) ''
-            export HEGEL_SERVER_COMMAND=${hegelBin}
-
-            # Build the hegel-c client library from the local checkout
-            # (../hegel/c) into $PWD/.hegel-c so meson's -Dhegel probe
-            # finds hegel/hegel.h + libhegel against the SAME libcbor
-            # this shell provides (avoids the 0.12-vs-0.13 ABI clash
-            # seen when linking a prebuilt store libhegel).
-            export HEGEL_C_SRC="''${HEGEL_C_SRC:-$PWD/../hegel/c}"
-            export HEGEL_C_PREFIX="$PWD/.hegel-c"
-            if [ -f "$HEGEL_C_SRC/CMakeLists.txt" ] \
-               && [ ! -f "$HEGEL_C_PREFIX/lib/libhegel.a" ]; then
-              echo "  hegel: building hegel-c from $HEGEL_C_SRC ..."
-              cmake -S "$HEGEL_C_SRC" -B "$HEGEL_C_PREFIX/_build" \
-                    -DCMAKE_INSTALL_PREFIX="$HEGEL_C_PREFIX" \
-                    -DCMAKE_INSTALL_LIBDIR=lib \
-                    -DCMAKE_BUILD_TYPE=RelWithDebInfo >/dev/null 2>&1 \
-                && cmake --build "$HEGEL_C_PREFIX/_build" --target install \
-                    >/dev/null 2>&1 \
-                && echo "  hegel: hegel-c installed to $HEGEL_C_PREFIX" \
-                || echo "  hegel: hegel-c build FAILED (property tests will be skipped)"
-            fi
-            if [ -f "$HEGEL_C_PREFIX/lib/libhegel.a" ] \
-               || [ -f "$HEGEL_C_PREFIX/lib/libhegel.so" ]; then
-              export CMAKE_PREFIX_PATH="$HEGEL_C_PREFIX''${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}"
-              export PKG_CONFIG_PATH="$HEGEL_C_PREFIX/lib/pkgconfig''${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
-              export CPATH="$HEGEL_C_PREFIX/include''${CPATH:+:$CPATH}"
-              export LIBRARY_PATH="$HEGEL_C_PREFIX/lib''${LIBRARY_PATH:+:$LIBRARY_PATH}"
-              export LD_LIBRARY_PATH="$HEGEL_C_PREFIX/lib''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-              echo "  hegel: server=$HEGEL_SERVER_COMMAND  client=$HEGEL_C_PREFIX"
-              echo "  test:   meson setup build -Dhegel=enabled && meson test -C build"
-            fi
+            ${pkgs.lib.optionalString (hegelLib != null) ''
+            # Official hegeldev libhegel (in-process FFI).  Point the
+            # compiler and runtime linker at the pinned derivation so
+            # meson's -Dhegel probe finds <hegel.h> and -lhegel.
+            export CPATH="${hegelLib}/include''${CPATH:+:$CPATH}"
+            export LIBRARY_PATH="${hegelLib}/lib''${LIBRARY_PATH:+:$LIBRARY_PATH}"
+            export LD_LIBRARY_PATH="${hegelLib}/lib''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+            echo "  hegel: official libhegel ${hegelVersion} at ${hegelLib}"
+            echo "  test:   meson setup build -Dhegel=enabled && meson test -C build"
             ''}
           '';
         };
