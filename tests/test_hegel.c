@@ -18,15 +18,19 @@
  */
 #include <sm.h>
 
-#include <hegel/generators.h>
-#include <hegel/hegel.h>
-
 #include <assert.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* Compatibility layer over the official hegeldev/hegel-rust hegel-c FFI
+ * (see tests/hegel_compat.h).  Included after <assert.h> because it
+ * redefines assert() into a shrink-friendly property-failure signal.
+ * This TU owns the shim's run-state definition. */
+#define HEGEL_COMPAT_IMPL
+#include "hegel_compat.h"
 
 /*
  * Bounded universe.  65536 bits span 32 chunks of 2048 bits each, so
@@ -1068,11 +1072,11 @@ run(hegel_session *s, void (*fn)(hegel_test_case *, void *), const char *name)
 	hegel_settings settings = HEGEL_DEFAULT_SETTINGS;
 	settings.max_examples = 200;
 	hegel_results r = hegel_run_test(s, fn, NULL, &settings);
-	int ok = r.passed ? 0 : 1;
-	if (!ok)
+	int failed = r.passed ? 0 : 1;
+	if (failed)
 		fprintf(stderr, "hegel property FAILED: %s\n", name);
 	hegel_results_free(&r);
-	return (ok);
+	return (failed);
 }
 
 int

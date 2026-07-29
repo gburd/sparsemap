@@ -23,15 +23,17 @@
  */
 #include "../sm.c"
 
-#include <hegel/generators.h>
-#include <hegel/hegel.h>
-
 #include <assert.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* Compatibility layer over the official hegeldev hegel-c FFI; included
+ * after <assert.h> since it redefines assert().  Owns the run-state. */
+#define HEGEL_COMPAT_IMPL
+#include "hegel_compat.h"
 
 /*
  * Reference popcount-of-MIXED-pairs over a flag byte: count how many
@@ -213,11 +215,11 @@ run(hegel_session *s, void (*fn)(hegel_test_case *, void *), const char *name)
 	hegel_settings settings = HEGEL_DEFAULT_SETTINGS;
 	settings.max_examples = 300;
 	hegel_results r = hegel_run_test(s, fn, NULL, &settings);
-	int ok = r.passed ? 0 : 1;
-	if (!ok)
+	int failed = r.passed ? 0 : 1;
+	if (failed)
 		fprintf(stderr, "hegel white-box property FAILED: %s\n", name);
 	hegel_results_free(&r);
-	return (ok);
+	return (failed);
 }
 
 int
