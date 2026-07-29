@@ -1205,6 +1205,42 @@ CASE(test_add_grow)
     return 0;
 }
 
+CASE(test_add_grow_cursor)
+{
+    /* Ascending build through a threaded cursor: same result as
+     * sm_add_grow, and the cursor survives the buffer relocation that
+     * the tiny initial capacity forces. */
+    sm_t *m = sm_create(64); /* tiny: will need to grow */
+    sm_cursor_t cur = SM_CURSOR_INIT;
+    for (uint64_t i = 0; i < 5000; i++) {
+        EXPECT(sm_add_grow_cursor(&m, i, &cur) == i, "add_grow_cursor ok");
+    }
+    EXPECT(sm_cardinality(m) == 5000, "all 5000 added via cursor");
+    EXPECT(sm_contains(m, 0, NULL) && sm_contains(m, 4999, NULL),
+        "first and last present");
+    /* Every bit in [0,5000) is set, nothing outside. */
+    EXPECT(!sm_contains(m, 5000, NULL), "5000 absent");
+    EXPECT(sm_rank(m, 0, 2500, true) == 2501, "rank matches dense run");
+    sm_free(m);
+
+    /* A NULL cursor opts out of acceleration but must still work. */
+    sm_t *n = sm_create(64);
+    for (uint64_t i = 0; i < 300; i++) {
+        EXPECT(sm_add_grow_cursor(&n, i * 100, NULL) == i * 100,
+            "add_grow_cursor NULL-cursor ok");
+    }
+    EXPECT(sm_cardinality(n) == 300, "NULL-cursor path added all");
+    sm_free(n);
+
+    /* NULL / NULL-pointee guards, same as sm_add_grow. */
+    sm_cursor_t c2 = SM_CURSOR_INIT;
+    EXPECT(sm_add_grow_cursor(NULL, 0, &c2) == SM_IDX_MAX, "NULL mapp");
+    sm_t *null_map2 = NULL;
+    EXPECT(sm_add_grow_cursor(&null_map2, 0, &c2) == SM_IDX_MAX,
+        "NULL *mapp");
+    return 0;
+}
+
 /* Allocator instrumentation: count malloc / realloc / free calls so we
  * can verify the process-global hooks are actually being called. */
 static struct {
@@ -3564,6 +3600,7 @@ int main(void)
     /* v2.1 additions */
     RUN(test_open_copy);
     RUN(test_add_grow);
+    RUN(test_add_grow_cursor);
     RUN(test_allocator_global);
     RUN(test_allocator_grow);
 
