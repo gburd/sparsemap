@@ -1,0 +1,18 @@
+[package]
+name = "sparsemap-py"
+version = "5.1.0"
+edition = "2021"
+rust-version = "1.77"
+description = "CPython bindings for the sparsemap compressed bitmap."
+license = "MIT"
+repository = "https://codeberg.org/gregburd/sparsemap"
+publish = false
+
+[lib]
+name = "sparsemap_py"
+crate-type = ["cdylib"]
+
+[dependencies]
+# a path dependency keeps the binding in lockstep with the rust port
+sparsemap = { path = "../rust" }
+pyo3 = { version = "0.25", features = ["extension-module", "abi3-py39"] }

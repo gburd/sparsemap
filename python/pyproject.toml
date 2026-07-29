@@ -1,0 +1,25 @@
+[build-system]
+# uv_build cannot compile extensions so maturin serves as the build backend
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "sparsemap"
+version = "5.1.0"
+description = "Sparse, compressed, run-length-encoded bitmap over 64-bit indices."
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+keywords = ["bitmap", "bitset", "compressed", "rle", "roaring"]
+
+[project.urls]
+Repository = "https://codeberg.org/gregburd/sparsemap"
+
+[tool.maturin]
+module-name = "sparsemap"
+
+[tool.ty.environment]
+extra-paths = ["ci"]
+
+[dependency-groups]
+dev = ["pytest>=8", "ty"]
