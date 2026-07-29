@@ -104,3 +104,12 @@ rust/Cargo.lock
 # Hegel-c build scratch
 .hegel-c/
 .hegel/
+
+# python port artifacts
+/python/target/
+/python/.venv/
+__pycache__/
+.pytest_cache/
+/python/uv.lock
+/python/Cargo.lock
+/python/tests/fixtures/
