@@ -3,10 +3,14 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-24.05";
+    # A newer channel for tools absent from 24.05: `ty` (Astral's Python
+    # type checker, used by the python/ binding's checks) and a current
+    # maturin/uv.  Kept separate so the stable base is unchanged.
+    nixpkgs-unstable.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     utils.url = "github:numtide/flake-utils";
   };
 
-  outputs = { self, nixpkgs, ... } @inputs:
+  outputs = { self, nixpkgs, nixpkgs-unstable, ... } @inputs:
     inputs.utils.lib.eachSystem [
       "x86_64-linux" "i686-linux" "aarch64-linux"
       "x86_64-darwin" "aarch64-darwin"
@@ -14,6 +18,12 @@
       let pkgs = import nixpkgs {
             inherit system;
             overlays = [];
+            config.allowUnfree = true;
+          };
+          # Newer channel for tools absent from 24.05 (ty, current
+          # maturin/uv) used by the python/ binding.
+          pkgsUnstable = import nixpkgs-unstable {
+            inherit system;
             config.allowUnfree = true;
           };
           # Official Hegel C library (hegeldev/hegel-rust/hegel-c): an
@@ -88,6 +98,17 @@
             perl
             ripgrep
             (python3.withPackages (ps: [ ps.matplotlib ps.numpy ]))
+
+            # Rust port (ports/rust) + Python binding (python/).  The
+            # binding is a PyO3 wheel over the Rust crate, built by
+            # maturin under uv.  `ty` (Astral's type checker) gates the
+            # python/ checks and is not in 24.05, so it and a current
+            # maturin/uv come from nixpkgs-unstable; cargo/rustc from 24.05.
+            cargo
+            rustc
+            pkgsUnstable.uv
+            pkgsUnstable.maturin
+            pkgsUnstable.ty
 
             # Legacy autotools (kept for archive branches and one-off
             # comparisons; main uses meson).

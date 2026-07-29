@@ -4,6 +4,28 @@ All notable changes to the Rust `sparsemap` crate are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com), and
 the crate follows [SemVer](https://semver.org).
 
+## [5.4.0] - 2026-07-29
+
+Version realigned with the C `sparsemap` library, which is at 5.4.0.
+The crate skips 5.2.x/5.3.0 as published versions: those C releases
+were ILP32/MSVC portability fixes, an O(N) coalesce fix, and C-side
+point-lookup accelerators (`sm_contains_many`, `sm_locator_*`), and
+5.4.0 added `sm_add_grow_cursor`.  None change the wire format (still
+version 2) or any behavior this crate can observe: the Rust port models
+a map as a `BTreeMap`, so the portability/coalesce fixes don't apply
+and its `contains`/`rank`/`select` are already `O(log n)` without a
+locator; the ascending-append fast path is inherent to `BTreeMap`
+inserts.  The bump keeps the version numbers in lockstep; there is no
+source or wire change for consumers.
+
+### Note
+
+The C-only acceleration APIs (`sm_locator_*`, `sm_contains_many`) and
+`sm_add_grow_cursor` are not surfaced in this crate; they optimize the
+C byte-struct's chunk walk, which the `BTreeMap` representation does
+not have.  They can be added as inherent methods later without a wire
+or version change.
+
 ## [5.1.0] - 2026-06-24
 
 Version realigned with the C `sparsemap` library, which is at 5.1.0.
