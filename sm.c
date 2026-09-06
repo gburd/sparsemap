@@ -7298,7 +7298,57 @@ sm_difference(const sm_t *a, const sm_t *b)
 			}
 
 			/* Process overlap: aligned sparse fast path */
-			if (!a_rle && !b_rle && a_start == b_start) {
+			if (a_rle && b_rle) {
+				/*
+				 * Both RLE.  sm_union and sm_intersection each
+				 * have an explicit a_rle && b_rle branch;
+				 * difference did not, so both-RLE overlaps fell
+				 * through to the misaligned fallback below,
+				 * whose `else` arm assumed it was unreachable
+				 * and zeroed the word buffers -- silently
+				 * dropping every surviving bit of a.  It showed
+				 * up as sm_difference([0,16384), [0,16357))
+				 * returning empty instead of the 27-bit tail,
+				 * for any two RLE runs where b covers a prefix
+				 * of a.
+				 *
+				 * A run can be much longer than the 2048-bit
+				 * word window, so this cannot be done by
+				 * expanding into words.  Work on the runs
+				 * directly: within the overlap, a's set bits
+				 * survive exactly where b's run does not reach.
+				 */
+				const size_t b_set_end = (size_t)b_start +
+				    __sm_chunk_rle_get_length(&b_chunk);
+
+				/* a's bits before b's run starts. */
+				if (ov_start < (size_t)b_start) {
+					const size_t upto =
+					    ov_end < (size_t)b_start ?
+					    ov_end :
+					    (size_t)b_start;
+					if (!__sm_emit_chunk_bits(&result,
+					        &a_chunk, a_rle, a_start,
+					        ov_start, upto)) {
+						sm_free(result);
+						return (NULL);
+					}
+				}
+
+				/* a's bits after b's run ends. */
+				if (b_set_end < ov_end) {
+					const size_t from =
+					    b_set_end > ov_start ? b_set_end :
+					                           ov_start;
+					if (!__sm_emit_chunk_bits(&result,
+					        &a_chunk, a_rle, a_start, from,
+					        ov_end)) {
+						sm_free(result);
+						return (NULL);
+					}
+				}
+				a_cursor = ov_end;
+			} else if (!a_rle && !b_rle && a_start == b_start) {
 				__sm_bitvec_t aw[32], bw[32];
 				int ac[32], bc[32];
 				__sm_expand_sparse_chunk(&a_chunk, aw, ac);

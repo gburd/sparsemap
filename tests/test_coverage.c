@@ -1894,11 +1894,18 @@ CASE(test_open_reduced_capacity_chunk)
 {
     /* One sparse chunk at start 0 whose flag 0 is SM_PAYLOAD_NONE
      * (0b01), so the chunk advertises less than the maximum capacity.
-     * Layout: [u64 chunk count][u64 chunk start][u64 descriptor]. */
+     * Layout: [chunk count][chunk start][descriptor], each a host-order
+     * 64-bit word -- sm_open consumes the in-memory representation, not
+     * the serialized wire format, so write these with memcpy from
+     * uint64_t rather than poking individual bytes (which assumed a
+     * little-endian layout and failed on sparc). */
     uint8_t buf[512];
     memset(buf, 0, sizeof(buf));
-    buf[0] = 1;                      /* chunk count = 1 (LE u64) */
+    const uint64_t count = 1;        /* one chunk */
+    const uint64_t start = 0;        /* at bit 0 */
     const uint64_t desc = 1ULL;      /* flag 0 = 01 = SM_PAYLOAD_NONE */
+    memcpy(buf + 0, &count, sizeof(count));
+    memcpy(buf + 8, &start, sizeof(start));
     memcpy(buf + 16, &desc, sizeof(desc));
 
     sm_t *m = sm_open_copy(buf, sizeof(buf), 256);
@@ -2219,6 +2226,81 @@ CASE(test_guard_short_circuits)
     EXPECT(sm_locator_build(NULL) == NULL, "locator_build: NULL map");
 
     sm_free(m);
+    return 0;
+}
+
+/*
+ * Regression: sm_difference dropped every surviving bit when BOTH
+ * chunks were RLE.
+ *
+ * sm_union and sm_intersection each have an explicit `a_rle && b_rle`
+ * branch; sm_difference did not, so a both-RLE overlap fell through to
+ * the misaligned-sparse fallback, whose `else` arm assumed it could not
+ * be reached and zeroed the word buffers.  Any pair of runs where b
+ * covers a prefix of a returned an empty map instead of a's tail.
+ * Found by test_setops_differential_random; pinned here with the
+ * minimal case so it does not depend on a particular seed.
+ */
+CASE(test_difference_rle_minus_rle)
+{
+    /* The original minimal failure: 8 full chunks minus a 16357-bit
+     * prefix must leave exactly the last 27 bits. */
+    sm_t *a = sm_create(1 << 20);
+    sm_t *b = sm_create(1 << 20);
+    EXPECT(a != NULL && b != NULL, "setup");
+    for (uint64_t i = 0; i < 16384; i++) sm_add(a, i);
+    for (uint64_t i = 0; i < 16357; i++) sm_add(b, i);
+
+    sm_t *d = sm_difference(a, b);
+    EXPECT(d != NULL, "RLE minus RLE prefix is not empty");
+    EXPECT(sm_cardinality(d) == 27, "exactly the 27-bit tail survives");
+    for (uint64_t i = 16357; i < 16384; i++)
+        EXPECT(sm_contains(d, i, NULL), "tail bit present");
+    EXPECT(!sm_contains(d, 16356, NULL), "last removed bit is gone");
+    EXPECT(!sm_contains(d, 0, NULL), "first removed bit is gone");
+    sm_free(d);
+
+    /* Sweep run lengths against chunk multiples: b a prefix of a, b
+     * ending just short of, at, and just past each chunk boundary. */
+    for (uint64_t chunks = 1; chunks <= 8; chunks++) {
+        const uint64_t alen = chunks * 2048;
+        for (uint64_t back = 1; back <= 3; back++) {
+            sm_t *x = sm_create(1 << 20);
+            sm_t *y = sm_create(1 << 20);
+            if (x == NULL || y == NULL) { sm_free(x); sm_free(y); continue; }
+            for (uint64_t i = 0; i < alen; i++) sm_add(x, i);
+            for (uint64_t i = 0; i < alen - back; i++) sm_add(y, i);
+            sm_t *r = sm_difference(x, y);
+            const size_t got = (r != NULL) ? sm_cardinality(r) : 0;
+            if (got != back) {
+                fprintf(stderr,
+                    "    RLE-RLE diff: a=[0,%llu) b=[0,%llu) got %zu want %llu\n",
+                    (unsigned long long)alen,
+                    (unsigned long long)(alen - back), got,
+                    (unsigned long long)back);
+                g_failures++;
+            }
+            sm_free(r); sm_free(x); sm_free(y);
+        }
+    }
+
+    /* Disjoint and partially overlapping runs must still be right. */
+    sm_t *p = sm_create(1 << 20);
+    sm_t *q = sm_create(1 << 20);
+    if (p != NULL && q != NULL) {
+        for (uint64_t i = 0; i < 9000; i++) sm_add(p, i);
+        for (uint64_t i = 3000; i < 12000; i++) sm_add(q, i);
+        sm_t *r = sm_difference(p, q);
+        EXPECT(r != NULL && sm_cardinality(r) == 3000,
+            "staggered runs: [0,3000) survives");
+        EXPECT(r != NULL && sm_contains(r, 2999, NULL) &&
+               !sm_contains(r, 3000, NULL), "cut is exactly at 3000");
+        sm_free(r);
+    }
+    sm_free(p); sm_free(q);
+
+    sm_free(a);
+    sm_free(b);
     return 0;
 }
 
@@ -2993,6 +3075,148 @@ check_agrees(const sm_t *m, const bool *ref, size_t ref_max)
         }
     }
     return 1;
+}
+
+/*
+ * Randomized differential set operations.
+ *
+ * test_setops_differential_shapes crosses a fixed shape table, which
+ * reaches the common merge states but not the ones that need a chunk to
+ * be left *partially consumed* by a previous iteration (a cursor inside
+ * a chunk, which arises when one side's run ends mid-chunk and the
+ * merge loop revisits it).  Enumerating those by hand is fiddly;
+ * generating maps out of randomly interleaved runs and sparse
+ * scatterings sweeps them.  Deterministic seeds so any failure is
+ * reproducible.
+ */
+static void
+build_mixed(sm_t **mp, bool *ref, size_t ref_max, uint64_t seed)
+{
+    prng_seed(seed);
+    memset(ref, 0, ref_max * sizeof(*ref));
+    /* 4-12 segments, each either a run (often long enough to become RLE
+     * and to end mid-chunk) or a strided scattering. */
+    const int nseg = 4 + (int)(prng() % 9);
+    for (int s = 0; s < nseg; s++) {
+        const uint64_t start = prng() % ref_max;
+        if (prng() & 1) {
+            /* run: length from a few bits to several chunks */
+            const uint64_t len = 1 + prng() % 5000;
+            for (uint64_t i = start; i < start + len && i < ref_max; i++) {
+                if (sm_add_grow(mp, i) != SM_IDX_MAX)
+                    ref[i] = true;
+            }
+        } else {
+            const uint64_t stride = 1 + prng() % 200;
+            const uint64_t cnt = 1 + prng() % 400;
+            for (uint64_t k = 0; k < cnt; k++) {
+                const uint64_t i = start + k * stride;
+                if (i >= ref_max)
+                    break;
+                if (sm_add_grow(mp, i) != SM_IDX_MAX)
+                    ref[i] = true;
+            }
+        }
+    }
+}
+
+CASE(test_setops_differential_random)
+{
+    enum { UNIV = 24000 };
+    bool *ra = (bool *)calloc(UNIV, sizeof(bool));
+    bool *rb = (bool *)calloc(UNIV, sizeof(bool));
+    bool *rw = (bool *)calloc(UNIV, sizeof(bool));
+    EXPECT(ra != NULL && rb != NULL && rw != NULL, "oracle allocation");
+    if (ra == NULL || rb == NULL || rw == NULL) {
+        free(ra); free(rb); free(rw);
+        return 1;
+    }
+
+    for (uint64_t iter = 0; iter < 60; iter++) {
+        sm_t *a = sm_create(4096);
+        sm_t *b = sm_create(4096);
+        EXPECT(a != NULL && b != NULL, "map allocation");
+        if (a == NULL || b == NULL) { sm_free(a); sm_free(b); break; }
+
+        build_mixed(&a, ra, UNIV, 0x51ed0000ULL + iter * 2);
+        build_mixed(&b, rb, UNIV, 0x51ed0001ULL + iter * 2);
+
+        struct {
+            const char *name;
+            sm_t *(*op)(const sm_t *, const sm_t *);
+            int kind;   /* 0=or 1=and 2=andnot 3=xor */
+        } ops[] = {
+            { "union",        sm_union,        0 },
+            { "intersection", sm_intersection, 1 },
+            { "difference",   sm_difference,   2 },
+            { "xor",          sm_xor,          3 },
+        };
+
+        for (size_t k = 0; k < sizeof(ops) / sizeof(*ops); k++) {
+            size_t want = 0;
+            for (size_t i = 0; i < UNIV; i++) {
+                switch (ops[k].kind) {
+                case 0: rw[i] = ra[i] || rb[i]; break;
+                case 1: rw[i] = ra[i] && rb[i]; break;
+                case 2: rw[i] = ra[i] && !rb[i]; break;
+                default: rw[i] = ra[i] != rb[i]; break;
+                }
+                if (rw[i])
+                    want++;
+            }
+
+            sm_t *r = ops[k].op(a, b);
+            /* Walk the result's set bits (cheap) and confirm each is
+             * expected, then confirm the counts agree -- together that
+             * is bit-for-bit equality with the oracle. */
+            size_t seen = 0;
+            bool bad = false;
+            if (r != NULL) {
+                sm_cursor_t cur = SM_CURSOR_INIT;
+                uint64_t i = SM_IDX_MAX;
+                while ((i = sm_next_member(r, i, &cur)) != SM_IDX_MAX) {
+                    if (i >= UNIV || !rw[i]) {
+                        fprintf(stderr,
+                            "    %s iter %llu: unexpected bit %llu\n",
+                            ops[k].name, (unsigned long long)iter,
+                            (unsigned long long)i);
+                        bad = true;
+                        break;
+                    }
+                    seen++;
+                }
+            }
+            if (bad || seen != want) {
+                if (!bad)
+                    fprintf(stderr,
+                        "    %s iter %llu: %zu set bits, want %zu\n",
+                        ops[k].name, (unsigned long long)iter, seen, want);
+                g_failures++;
+            }
+            sm_free(r);
+        }
+
+        /* Counting shortcuts must agree with the oracle as well. */
+        size_t n_or = 0, n_xor = 0, n_and = 0;
+        for (size_t i = 0; i < UNIV; i++) {
+            if (ra[i] || rb[i]) n_or++;
+            if (ra[i] != rb[i]) n_xor++;
+            if (ra[i] && rb[i]) n_and++;
+        }
+        if (sm_union_cardinality(a, b) != n_or ||
+            sm_xor_cardinality(a, b) != n_xor ||
+            sm_intersection_cardinality(a, b) != n_and) {
+            fprintf(stderr, "    cardinality shortcut mismatch, iter %llu\n",
+                (unsigned long long)iter);
+            g_failures++;
+        }
+
+        sm_free(a);
+        sm_free(b);
+    }
+
+    free(ra); free(rb); free(rw);
+    return 0;
 }
 
 CASE(test_diff_random_membership)
@@ -4158,6 +4382,8 @@ int main(void)
     RUN(test_setops_differential_shapes);
     RUN(test_oom_paths);
     RUN(test_guard_short_circuits);
+    RUN(test_setops_differential_random);
+    RUN(test_difference_rle_minus_rle);
 
     /* flip / validate / statistics / shrink_to_fit */
     RUN(test_flip_range);
