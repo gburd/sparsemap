@@ -227,3 +227,42 @@ jobs:
           mkdir -p tests/fuzz-corpus  # corpus is committed; ensure dir exists
           builddir-fuzz/tests/fuzz_deserialize tests/fuzz-corpus \
               -max_total_time=60 -print_final_stats=1
+
+  # Property-based tests against the official Hegel C library
+  # (hegeldev/hegel-rust hegel-c): an in-process FFI, so we just need
+  # the prebuilt libhegel plus the tagged header.  Pinned to the same
+  # release flake.nix uses so CI and the dev shell agree.
+  hegel:
+    runs-on: codeberg-medium
+    env:
+      HEGEL_VERSION: v0.30.3
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc meson ninja-build pkg-config curl
+
+      - name: Checkout
+        uses: https://code.forgejo.org/actions/checkout@v4
+
+      - name: Fetch official libhegel + header
+        run: |
+          mkdir -p .hegel/include .hegel/lib
+          curl -sSfL -o .hegel/include/hegel.h \
+            "https://raw.githubusercontent.com/hegeldev/hegel-rust/${HEGEL_VERSION}/hegel-c/include/hegel.h"
+          curl -sSfL -o .hegel/lib/libhegel.so \
+            "https://github.com/hegeldev/hegel-rust/releases/download/${HEGEL_VERSION}/libhegel-linux-amd64.so"
+
+      - name: Setup meson with hegel enabled
+        run: |
+          export CPATH="$PWD/.hegel/include:${CPATH:-}"
+          export LIBRARY_PATH="$PWD/.hegel/lib:${LIBRARY_PATH:-}"
+          meson setup builddir-hegel -Dhegel=enabled
+
+      - name: Build
+        run: ninja -C builddir-hegel
+
+      - name: Run property tests
+        run: |
+          export LD_LIBRARY_PATH="$PWD/.hegel/lib:${LD_LIBRARY_PATH:-}"
+          meson test -C builddir-hegel hegel hegel_white --print-errorlogs
