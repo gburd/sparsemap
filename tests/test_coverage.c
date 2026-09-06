@@ -2155,6 +2155,73 @@ CASE(test_setops_differential_shapes)
     return 0;
 }
 
+/*
+ * Short-circuit arms of the compound guards.
+ *
+ * Several entry points validate with `if (a == NULL || b == NULL ||
+ * ...)`.  Passing one bad argument only exercises the first operand
+ * that fails; the later operands' true-arms stay untaken.  Walk each
+ * guard's operands individually so every arm is exercised, and pin the
+ * documented failure return while we are here.
+ */
+CASE(test_guard_short_circuits)
+{
+    sm_t *m = sm_create(2048);
+    EXPECT(m != NULL, "setup");
+    for (uint64_t i = 0; i < 100; i++) sm_add(m, i * 7);
+
+    /* sm_add_many_grow: NULL mapp, NULL *mapp, NULL arr with n > 0,
+     * and the legal NULL arr with n == 0. */
+    uint64_t one[1] = { 5 };
+    sm_t *null_map = NULL;
+    EXPECT(!sm_add_many_grow(NULL, one, 1), "add_many_grow: NULL mapp");
+    EXPECT(!sm_add_many_grow(&null_map, one, 1), "add_many_grow: NULL *mapp");
+    EXPECT(!sm_add_many_grow(&m, NULL, 1), "add_many_grow: NULL arr, n>0");
+    EXPECT(sm_add_many_grow(&m, NULL, 0), "add_many_grow: NULL arr, n==0 ok");
+
+    /* sm_add_many has the same shape. */
+    EXPECT(!sm_add_many(NULL, one, 1), "add_many: NULL map");
+    EXPECT(!sm_add_many(m, NULL, 1), "add_many: NULL arr, n>0");
+    EXPECT(sm_add_many(m, NULL, 0), "add_many: NULL arr, n==0 ok");
+
+    /* sm_validate: NULL map, and a valid map. */
+    EXPECT(sm_validate(NULL), "validate: NULL is vacuously valid");
+    EXPECT(sm_validate(m), "validate: real map");
+
+    /* Locator guards: NULL locator, and a locator whose map was
+     * mutated after the build (the staleness check). */
+    EXPECT(!sm_locator_contains(NULL, 1), "locator_contains: NULL loc");
+    EXPECT(sm_locator_rank(NULL, 0, 100, true) == 0, "locator_rank: NULL loc");
+    EXPECT(SM_NOT_FOUND(sm_locator_select(NULL, 0, true)),
+        "locator_select: NULL loc");
+    sm_locator_free(NULL);   /* must be a no-op, not a crash */
+
+    sm_locator_t *loc = sm_locator_build(m);
+    if (loc != NULL) {
+        EXPECT(sm_locator_contains(loc, 0) == sm_contains(m, 0, NULL),
+            "locator agrees with map before mutation");
+        EXPECT(sm_locator_rank(loc, 0, 700, true) == sm_rank(m, 0, 700, true),
+            "locator rank agrees with plain rank");
+        EXPECT(sm_locator_select(loc, 3, true) == sm_select(m, 3, true),
+            "locator select agrees with plain select");
+        /* Mutating the map makes the locator stale.  Per the documented
+         * contract a stale locator still returns CORRECT answers -- it
+         * detects the mismatch and falls back to the plain O(n) path --
+         * it just loses the speedup.  So it must SEE the new bit. */
+        sm_add(m, 999999);
+        EXPECT(sm_locator_contains(loc, 999999),
+            "stale locator still correct: sees the new bit");
+        EXPECT(sm_locator_rank(loc, 0, 999999, true) ==
+               sm_rank(m, 0, 999999, true),
+            "stale locator rank still matches plain rank");
+        sm_locator_free(loc);
+    }
+    EXPECT(sm_locator_build(NULL) == NULL, "locator_build: NULL map");
+
+    sm_free(m);
+    return 0;
+}
+
 CASE(test_add_range)
 {
     sm_t *m = sm_create(2048);
@@ -4090,6 +4157,7 @@ int main(void)
     RUN(test_open_reduced_capacity_chunk);
     RUN(test_setops_differential_shapes);
     RUN(test_oom_paths);
+    RUN(test_guard_short_circuits);
 
     /* flip / validate / statistics / shrink_to_fit */
     RUN(test_flip_range);

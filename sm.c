@@ -8622,8 +8622,15 @@ sm_locator_rank(const sm_locator_t *loc, uint64_t lo, uint64_t hi, bool value)
 		if (value == true) {
 			__sm_assert(false);
 		}
-		return (sm_rank((sm_t *)(loc ? loc->map : NULL), lo, hi,
-		    value));
+		/* A NULL (or map-less) locator has nothing to count.  Do not
+		 * hand NULL to sm_rank: it does not accept one, so the
+		 * `loc ? loc->map : NULL` guard below used to turn a NULL
+		 * locator into a NULL dereference inside __sm_rank_vec.
+		 * sm_locator_contains already treats NULL as "no bits". */
+		if (loc == NULL || loc->map == NULL) {
+			return (0);
+		}
+		return (sm_rank((sm_t *)loc->map, lo, hi, value));
 	}
 	if (lo > hi) {
 		return (0);
@@ -8651,7 +8658,13 @@ sm_locator_select(const sm_locator_t *loc, uint64_t n, bool value)
 		if (value == true) {
 			__sm_assert(false);
 		}
-		return (sm_select((sm_t *)(loc ? loc->map : NULL), n, value));
+		/* As in sm_locator_rank: sm_select does not accept a NULL
+		 * map, so answer "not found" directly instead of passing
+		 * one through. */
+		if (loc == NULL || loc->map == NULL) {
+			return (SM_IDX_MAX);
+		}
+		return (sm_select((sm_t *)loc->map, n, value));
 	}
 
 	const sm_t *map = loc->map;
