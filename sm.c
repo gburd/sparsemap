@@ -991,6 +991,32 @@ __sm_chunk_calc_vector_size(const uint8_t b)
 }
 
 /**
+ * @brief Extracts flag-byte @a n of a chunk descriptor, endian-neutrally.
+ *
+ * The sparse descriptor packs thirty-two 2-bit flags into one 64-bit
+ * word, four flags per byte, with flag @a i occupying bits
+ * [2*i, 2*i+1] of the word.  Flag byte @a n therefore covers flags
+ * [4n, 4n+3], i.e. word bits [8n, 8n+7].
+ *
+ * Reading those bytes by walking a `uint8_t *` over the word only works
+ * on a little-endian host: on big-endian, byte 0 of the object is the
+ * word's most-significant byte, so a byte walk visits the flags in
+ * reverse.  That produced a correct sm_contains (which shifts the word
+ * directly) but wrong sm_cardinality / minimum / maximum / rank /
+ * select on big-endian hosts.  Shifting the word is correct everywhere
+ * and compiles to the same single byte load on little-endian.
+ *
+ * @param[in] desc The chunk descriptor word.
+ * @param[in] n    Flag-byte index in [0, sizeof(__sm_bitvec_t)).
+ * @return Byte @a n of the logical flag sequence.
+ */
+static inline uint8_t
+__sm_desc_flag_byte(const __sm_bitvec_t desc, const size_t n)
+{
+	return ((uint8_t)((desc >> (n * 8)) & 0xFFu));
+}
+
+/**
  * @brief Retrieves the position within the chunk corresponding to the specified bit vector index.
  *
  * This function calculates the position in the chunk's data array that
@@ -1018,14 +1044,15 @@ __sm_chunk_get_position(const __sm_chunk_t *chunk, size_t bv)
 
 	/* Handle 4 indices (1 byte) at a time. */
 	size_t position = 0;
-	register uint8_t *p = (uint8_t *)chunk->m_data;
 
 	/* Handle RLE by examining the first byte. */
 	if (!__sm_chunk_is_rle(chunk)) {
+		const __sm_bitvec_t desc = *chunk->m_data;
 		const size_t num_bytes =
 		    bv / ((size_t)SM_FLAGS_PER_INDEX_BYTE * SM_BITS_PER_VECTOR);
-		for (size_t i = 0; i < num_bytes; i++, p++) {
-			position += __sm_chunk_calc_vector_size(*p);
+		for (size_t i = 0; i < num_bytes; i++) {
+			position += __sm_chunk_calc_vector_size(
+			    __sm_desc_flag_byte(desc, i));
 		}
 
 		bv -= num_bytes * SM_FLAGS_PER_INDEX_BYTE;
@@ -1077,14 +1104,15 @@ __sm_chunk_get_capacity(const __sm_chunk_t *chunk)
 	}
 
 	size_t capacity = SM_CHUNK_MAX_CAPACITY;
-	register uint8_t *p = (uint8_t *)chunk->m_data;
+	const __sm_bitvec_t desc = *chunk->m_data;
 
-	for (size_t i = 0; i < sizeof(__sm_bitvec_t); i++, p++) {
-		if (!*p || *p == 0xff) {
+	for (size_t i = 0; i < sizeof(__sm_bitvec_t); i++) {
+		const uint8_t b = __sm_desc_flag_byte(desc, i);
+		if (!b || b == 0xff) {
 			continue;
 		}
 		for (int j = 0; j < SM_FLAGS_PER_INDEX_BYTE; j++) {
-			const size_t flags = SM_CHUNK_GET_FLAGS(*p, j);
+			const size_t flags = SM_CHUNK_GET_FLAGS(b, j);
 			if (flags == SM_PAYLOAD_NONE) {
 				capacity -= SM_BITS_PER_VECTOR;
 			}
@@ -1117,18 +1145,23 @@ __sm_chunk_increase_capacity(const __sm_chunk_t *chunk, const size_t capacity)
 	}
 
 	size_t increased = 0;
-	register uint8_t *p = (uint8_t *)chunk->m_data;
-	for (size_t i = 0; i < sizeof(__sm_bitvec_t); i++, p++) {
-		if (!*p || *p == 0xff) {
+	for (size_t i = 0; i < sizeof(__sm_bitvec_t); i++) {
+		const uint8_t b = __sm_desc_flag_byte(*chunk->m_data, i);
+		if (!b || b == 0xff) {
 			continue;
 		}
 		for (int j = 0; j < SM_FLAGS_PER_INDEX_BYTE; j++) {
-			const size_t flags = SM_CHUNK_GET_FLAGS(*p, j);
+			const size_t flags = SM_CHUNK_GET_FLAGS(b, j);
 			if (flags == SM_PAYLOAD_NONE) {
-				*p &= (uint8_t)~(
-				    (__sm_bitvec_t)SM_PAYLOAD_ONES << j * 2);
-				*p |= (uint8_t)((__sm_bitvec_t)SM_PAYLOAD_ZEROS
-				    << j * 2);
+				/* Flag (i * 4 + j) of the descriptor word;
+				 * set it word-wise so the update is
+				 * endian-neutral. */
+				__sm_bitvec_t desc = *chunk->m_data;
+				SM_CHUNK_SET_FLAGS(desc,
+				    (i * (size_t)SM_FLAGS_PER_INDEX_BYTE) +
+				        (size_t)j,
+				    SM_PAYLOAD_ZEROS);
+				*chunk->m_data = desc;
 				increased += SM_BITS_PER_VECTOR;
 				if (increased + initial_capacity == capacity) {
 					__sm_assert(__sm_chunk_get_capacity(
@@ -1156,13 +1189,14 @@ __sm_chunk_is_empty(const __sm_chunk_t *chunk)
 {
 	if (chunk->m_data[0] != 0) {
 		/* A chunk is considered empty if all flags are SM_PAYLOAD_ZERO or _NONE. */
-		register uint8_t *p = (uint8_t *)chunk->m_data;
-		for (size_t i = 0; i < sizeof(__sm_bitvec_t); i++, p++) {
-			if (*p) {
+		const __sm_bitvec_t desc = *chunk->m_data;
+		for (size_t i = 0; i < sizeof(__sm_bitvec_t); i++) {
+			const uint8_t b = __sm_desc_flag_byte(desc, i);
+			if (b) {
 				for (int j = 0; j < SM_FLAGS_PER_INDEX_BYTE;
 				     j++) {
 					const size_t flags =
-					    SM_CHUNK_GET_FLAGS(*p, j);
+					    SM_CHUNK_GET_FLAGS(b, j);
 					if (flags != SM_PAYLOAD_NONE &&
 					    flags != SM_PAYLOAD_ZEROS) {
 						return (false);
@@ -1192,10 +1226,11 @@ __sm_chunk_get_size(const __sm_chunk_t *chunk)
 	size_t size = sizeof(__sm_bitvec_t);
 	if (SM_LIKELY(!__sm_chunk_is_rle(chunk))) {
 		/* Use a lookup table for each byte of the flags */
-		register uint8_t *p = (uint8_t *)chunk->m_data;
-		for (size_t i = 0; i < sizeof(__sm_bitvec_t); i++, p++) {
+		const __sm_bitvec_t desc = *chunk->m_data;
+		for (size_t i = 0; i < sizeof(__sm_bitvec_t); i++) {
 			size += sizeof(__sm_bitvec_t) *
-			    __sm_chunk_calc_vector_size(*p);
+			    __sm_chunk_calc_vector_size(
+			        __sm_desc_flag_byte(desc, i));
 		}
 	}
 	return (size);
@@ -1445,17 +1480,18 @@ __sm_chunk_select(const __sm_chunk_t *chunk, ssize_t n, ssize_t *offset,
 	 * individual bits. Accumulate bit positions until we've found the nth occurrence.
 	 */
 	size_t ret = 0;
-	register uint8_t *p = (uint8_t *)chunk->m_data;
-	for (size_t i = 0; i < sizeof(__sm_bitvec_t); i++, p++) {
+	const __sm_bitvec_t sel_desc = *chunk->m_data;
+	for (size_t i = 0; i < sizeof(__sm_bitvec_t); i++) {
+		const uint8_t b = __sm_desc_flag_byte(sel_desc, i);
 		/* Quick skip: if flag byte is 0 (all NONE descriptors) and seeking 1s, skip 4 vectors */
-		if (*p == 0 && value) {
+		if (b == 0 && value) {
 			ret += (size_t)SM_FLAGS_PER_INDEX_BYTE *
 			    SM_BITS_PER_VECTOR;
 			continue;
 		}
 
 		for (int j = 0; j < SM_FLAGS_PER_INDEX_BYTE; j++) {
-			const size_t flags = SM_CHUNK_GET_FLAGS(*p, j);
+			const size_t flags = SM_CHUNK_GET_FLAGS(b, j);
 			if (flags == SM_PAYLOAD_NONE) {
 				continue;
 			}
@@ -1583,15 +1619,16 @@ __sm_chunk_rank(__sm_chunk_rank_t *rank, const bool value,
 		 * extract the 64-bit vector and use hardware popcount. Apply range masks to only count
 		 * bits within [from, to] range. This achieves O(chunks) performance instead of O(bits).
 		 */
-		uint8_t *vec = (uint8_t *)chunk->m_data;
+		const __sm_bitvec_t rank_desc = *chunk->m_data;
 		__sm_bitvec_t w, mw;
 		uint64_t mask;
 		size_t pc;
 
-		for (size_t i = 0; i < sizeof(__sm_bitvec_t); i++, vec++) {
+		for (size_t i = 0; i < sizeof(__sm_bitvec_t); i++) {
+			const uint8_t vb = __sm_desc_flag_byte(rank_desc, i);
 			for (int j = 0; j < SM_FLAGS_PER_INDEX_BYTE; j++) {
 				const size_t flags =
-				    SM_CHUNK_GET_FLAGS(*vec, j);
+				    SM_CHUNK_GET_FLAGS(vb, j);
 
 				switch (flags) {
 				case SM_PAYLOAD_ZEROS:
@@ -1776,17 +1813,18 @@ __sm_chunk_scan(const __sm_chunk_t *chunk, const __sm_idx_t start,
 	 * Returns the number of set bits skipped in this chunk. */
 	size_t pos = 0;
 	size_t skipped = 0;
-	register uint8_t *p = (uint8_t *)chunk->m_data;
 	uint64_t buffer[SM_BITS_PER_VECTOR];
-	for (size_t i = 0; i < sizeof(__sm_bitvec_t); i++, p++) {
-		if (*p == 0) {
+	const __sm_bitvec_t scan_desc = *chunk->m_data;
+	for (size_t i = 0; i < sizeof(__sm_bitvec_t); i++) {
+		const uint8_t b = __sm_desc_flag_byte(scan_desc, i);
+		if (b == 0) {
 			/* All 4 flag slots in this byte are ZEROS -- no set bits, advance position. */
 			pos += SM_FLAGS_PER_INDEX_BYTE * SM_BITS_PER_VECTOR;
 			continue;
 		}
 
 		for (int j = 0; j < SM_FLAGS_PER_INDEX_BYTE; j++) {
-			const size_t flags = SM_CHUNK_GET_FLAGS(*p, j);
+			const size_t flags = SM_CHUNK_GET_FLAGS(b, j);
 			if (flags == SM_PAYLOAD_NONE) {
 				/* No capacity in this slot, do not advance position. */
 			} else if (flags == SM_PAYLOAD_ZEROS) {
@@ -4394,9 +4432,10 @@ sm_minimum(const sm_t *map)
 		offset = relative_position;
 		goto done;
 	}
-	for (size_t m = 0; m < sizeof(__sm_bitvec_t); m++, p++) {
+	for (size_t m = 0; m < sizeof(__sm_bitvec_t); m++) {
+		const uint8_t fb = __sm_desc_flag_byte(*chunk.m_data, m);
 		for (int n = 0; n < SM_FLAGS_PER_INDEX_BYTE; n++) {
-			const size_t flags = SM_CHUNK_GET_FLAGS(*p, n);
+			const size_t flags = SM_CHUNK_GET_FLAGS(fb, n);
 			if (flags == SM_PAYLOAD_NONE) {
 				continue;
 			} else if (flags == SM_PAYLOAD_ZEROS) {
@@ -4467,9 +4506,10 @@ sm_maximum(const sm_t *map)
 	/* the last chunk is not RLE, let's examine it further */
 	uint64_t offset = 0;
 	uint64_t relative_position = start;
-	for (size_t m = 0; m < sizeof(__sm_bitvec_t); m++, p++) {
+	for (size_t m = 0; m < sizeof(__sm_bitvec_t); m++) {
+		const uint8_t fb = __sm_desc_flag_byte(*chunk.m_data, m);
 		for (int n = 0; n < SM_FLAGS_PER_INDEX_BYTE; n++) {
-			const size_t flags = SM_CHUNK_GET_FLAGS(*p, n);
+			const size_t flags = SM_CHUNK_GET_FLAGS(fb, n);
 			switch (flags) {
 			case SM_PAYLOAD_ZEROS:
 				relative_position += SM_BITS_PER_VECTOR;

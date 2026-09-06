@@ -199,6 +199,9 @@ jobs:
       - name: Check sources are ASCII-only
         run: scripts/check_ascii.sh
 
+      - name: Check no endian-unsafe descriptor byte walks
+        run: scripts/check_endian_safety.sh
+
   # libFuzzer harness for the deserialize path.  Runs for 60 seconds
   # on every push; longer runs (campaigns) happen on a schedule
   # outside of CI.  A crash short-circuits the build and posts the

@@ -1468,12 +1468,15 @@ CASE(test_serialize_count_slot_wire_compat)
     EXPECT(sm_serialize(m, buf, need) == need, "serialize fills buffer");
 
     /* Body begins after the 16-byte wire header; its first 8 bytes are
-     * the chunk-count slot.  Low 4 = count, high 4 = must be zero. */
-    uint32_t count_lo, count_hi;
-    memcpy(&count_lo, buf + 16, 4);
-    memcpy(&count_hi, buf + 20, 4);
-    EXPECT(count_hi == 0, "count-slot high word is zero (v5.0 wire compat)");
-    EXPECT(count_lo > 0, "count-slot low word holds the chunk count");
+     * the chunk-count slot, stored as a host-order uint64_t.  The v5.0
+     * compat invariant is that the count fits in 32 bits, so the slot's
+     * high half is zero -- but *which bytes* that half occupies depends
+     * on host byte order, so read the slot as a uint64_t rather than
+     * assuming the low word comes first. */
+    uint64_t count_slot;
+    memcpy(&count_slot, buf + 16, 8);
+    EXPECT((count_slot >> 32) == 0, "count-slot high word is zero (v5.0 wire compat)");
+    EXPECT((count_slot & 0xFFFFFFFFu) > 0, "count-slot low word holds the chunk count");
 
     /* And the widened reader still round-trips it. */
     sm_t *r = sm_deserialize(buf, need);
