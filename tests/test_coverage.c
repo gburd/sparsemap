@@ -1681,6 +1681,64 @@ CASE(test_difference_inplace)
     return 0;
 }
 
+CASE(test_xor_inplace)
+{
+    /* Agrees with the allocating sm_xor, including the grow case where
+     * src carries bits dst lacks. */
+    sm_t *dst = sm_create(2048);
+    sm_t *src = sm_create(2048);
+    for (int i = 0; i < 10; i++) sm_add(dst, i * 100);   /* 0,100,...,900 */
+    sm_add(src, 200);          /* in both -> cleared */
+    sm_add(src, 500);          /* in both -> cleared */
+    sm_add(src, 9999);         /* only in src -> added (grows dst) */
+
+    sm_t *want = sm_xor(dst, src);
+    EXPECT(want != NULL, "reference sm_xor succeeds");
+
+    dst = sm_xor_inplace(dst, src);
+    EXPECT(dst != NULL, "xor_inplace returns a map");
+    EXPECT(sm_equals(dst, want), "xor_inplace matches sm_xor");
+    EXPECT(sm_cardinality(dst) == 9, "8 kept + 1 added from src");
+    EXPECT(!sm_contains(dst, 200, NULL), "common bit cleared");
+    EXPECT(!sm_contains(dst, 500, NULL), "other common bit cleared");
+    EXPECT(sm_contains(dst, 9999, NULL), "src-only bit added");
+    EXPECT(sm_contains(dst, 0, NULL) && sm_contains(dst, 900, NULL),
+           "dst-only bits stay");
+    sm_free(want);
+
+    /* XOR with an empty src is a no-op. */
+    sm_t *empty = sm_create(1024);
+    const size_t before = sm_cardinality(dst);
+    dst = sm_xor_inplace(dst, empty);
+    EXPECT(dst != NULL && sm_cardinality(dst) == before, "empty src no-op");
+
+    /* XOR into an empty dst copies src. */
+    sm_t *e2 = sm_create(1024);
+    e2 = sm_xor_inplace(e2, src);
+    EXPECT(e2 != NULL && sm_equals(e2, src), "empty dst becomes src");
+
+    /* Self-XOR clears everything. */
+    sm_t *self = sm_create(2048);
+    for (int i = 0; i < 20; i++) sm_add(self, i * 37);
+    self = sm_xor_inplace(self, self);
+    EXPECT(self != NULL && sm_cardinality(self) == 0, "self-xor is empty");
+
+    /* Involution: (d XOR s) XOR s == d. */
+    sm_t *d2 = sm_create(2048);
+    for (int i = 0; i < 12; i++) sm_add(d2, i * 250);
+    sm_t *orig = sm_copy(d2);
+    d2 = sm_xor_inplace(d2, src);
+    EXPECT(d2 != NULL, "first xor ok");
+    d2 = sm_xor_inplace(d2, src);
+    EXPECT(d2 != NULL && sm_equals(d2, orig), "xor twice restores original");
+
+    EXPECT(sm_xor_inplace(NULL, src) == NULL, "NULL dst rejected");
+
+    sm_free(dst); sm_free(src); sm_free(empty); sm_free(e2);
+    sm_free(self); sm_free(d2); sm_free(orig);
+    return 0;
+}
+
 CASE(test_add_range)
 {
     sm_t *m = sm_create(2048);
@@ -3581,6 +3639,7 @@ int main(void)
     RUN(test_union_inplace);
     RUN(test_intersection_inplace);
     RUN(test_difference_inplace);
+    RUN(test_xor_inplace);
 
     /* flip / validate / statistics / shrink_to_fit */
     RUN(test_flip_range);

@@ -6626,6 +6626,19 @@ sm_difference_inplace(sm_t *dst, const sm_t *src)
 	return (__sm_replace_buffer(dst, sm_difference(dst, src)));
 }
 
+sm_t *
+sm_xor_inplace(sm_t *dst, const sm_t *src)
+{
+	if (dst == NULL)
+		return (NULL);
+	/* XOR with nothing is a no-op; XOR into nothing is a copy of src. */
+	if (sm_is_empty(src))
+		return (dst);
+	if (sm_is_empty(dst))
+		return (__sm_replace_buffer(dst, sm_copy(src)));
+	return (__sm_replace_buffer(dst, sm_xor(dst, src)));
+}
+
 /* -------------------------------------------------------------------
  * Maintenance and introspection: range flip, validate, statistics,
  * shrink_to_fit

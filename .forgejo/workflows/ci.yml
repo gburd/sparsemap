@@ -42,6 +42,9 @@ jobs:
       - name: Test
         run: meson test -C builddir --print-errorlogs
 
+      - name: Check every exported symbol is prefix-renameable
+        run: scripts/check_prefix_coverage.sh builddir/libsparsemap.so
+
   # Cross-architecture builds via qemu-user-static.  Verifies that
   # sparsemap's serialization, alignment, and shift logic actually
   # work on the other ISAs we claim to support.  These take ~5x

@@ -36,6 +36,9 @@ jobs:
       - name: Test
         run: meson test -C builddir --print-errorlogs
 
+      - name: Check every exported symbol is prefix-renameable
+        run: scripts/check_prefix_coverage.sh builddir/libsparsemap.so
+
   sanitizers:
     runs-on: ubuntu-latest
     strategy:
