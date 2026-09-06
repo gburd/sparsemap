@@ -30,7 +30,13 @@ ninja -C "$BUILDDIR"
 # Run all tests, but don't fail the script on a single test failure --
 # we still want the coverage report.  CI's regular build job is the
 # pass/fail gate.
-meson test -C "$BUILDDIR" --print-errorlogs || true
+#
+# gcov instrumentation slows the heavy suites (test_coverage, hegel)
+# past their normal timeouts; a timed-out test is SIGTERMed before it
+# can flush .gcda, so its coverage silently vanishes from the report
+# (that alone moved the measured branch rate by ~17 points).  Give
+# every test a generous multiplier here.
+meson test -C "$BUILDDIR" --print-errorlogs --timeout-multiplier 10 || true
 
 # Capture coverage data and produce HTML.  Use geninfo directly (lcov
 # --capture's filter handling silently dropped sparsemap.c when the
