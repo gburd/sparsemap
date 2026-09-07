@@ -2,9 +2,9 @@ name: python
 
 on:
   push:
-    branches: [ports/python]
+    branches: [ports/rust]
   pull_request:
-    branches: [ports/python]
+    branches: [ports/rust]
 
 defaults:
   run:

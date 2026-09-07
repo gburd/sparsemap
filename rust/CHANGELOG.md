@@ -4,6 +4,37 @@ All notable changes to the Rust `sparsemap` crate are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com), and
 the crate follows [SemVer](https://semver.org).
 
+## [5.5.0] - 2026-09-07
+
+Version realigned with the C `sparsemap` library, which is at 5.5.0.
+That release fixes seven correctness bugs in the C chunk codec, three of
+them data-loss or corruption.  **None of them affect this crate**, and
+each was checked rather than assumed:
+
+- The big-endian descriptor byte-walk, the both-RLE `sm_difference`
+  fallback, the `sm_offset` duplicate-chunk-start and gap-fill defects,
+  and the two coalesce bugs are all in the C representation's chunk
+  codec.  This crate models a map as a `BTreeMap<u32, Chunk>` with an
+  explicit enum payload, so it has no descriptor word, no byte-stream
+  chunk emitter and no coalesce pass.
+- The `sm_select` word-boundary off-by-one and the `SM_PAYLOAD_NONE`
+  position disagreement were verified directly against this crate:
+  `difference` of two RLE-length runs returns the expected 27-bit tail,
+  and `select(128)` on a map holding `[0,128)` and `[500,510)` returns
+  `Some(500)` rather than the C bug's `Some(128)`.
+- `sm_split`'s missing bounds check has no analogue: `split_off` returns
+  an owned map rather than filling a caller-provided buffer.
+- `sm_locator_*` is not part of this crate's surface (see 5.4.0).
+
+So the bump keeps the version numbers in lockstep; there is no source or
+wire change for consumers.  C-to-Rust and Rust-to-C fixture exchange
+passes for all six shapes at 5.5.0.
+
+### Added
+
+- Nothing.  The C release's new `sm_xor_inplace` is already available
+  here as `BitXorAssign` (`a ^= &b`).
+
 ## [5.4.0] - 2026-07-29
 
 Version realigned with the C `sparsemap` library, which is at 5.4.0.
