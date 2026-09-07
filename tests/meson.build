@@ -56,7 +56,11 @@ foreach name : ['test_rle_standalone', 'test_heisenbug', 'test_empty_map', 'test
     dependencies : libsparsemap_dep,
     c_args : test_defines,
   )
-  test(name, exe, timeout : 120)
+  # test_coverage is the long one; give the whole family enough headroom
+  # that a gcov-instrumented run cannot be SIGTERMed mid-flight (a killed
+  # test never writes its .gcda, so its coverage silently disappears from
+  # the report rather than failing loudly).
+  test(name, exe, timeout : 300)
 endforeach
 
 # The big munit-driven suite.  Long-running scale/perf cases live here.

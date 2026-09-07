@@ -1341,13 +1341,18 @@ CASE(test_oom_paths)
         {    0, 3000, 1,  1500, 4500, 3 },  /* RLE vs sparse  */
         {    0, 4096, 1,  2048, 6144, 1 },  /* RLE vs RLE, overlapping */
         {    0, 2000, 1,  5000, 7000, 1 },  /* RLE vs RLE, disjoint */
-        {    0, 9000, 1, 10000,15000, 1 },  /* multi-chunk runs, gapped */
+        {    0, 4300, 1,  5200, 7300, 1 },  /* multi-chunk runs, gapped */
         {    0, 4096, 7,  1000, 5000, 11 }, /* sparse vs sparse */
         { 2000, 2100, 1,  2048, 4096, 1 },  /* straddles a boundary */
     };
 
+    /* Cross the shapes with the budgets, but keep the product small: this
+     * whole case runs ~70x slower under gcov instrumentation, and a
+     * timeout there is worse than a thinner sweep because a SIGTERMed
+     * test never flushes its .gcda and drops out of the report
+     * entirely.  Three budgets per shape reach the same failure arms. */
     for (size_t si = 0; si < sizeof(shapes) / sizeof(*shapes); si++)
-    for (long budget = 0; budget < 6; budget++) {
+    for (long budget = 0; budget < 3; budget++) {
         sm_t *a = sm_create(8192);
         sm_t *b = sm_create(8192);
         EXPECT(a != NULL && b != NULL, "setup maps");
@@ -2046,6 +2051,35 @@ diff_fill(bool *dense, sm_t *m, int shape)
             sm_add(m, i); dense[i] = true;
         }
         break;
+    case 11:
+        /* Sparse first chunk followed by a run: makes the merge loop
+         * leave a chunk partially consumed, which is what reaches
+         * sm_union's per-cursor masking of the already-emitted words. */
+        for (uint64_t i = 0; i < 2048; i += 3) {
+            sm_add(m, i); dense[i] = true;
+        }
+        for (uint64_t i = 2048; i < 6000 && i < DIFF_UNIVERSE; i++) {
+            sm_add(m, i); dense[i] = true;
+        }
+        break;
+    case 12:
+        /* Run then a strided tail in the next chunk: mirrors case 11 so
+         * the pair exercises both sides of the masking. */
+        for (uint64_t i = 0; i < 3000; i++) {
+            sm_add(m, i); dense[i] = true;
+        }
+        for (uint64_t i = 4096; i < 6144 && i < DIFF_UNIVERSE; i += 2) {
+            sm_add(m, i); dense[i] = true;
+        }
+        break;
+    case 13:
+        /* Every other bit across two whole chunks: two such maps with
+         * opposite parity are sparse, same-start and fully saturated
+         * together. */
+        for (uint64_t i = 1; i < 4096; i += 2) {
+            sm_add(m, i); dense[i] = true;
+        }
+        break;
     default:
         break;
     }
@@ -2102,7 +2136,7 @@ diff_agrees(const sm_t *m, const bool *want, const char *what, int sa, int sb)
 
 CASE(test_setops_differential_shapes)
 {
-    const int nshapes = 11;
+    const int nshapes = 14;
     static bool da[DIFF_UNIVERSE], db[DIFF_UNIVERSE], want[DIFF_UNIVERSE];
     int checked = 0;
 
@@ -2484,6 +2518,141 @@ CASE(test_reduced_capacity_all_readers)
             sm_free(w);
         }
         sm_free(n);
+    }
+
+    sm_free(m);
+    return 0;
+}
+
+/*
+ * Same crafted reduced-capacity map, pushed through the operations
+ * test_reduced_capacity_all_readers does not touch.
+ *
+ * __sm_chunk_get_capacity is SM_ALWAYS_INLINE and lands in roughly
+ * thirty call sites, and gcov counts its arcs separately at each one.
+ * Its SM_PAYLOAD_NONE arm is only ever taken on a chunk whose descriptor
+ * carries NONE flags -- which no code path writes, so it is reachable
+ * only through sm_open on a foreign buffer.  Feeding such a map to every
+ * remaining caller exercises those copies, and doubles as a robustness
+ * check that none of them mishandles a chunk advertising less than the
+ * maximum capacity.
+ */
+CASE(test_reduced_capacity_more_ops)
+{
+    /* Same layout as above: chunk 0 has flag 0 = NONE, flag 1 = ONES,
+     * flag 2 = ZEROS, flag 3 = NONE; chunk 1 at 2048 has flag 0 = MIXED
+     * with a payload word, so bits [64,128) and [2048,2056) are set. */
+    uint8_t buf[1024];
+    memset(buf, 0, sizeof(buf));
+    const uint64_t c0_desc = (1ULL << 0) | (3ULL << 2) | (0ULL << 4) |
+        (1ULL << 6);
+    const uint64_t c1_desc = (2ULL << 0) | (1ULL << 2);
+    const uint64_t c1_payload = 0x00000000000000FFULL;
+    const uint64_t count = 2, s0 = 0, s1 = 2048;
+    size_t off = 0;
+    memcpy(buf + off, &count, 8); off += 8;
+    memcpy(buf + off, &s0, 8); off += 8;
+    memcpy(buf + off, &c0_desc, 8); off += 8;
+    memcpy(buf + off, &s1, 8); off += 8;
+    memcpy(buf + off, &c1_desc, 8); off += 8;
+    memcpy(buf + off, &c1_payload, 8); off += 8;
+
+    sm_t *m = sm_open_copy(buf, off + 256, 256);
+    EXPECT(m != NULL, "crafted map opens");
+    if (m == NULL) return 1;
+
+    const size_t want_card = 64 + 8;
+    EXPECT(sm_cardinality(m) == want_card, "baseline cardinality");
+
+    /* Predicates and statistics. */
+    EXPECT(!sm_is_empty(m), "not empty");
+    EXPECT(sm_get_capacity(m) > 0, "capacity reported");
+    sm_stats_t st;
+    sm_statistics(m, &st);
+    EXPECT(st.bits_set == want_card, "statistics agree");
+
+    /* Navigation from both ends and across the gap. */
+    EXPECT(sm_next_member(m, SM_IDX_MAX, NULL) == 64, "first member");
+    EXPECT(sm_prev_member(m, SM_IDX_MAX, NULL) == 2055, "last member");
+    EXPECT(sm_next_member(m, 127, NULL) == 2048, "crosses the gap");
+    EXPECT(sm_prev_member(m, 2048, NULL) == 127, "backwards over the gap");
+
+    /* Bulk queries. */
+    uint64_t out[128];
+    size_t n_out = 128;
+    sm_to_array(m, out, &n_out);
+    EXPECT(n_out == want_card, "to_array count");
+    const uint64_t probe[4] = { 64, 100, 2048, 5000 };
+    bool hits[4] = { false, false, false, false };
+    sm_contains_many(m, probe, hits, 4);
+    EXPECT(hits[0] && hits[1] && hits[2] && !hits[3], "contains_many");
+
+    /* Comparisons against a normal map. */
+    sm_t *other = sm_create(8192);
+    if (other != NULL) {
+        for (uint64_t i = 64; i < 128; i++) sm_add(other, i);
+        EXPECT(!sm_equals(m, other), "not equal (m has more)");
+        EXPECT(sm_is_subset(other, m), "subset relation");
+        EXPECT(sm_overlap(m, other), "overlap");
+        EXPECT(sm_intersection_cardinality(m, other) == 64,
+            "intersection count");
+        EXPECT(sm_union_cardinality(m, other) == want_card, "union count");
+        EXPECT(sm_compare(m, other) != 0, "compare differs");
+        sm_free(other);
+    }
+
+    /* Mutating operations over the reduced-capacity chunks. */
+    sm_t *w = sm_copy(m);
+    if (w != NULL) {
+        EXPECT(sm_remove(w, 64) == 64, "remove from a ONES slot");
+        EXPECT(!sm_contains(w, 64, NULL), "removed bit gone");
+        EXPECT(sm_add_range(w, 200, 260), "add_range into NONE slots");
+        EXPECT(sm_remove_range(w, 210, 220), "remove_range");
+        EXPECT(sm_pop_first(w) != SM_IDX_MAX, "pop_first");
+        EXPECT(sm_pop_last(w) != SM_IDX_MAX, "pop_last");
+        EXPECT(sm_validate(w), "still valid after mutation");
+        sm_free(w);
+    }
+
+    /* Transforms: each must either fail cleanly or produce a valid map. */
+    sm_t *sl = sm_extract_range(m, 0, 2100);
+    EXPECT(sl == NULL || sm_validate(sl), "extracted range is valid");
+    sm_free(sl);
+    sm_t *of = sm_offset(m, 4096);
+    EXPECT(of == NULL || sm_validate(of), "offset is valid");
+    if (of != NULL)
+        EXPECT(sm_cardinality(of) == want_card, "offset preserves count");
+    sm_free(of);
+    sm_t *neg = sm_offset(m, -64);
+    EXPECT(neg == NULL || sm_validate(neg), "negative offset is valid");
+    sm_free(neg);
+
+    /* Split walks chunk sizes and capacities. */
+    sm_t *right = sm_create(8192);
+    if (right != NULL) {
+        sm_t *left = sm_copy(m);
+        if (left != NULL) {
+            (void)sm_split(left, 2048, right);
+            EXPECT(sm_cardinality(left) + sm_cardinality(right) == want_card,
+                "split conserves bits");
+            EXPECT(sm_validate(left) && sm_validate(right),
+                "both halves valid");
+            sm_free(left);
+        }
+        sm_free(right);
+    }
+
+    /* An accelerator built over the crafted map must agree with the
+     * plain path. */
+    sm_locator_t *loc = sm_locator_build(m);
+    if (loc != NULL) {
+        EXPECT(sm_locator_contains(loc, 64) == sm_contains(m, 64, NULL),
+            "locator agrees");
+        EXPECT(sm_locator_rank(loc, 0, 4095, true) ==
+               sm_rank(m, 0, 4095, true), "locator rank agrees");
+        EXPECT(sm_locator_select(loc, 0, true) == sm_select(m, 0, true),
+            "locator select agrees");
+        sm_locator_free(loc);
     }
 
     sm_free(m);
@@ -2980,6 +3149,120 @@ CASE(test_offset_mixed_sparse_rle_source)
         sm_free(r);
         sm_free(s);
     }
+    return 0;
+}
+
+/*
+ * Unset-bit rank and the range constructors' grow paths.
+ *
+ * sm_rank(value=false) walks a different set of branches than the set-bit
+ * path: it has to account for capacity beyond a chunk's data, for ranges
+ * that start past a chunk's end, and for ranges wholly inside a gap.
+ * Those arms were never taken because the existing rank tests all count
+ * set bits over ranges anchored inside populated chunks.
+ *
+ * sm_extract_range and sm_create_from_range also grow their result and
+ * retry when the first estimate is too small; that arm needs a range
+ * whose contents do not fit the initial guess.
+ */
+CASE(test_rank_unset_and_range_growth)
+{
+    sm_t *m = sm_create(4096);
+    EXPECT(m != NULL, "setup");
+    if (m == NULL) return 1;
+
+    /* Bits at both ends with a large gap, plus a dense island, so ranges
+     * can straddle data, capacity slack and empty space. */
+    for (uint64_t i = 0; i < 64; i++) sm_add_grow(&m, i);
+    for (uint64_t i = 5000; i < 5100; i++) sm_add_grow(&m, i);
+    for (uint64_t i = 0; i < 50; i++) sm_add_grow(&m, 20000 + i * 37);
+    /* highest bit is 20000 + 49*37 = 21813, inside LIM below */
+
+    /* Dense oracle over the interesting span. */
+    enum { LIM = 22000 };
+    static bool ref[LIM];
+    memset(ref, 0, sizeof(ref));
+    for (uint64_t i = 0; i < 64; i++) ref[i] = true;
+    for (uint64_t i = 5000; i < 5100; i++) ref[i] = true;
+    for (uint64_t i = 0; i < 50; i++) ref[20000 + i * 37] = true;
+
+    static const struct { uint64_t lo, hi; } ranges[] = {
+        { 0, 0 }, { 0, 63 }, { 0, 64 }, { 64, 64 }, { 64, 4999 },
+        { 100, 200 }, { 2048, 4095 }, { 4096, 4999 }, { 5000, 5099 },
+        { 5050, 5150 }, { 5100, 19999 }, { 0, 20999 }, { 19000, 20999 },
+        { 20000, 20000 }, { 20000, 20999 }, { 2047, 2048 },
+        { 63, 65 }, { 4095, 4096 },
+    };
+
+    for (size_t k = 0; k < sizeof(ranges) / sizeof(*ranges); k++) {
+        const uint64_t lo = ranges[k].lo, hi = ranges[k].hi;
+        size_t want_set = 0;
+        for (uint64_t i = lo; i <= hi && i < LIM; i++)
+            if (ref[i]) want_set++;
+        const size_t width = (size_t)(hi - lo + 1);
+        const size_t want_unset = width - want_set;
+
+        const size_t got_set = sm_rank(m, lo, hi, true);
+        const size_t got_unset = sm_rank(m, lo, hi, false);
+        if (got_set != want_set) {
+            fprintf(stderr, "    rank set [%llu,%llu] got %zu want %zu\n",
+                (unsigned long long)lo, (unsigned long long)hi,
+                got_set, want_set);
+            g_failures++;
+        }
+        if (got_unset != want_unset) {
+            fprintf(stderr, "    rank unset [%llu,%llu] got %zu want %zu\n",
+                (unsigned long long)lo, (unsigned long long)hi,
+                got_unset, want_unset);
+            g_failures++;
+        }
+        /* set + unset must always be the range width. */
+        if (got_set + got_unset != width) {
+            fprintf(stderr,
+                "    rank [%llu,%llu]: set+unset %zu != width %zu\n",
+                (unsigned long long)lo, (unsigned long long)hi,
+                got_set + got_unset, width);
+            g_failures++;
+        }
+    }
+
+    /* Range constructors, including spans large enough to force the
+     * result map to grow and retry. */
+    static const struct { uint64_t lo, hi; } spans[] = {
+        { 0, 64 }, { 0, 5100 }, { 4000, 20999 }, { 0, 20999 },
+        { 5000, 5100 }, { 19999, 20999 },
+    };
+    for (size_t k = 0; k < sizeof(spans) / sizeof(*spans); k++) {
+        const uint64_t lo = spans[k].lo, hi = spans[k].hi;
+        size_t want = 0;
+        for (uint64_t i = lo; i < hi && i < LIM; i++)
+            if (ref[i]) want++;
+
+        sm_t *ex = sm_extract_range(m, lo, hi);
+        const size_t got = (ex != NULL) ? sm_cardinality(ex) : 0;
+        if (got != want) {
+            fprintf(stderr,
+                "    extract_range [%llu,%llu) got %zu want %zu\n",
+                (unsigned long long)lo, (unsigned long long)hi, got, want);
+            g_failures++;
+        } else if (ex != NULL) {
+            EXPECT(sm_validate(ex), "extracted range is valid");
+        }
+        sm_free(ex);
+
+        /* create_from_range builds a fully set range. */
+        sm_t *cr = sm_create_from_range(lo, hi);
+        if (cr != NULL) {
+            EXPECT(sm_cardinality(cr) == (size_t)(hi - lo),
+                "create_from_range population");
+            EXPECT(sm_contains(cr, lo, NULL), "lower endpoint set");
+            EXPECT(!sm_contains(cr, hi, NULL), "upper endpoint excluded");
+            EXPECT(sm_validate(cr), "created range is valid");
+        }
+        sm_free(cr);
+    }
+
+    sm_free(m);
     return 0;
 }
 
@@ -5064,10 +5347,12 @@ int main(void)
     RUN(test_setops_differential_random);
     RUN(test_difference_rle_minus_rle);
     RUN(test_reduced_capacity_all_readers);
+    RUN(test_reduced_capacity_more_ops);
     RUN(test_select_at_word_boundaries);
     RUN(test_offset_edges);
     RUN(test_rle_separation_sweep);
     RUN(test_offset_mixed_sparse_rle_source);
+    RUN(test_rank_unset_and_range_growth);
 
     /* flip / validate / statistics / shrink_to_fit */
     RUN(test_flip_range);
