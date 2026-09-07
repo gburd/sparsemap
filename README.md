@@ -84,6 +84,8 @@ sm_free(map);
   rules, error returns.
 - **[docs/MIGRATION.md](docs/MIGRATION.md)** — upgrading to v1.0.0
   from earlier vendored copies.
+- **[docs/ROADMAP.md](docs/ROADMAP.md)** — what is settled (SIMD,
+  thread safety, version lockstep) and what is actually open.
 - **[man/sparsemap.3](man/sparsemap.3)** — Unix manual page.
 
 API docs (Doxygen) are published to
