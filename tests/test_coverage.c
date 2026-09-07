@@ -1327,14 +1327,38 @@ CASE(test_oom_paths)
     oom_reset();
 
     /* Build two real maps with a working allocator, then make every
-     * subsequent allocation fail and check each operation's OOM arm. */
+     * subsequent allocation fail and check each operation's OOM arm.
+     *
+     * The shape pair matters as much as the budget: the set-operation
+     * merge loops have a separate failure arm per combination of RLE and
+     * sparse chunks, and gapped runs reach the run-merge arithmetic that
+     * two overlapping runs do not.  Cross a small shape table with the
+     * budgets so each arm gets an allocation failure at some point. */
+    static const struct {
+        uint64_t a_lo, a_hi, a_step;
+        uint64_t b_lo, b_hi, b_step;
+    } shapes[] = {
+        {    0, 3000, 1,  1500, 4500, 3 },  /* RLE vs sparse  */
+        {    0, 4096, 1,  2048, 6144, 1 },  /* RLE vs RLE, overlapping */
+        {    0, 2000, 1,  5000, 7000, 1 },  /* RLE vs RLE, disjoint */
+        {    0, 9000, 1, 10000,15000, 1 },  /* multi-chunk runs, gapped */
+        {    0, 4096, 7,  1000, 5000, 11 }, /* sparse vs sparse */
+        { 2000, 2100, 1,  2048, 4096, 1 },  /* straddles a boundary */
+    };
+
+    for (size_t si = 0; si < sizeof(shapes) / sizeof(*shapes); si++)
     for (long budget = 0; budget < 6; budget++) {
         sm_t *a = sm_create(8192);
         sm_t *b = sm_create(8192);
         EXPECT(a != NULL && b != NULL, "setup maps");
         if (a == NULL || b == NULL) { sm_free(a); sm_free(b); oom_reset(); return 1; }
-        for (uint64_t i = 0; i < 3000; i++) sm_add(a, i);        /* RLE */
-        for (uint64_t i = 1500; i < 4500; i += 3) sm_add(b, i);  /* sparse */
+        for (uint64_t i = shapes[si].a_lo; i < shapes[si].a_hi;
+             i += shapes[si].a_step)
+            sm_add_grow(&a, i);
+        for (uint64_t i = shapes[si].b_lo; i < shapes[si].b_hi;
+             i += shapes[si].b_step)
+            sm_add_grow(&b, i);
+        const size_t a_card = sm_cardinality(a);
 
         /* Destinations for the operations that need a caller-provided
          * map must be allocated BEFORE the allocator starts failing,
@@ -1349,8 +1373,7 @@ CASE(test_oom_paths)
         sm_t *x = sm_intersection(a, b);
         sm_t *d = sm_difference(a, b);
         sm_t *xo = sm_xor(a, b);
-        sm_t *c = sm_copy(a);
-        sm_t *o = sm_offset(a, 4096);
+        sm_t *c = sm_copy(a);        sm_t *o = sm_offset(a, 4096);
         /* Split into an undersized destination with the allocator
          * failing: exercises the grow-and-fail arms inside sm_split
          * rather than just its argument checks. */
@@ -1367,10 +1390,10 @@ CASE(test_oom_paths)
          * nothing is leaked or double-freed (ASan/valgrind check that). */
         if (split_ran) {
             EXPECT(sm_cardinality(a) + sm_cardinality(sp) +
-                   (sp2 != NULL ? sm_cardinality(sp2) : 0) == 3000,
+                   (sp2 != NULL ? sm_cardinality(sp2) : 0) == a_card,
                 "split conserves bits even under OOM");
         } else {
-            EXPECT(sm_cardinality(a) == 3000, "lhs intact after OOM");
+            EXPECT(sm_cardinality(a) == a_card, "lhs intact after OOM");
         }
         sm_free(u); sm_free(x); sm_free(d); sm_free(xo);
         sm_free(c); sm_free(o); sm_free(sp); sm_free(sp2);

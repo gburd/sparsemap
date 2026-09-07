@@ -8317,6 +8317,34 @@ sm_split(sm_t *map, uint64_t idx, sm_t *other)
 	size_t split_offset = src - map->m_data;
 	size_t chunks_to_move = count - i;
 
+	/*
+	 * The destination is caller-provided and may be far smaller than
+	 * what we are about to move into it.  __sm_append_data does no
+	 * bounds check, so without this the moved chunks ran off the end of
+	 * `other`'s buffer (ASan heap-buffer-overflow in memcpy via
+	 * __sm_append_data; glibc reported it later as "realloc(): invalid
+	 * next size" once the corrupted heap was reused).  The documented
+	 * contract is SM_IDX_MAX with errno=ENOSPC when the buffer is too
+	 * small, so total the bytes first and refuse up front, leaving both
+	 * maps untouched.
+	 */
+	{
+		uint8_t *probe = src;
+		size_t need = 0;
+		for (size_t j = 0; j < chunks_to_move; j++) {
+			__sm_chunk_t c;
+			__sm_chunk_init(&c, probe + SM_SIZEOF_OVERHEAD);
+			const size_t sz = SM_SIZEOF_OVERHEAD +
+			    __sm_chunk_get_size(&c);
+			need += sz;
+			probe += sz;
+		}
+		if (other->m_data_used + need > __sm_cap(other)) {
+			errno = ENOSPC;
+			return (SM_IDX_MAX);
+		}
+	}
+
 	for (size_t j = 0; j < chunks_to_move; j++) {
 		__sm_chunk_t chunk;
 		__sm_chunk_init(&chunk, src + SM_SIZEOF_OVERHEAD);
