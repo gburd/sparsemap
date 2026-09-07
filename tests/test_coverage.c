@@ -2304,6 +2304,223 @@ CASE(test_difference_rle_minus_rle)
     return 0;
 }
 
+/*
+ * Flow a reduced-capacity map through every read path.
+ *
+ * A sparse descriptor with SM_PAYLOAD_NONE flags makes a chunk
+ * advertise less than SM_CHUNK_MAX_CAPACITY.  No code path writes such
+ * a descriptor, so the NONE arm of __sm_chunk_get_capacity (and of the
+ * flag switches in is_set / get_position / rank / select / scan) is
+ * never taken on a library-built map -- but sm_open on a crafted or
+ * corrupted buffer produces exactly that, and get_capacity is inlined
+ * into dozens of call sites that each need it exercised.  Push one such
+ * map through every reader and check each answer against a dense
+ * oracle built from the same descriptor semantics.
+ */
+CASE(test_reduced_capacity_all_readers)
+{
+    /* Two chunks.  Chunk 0 at bit 0: flags 0 and 3 are NONE, flag 1 is
+     * ONES (all 64 bits set), flag 2 is ZEROS.  Chunk 1 at bit 2048:
+     * flag 0 MIXED with an explicit payload word, rest NONE. */
+    uint8_t buf[1024];
+    memset(buf, 0, sizeof(buf));
+
+    /* flag values: 0=ZEROS 1=NONE 3=ONES 2=MIXED, 2 bits each */
+    const uint64_t c0_desc =
+        (1ULL << 0) |          /* flag 0 = NONE  */
+        (3ULL << 2) |          /* flag 1 = ONES  */
+        (0ULL << 4) |          /* flag 2 = ZEROS */
+        (1ULL << 6);           /* flag 3 = NONE  */
+    const uint64_t c1_desc = (2ULL << 0) | (1ULL << 2); /* MIXED, NONE */
+    const uint64_t c1_payload = 0x00000000000000FFULL;  /* low 8 bits */
+
+    const uint64_t count = 2;
+    size_t off = 0;
+    memcpy(buf + off, &count, 8); off += 8;
+    const uint64_t s0 = 0;
+    memcpy(buf + off, &s0, 8); off += 8;
+    memcpy(buf + off, &c0_desc, 8); off += 8;
+    /* chunk 0 has one ONES slot and no MIXED slots -> no payload words */
+    const uint64_t s1 = 2048;
+    memcpy(buf + off, &s1, 8); off += 8;
+    memcpy(buf + off, &c1_desc, 8); off += 8;
+    memcpy(buf + off, &c1_payload, 8); off += 8;
+
+    sm_t *m = sm_open_copy(buf, off + 128, 128);
+    EXPECT(m != NULL, "crafted reduced-capacity map opens");
+    if (m == NULL)
+        return 1;
+
+    /* Oracle: chunk 0 flag 1 covers bits [64,128) all set; chunk 1 flag
+     * 0 covers bits [2048,2112) with the low 8 set. */
+    bool want[4096];
+    memset(want, 0, sizeof(want));
+    for (uint64_t i = 64; i < 128; i++) want[i] = true;
+    for (uint64_t i = 0; i < 8; i++) want[2048 + i] = true;
+    size_t want_card = 0;
+    for (size_t i = 0; i < 4096; i++) if (want[i]) want_card++;
+
+    /* Every reader must agree with the oracle. */
+    EXPECT(sm_cardinality(m) == want_card, "cardinality on reduced map");
+    for (uint64_t i = 0; i < 4096; i++) {
+        if (sm_contains(m, i, NULL) != want[i]) {
+            fprintf(stderr, "    contains(%llu) disagrees\n",
+                (unsigned long long)i);
+            g_failures++;
+            break;
+        }
+    }
+    EXPECT(sm_minimum(m) == 64, "minimum");
+    EXPECT(sm_maximum(m) == 2055, "maximum");
+    EXPECT(sm_rank(m, 0, 4095, true) == want_card, "rank over everything");
+    EXPECT(sm_rank(m, 0, 127, true) == 64, "rank over chunk 0");
+    EXPECT(sm_select(m, 0, true) == 64, "select first");
+    EXPECT(sm_select(m, 63, true) == 127, "select last of chunk 0");
+    EXPECT(sm_select(m, 64, true) == 2048, "select crosses into chunk 1");
+    EXPECT(sm_get_size(m) > 0, "size");
+    EXPECT(sm_validate(m), "crafted map validates");
+
+    /* Iteration must visit exactly the oracle's bits. */
+    size_t seen = 0;
+    sm_cursor_t cur = SM_CURSOR_INIT;
+    uint64_t it = SM_IDX_MAX;
+    while ((it = sm_next_member(m, it, &cur)) != SM_IDX_MAX) {
+        if (it >= 4096 || !want[it]) {
+            fprintf(stderr, "    next_member yielded %llu\n",
+                (unsigned long long)it);
+            g_failures++;
+            break;
+        }
+        seen++;
+    }
+    EXPECT(seen == want_card, "forward iteration count");
+
+    /* Set operations against a normal map: pushes the reduced chunks
+     * through the merge walks and their inlined get_capacity calls. */
+    sm_t *n = sm_create(8192);
+    EXPECT(n != NULL, "partner map");
+    if (n != NULL) {
+        for (uint64_t i = 100; i < 2100; i++) sm_add(n, i);
+
+        sm_t *u = sm_union(m, n);
+        sm_t *x = sm_intersection(m, n);
+        sm_t *d = sm_difference(m, n);
+        sm_t *xo = sm_xor(m, n);
+        /* Check each against the oracle. */
+        for (uint64_t i = 0; i < 4096; i++) {
+            const bool bn = (i >= 100 && i < 2100);
+            if ((u && sm_contains(u, i, NULL)) != (want[i] || bn) ||
+                (x && sm_contains(x, i, NULL)) != (want[i] && bn) ||
+                (d && sm_contains(d, i, NULL)) != (want[i] && !bn) ||
+                (xo && sm_contains(xo, i, NULL)) != (want[i] != bn)) {
+                fprintf(stderr, "    setop disagrees at %llu\n",
+                    (unsigned long long)i);
+                g_failures++;
+                break;
+            }
+        }
+        sm_free(u); sm_free(x); sm_free(d); sm_free(xo);
+
+        /* Copy / serialize round trip preserves the bits. */
+        sm_t *c = sm_copy(m);
+        EXPECT(c != NULL && sm_equals(c, m), "copy of reduced map");
+        sm_free(c);
+
+        const size_t need = sm_serialized_size(m);
+        uint8_t *out = malloc(need);
+        if (out != NULL) {
+            EXPECT(sm_serialize(m, out, need) == need, "serialize");
+            sm_t *r = sm_deserialize(out, need);
+            EXPECT(r != NULL && sm_equals(r, m), "round trip");
+            sm_free(r);
+            free(out);
+        }
+
+        /* Mutating it must also work: adding into the NONE slots grows
+         * the chunk's capacity. */
+        sm_t *w = sm_copy(m);
+        if (w != NULL) {
+            EXPECT(sm_add(w, 10) == 10, "add into a NONE slot");
+            EXPECT(sm_contains(w, 10, NULL), "added bit present");
+            EXPECT(sm_contains(w, 64, NULL), "pre-existing bit kept");
+            EXPECT(sm_cardinality(w) == want_card + 1, "cardinality grew by 1");
+            EXPECT(sm_validate(w), "still valid after mutation");
+            sm_free(w);
+        }
+        sm_free(n);
+    }
+
+    sm_free(m);
+    return 0;
+}
+
+/*
+ * Regression: sm_select returned a position inside a saturated slot for
+ * an n that belonged to a later one.
+ *
+ * __sm_chunk_select's ZEROS and ONES arms skipped ahead only when
+ * `n > SM_BITS_PER_VECTOR`, but a slot supplies exactly
+ * SM_BITS_PER_VECTOR candidates addressed n = 0 .. 63, so the guard has
+ * to be >=.  With >, n == 64 returned ret + 64 -- one past the slot it
+ * had just decided not to leave.  A map with bits [0,128) and [500,510)
+ * answered sm_select(128, true) = 128, a bit that is not even set,
+ * instead of 500.  Every multiple-of-64 boundary was affected on any
+ * map with a saturated word, which is the common case for dense ranges.
+ */
+CASE(test_select_at_word_boundaries)
+{
+    sm_t *m = sm_create(1 << 16);
+    EXPECT(m != NULL, "setup");
+    for (uint64_t i = 0; i < 128; i++) sm_add(m, i);      /* two ONES slots */
+    for (uint64_t i = 500; i < 510; i++) sm_add(m, i);    /* separate run */
+
+    EXPECT(sm_cardinality(m) == 138, "138 bits set");
+    EXPECT(sm_select(m, 63, true) == 63, "select 63 (end of first word)");
+    EXPECT(sm_select(m, 64, true) == 64, "select 64 (start of second word)");
+    EXPECT(sm_select(m, 127, true) == 127, "select 127 (end of run)");
+    EXPECT(sm_select(m, 128, true) == 500, "select 128 crosses the gap");
+    EXPECT(sm_select(m, 137, true) == 509, "select last");
+    EXPECT(SM_NOT_FOUND(sm_select(m, 138, true)), "select past the end");
+
+    /* select must agree with iteration at every rank. */
+    {
+        uint64_t expect[138];
+        size_t k = 0;
+        sm_cursor_t cur = SM_CURSOR_INIT;
+        uint64_t it = SM_IDX_MAX;
+        while ((it = sm_next_member(m, it, &cur)) != SM_IDX_MAX && k < 138)
+            expect[k++] = it;
+        EXPECT(k == 138, "iteration yields every bit");
+        for (size_t j = 0; j < k; j++) {
+            if (sm_select(m, j, true) != expect[j]) {
+                fprintf(stderr,
+                    "    select(%zu) = %llu, iteration says %llu\n", j,
+                    (unsigned long long)sm_select(m, j, true),
+                    (unsigned long long)expect[j]);
+                g_failures++;
+                break;
+            }
+        }
+    }
+
+    /* Same check on a saturated multi-word map, where every slot is
+     * ONES and each boundary crossing exercises the guard. */
+    sm_t *d = sm_create(1 << 16);
+    if (d != NULL) {
+        for (uint64_t i = 0; i < 4096; i++) sm_add(d, i);
+        bool ok = true;
+        for (uint64_t j = 0; j < 4096; j += 1) {
+            if (sm_select(d, j, true) != j) { ok = false; break; }
+        }
+        EXPECT(ok, "select is the identity on a fully saturated map");
+        EXPECT(SM_NOT_FOUND(sm_select(d, 4096, true)), "one past the end");
+        sm_free(d);
+    }
+
+    sm_free(m);
+    return 0;
+}
+
 CASE(test_add_range)
 {
     sm_t *m = sm_create(2048);
@@ -4384,6 +4601,8 @@ int main(void)
     RUN(test_guard_short_circuits);
     RUN(test_setops_differential_random);
     RUN(test_difference_rle_minus_rle);
+    RUN(test_reduced_capacity_all_readers);
+    RUN(test_select_at_word_boundaries);
 
     /* flip / validate / statistics / shrink_to_fit */
     RUN(test_flip_range);

@@ -1493,6 +1493,12 @@ __sm_chunk_select(const __sm_chunk_t *chunk, ssize_t n, ssize_t *offset,
 		for (int j = 0; j < SM_FLAGS_PER_INDEX_BYTE; j++) {
 			const size_t flags = SM_CHUNK_GET_FLAGS(b, j);
 			if (flags == SM_PAYLOAD_NONE) {
+				/* No payload, but the slot still occupies its
+				 * index range: __sm_chunk_is_set addresses
+				 * flags positionally as flags[idx / 64], so
+				 * advance to keep the position we report in
+				 * step with membership (see sm_minimum). */
+				ret += SM_BITS_PER_VECTOR;
 				continue;
 			}
 			if (flags == SM_PAYLOAD_ZEROS) {
@@ -1500,7 +1506,14 @@ __sm_chunk_select(const __sm_chunk_t *chunk, ssize_t n, ssize_t *offset,
 					ret += SM_BITS_PER_VECTOR;
 					continue;
 				}
-				if (n > SM_BITS_PER_VECTOR) {
+				/* This slot supplies exactly
+				 * SM_BITS_PER_VECTOR candidates, addressed
+				 * n = 0 .. SM_BITS_PER_VECTOR-1.  The guard
+				 * must therefore be >=, not >: with > the
+				 * n == SM_BITS_PER_VECTOR case returned
+				 * ret + 64, one position past the slot,
+				 * instead of moving on to the next one. */
+				if (n >= SM_BITS_PER_VECTOR) {
 					n -= SM_BITS_PER_VECTOR;
 					ret += SM_BITS_PER_VECTOR;
 					continue;
@@ -1510,7 +1523,17 @@ __sm_chunk_select(const __sm_chunk_t *chunk, ssize_t n, ssize_t *offset,
 			}
 			if (flags == SM_PAYLOAD_ONES) {
 				if (value == true) {
-					if (n > SM_BITS_PER_VECTOR) {
+					/* Same off-by-one as the ZEROS arm
+					 * above: an all-ones slot holds set
+					 * bits n = 0 .. 63, so n == 64 belongs
+					 * to a later slot.  With > this
+					 * returned a position inside this slot
+					 * for a bit that lives further on --
+					 * e.g. a map with bits [0,128) and
+					 * [500,510) answered
+					 * sm_select(128, true) = 128 instead of
+					 * 500. */
+					if (n >= SM_BITS_PER_VECTOR) {
 						n -= SM_BITS_PER_VECTOR;
 						ret += SM_BITS_PER_VECTOR;
 						continue;
@@ -4437,6 +4460,16 @@ sm_minimum(const sm_t *map)
 		for (int n = 0; n < SM_FLAGS_PER_INDEX_BYTE; n++) {
 			const size_t flags = SM_CHUNK_GET_FLAGS(fb, n);
 			if (flags == SM_PAYLOAD_NONE) {
+				/* A NONE slot carries no payload, but it still
+				 * occupies its index slot: __sm_chunk_is_set
+				 * locates a bit positionally as
+				 * flags[idx / 64], so bit 64 lives in flag 1
+				 * whether or not flag 0 is NONE.  Skipping
+				 * without advancing made this report a
+				 * position 64 bits too low per leading NONE
+				 * slot, contradicting sm_contains and
+				 * sm_next_member on the same map. */
+				relative_position += SM_BITS_PER_VECTOR;
 				continue;
 			} else if (flags == SM_PAYLOAD_ZEROS) {
 				relative_position += SM_BITS_PER_VECTOR;
@@ -4534,6 +4567,12 @@ sm_maximum(const sm_t *map)
 				break;
 			}
 			case SM_PAYLOAD_NONE:
+				/* Occupies its index slot without carrying a
+				 * payload; advance so positions stay in step
+				 * with __sm_chunk_is_set's flags[idx / 64]
+				 * addressing (see sm_minimum). */
+				relative_position += SM_BITS_PER_VECTOR;
+				continue;
 			default:
 				continue;
 			}
