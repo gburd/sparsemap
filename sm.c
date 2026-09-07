@@ -5336,6 +5336,25 @@ sm_offset(const sm_t *map, ssize_t offset)
 				have_carry = false;
 			}
 
+			/* The shift path may have parked words for an output
+			 * chunk in the carry buffer.  The RLE split below
+			 * appends directly, so flush any pending carry first
+			 * -- otherwise both can emit a chunk with the same
+			 * start offset, breaking the ascending-start
+			 * invariant (sm_validate fails, sm_contains misses
+			 * bits sm_next_member still walks, and the map cannot
+			 * be deserialized from its own bytes). */
+			if (have_carry) {
+				if (!__sm_flush_carry(&result, carry_words,
+				        carry_cap, carry_start)) {
+					sm_free(result);
+					return (NULL);
+				}
+				memset(carry_words, 0, sizeof(carry_words));
+				memset(carry_cap, 0, sizeof(carry_cap));
+				have_carry = false;
+			}
+
 			/* Align the start to chunk boundary */
 			__sm_idx_t aligned_start =
 			    (__sm_idx_t)__sm_get_chunk_aligned_offset(
@@ -5615,17 +5634,40 @@ sm_offset(const sm_t *map, ssize_t offset)
 				have_carry = false;
 			}
 
-			/* Emit main chunk if it has any set bits */
-			__sm_bitvec_t desc;
-			__sm_bitvec_t vecs[32];
-			int nvecs;
-			if (__sm_encode_sparse_chunk(main_words, main_cap,
-			        &desc, vecs, &nvecs)) {
-				if (!__sm_append_sparse_chunk(&result,
-				        (__sm_idx_t)out_aligned, desc, vecs,
-				        nvecs)) {
-					sm_free(result);
-					return (NULL);
+			/* Emit main chunk if it has any set bits.
+			 *
+			 * A negative shift can map two consecutive source
+			 * chunks onto the SAME output chunk (source chunk i+1
+			 * slides down into chunk i's aligned range).  Appending
+			 * both produced two chunks with identical start
+			 * offsets, which breaks the ascending-start invariant
+			 * the whole file relies on: sm_validate rejected the
+			 * result, sm_contains missed bits that sm_next_member
+			 * still walked, and sm_deserialize refused the map's
+			 * own serialized bytes.  Positive shifts never hit it
+			 * because their spill only ever moves forward, which
+			 * the carry buffer already handles.
+			 *
+			 * Park the words in the carry buffer instead of
+			 * appending.  The next iteration merges into it when it
+			 * targets the same chunk, and flushes it when it moves
+			 * on -- so each output chunk is appended exactly once,
+			 * in ascending order. */
+			{
+				bool main_has_bits = false;
+				for (int w = 0; w < (int)SM_FLAGS_PER_INDEX; w++) {
+					if (main_cap[w] && main_words[w] != 0) {
+						main_has_bits = true;
+						break;
+					}
+				}
+				if (main_has_bits) {
+					memcpy(carry_words, main_words,
+					    sizeof(carry_words));
+					memcpy(carry_cap, main_cap,
+					    sizeof(carry_cap));
+					have_carry = true;
+					carry_start = (__sm_idx_t)out_aligned;
 				}
 			}
 
@@ -5638,6 +5680,26 @@ sm_offset(const sm_t *map, ssize_t offset)
 				}
 			}
 			if (has_overflow) {
+				/* The main chunk may already be parked in the carry
+				 * buffer (see above); it belongs to an earlier
+				 * output chunk than this overflow, so flush it
+				 * before reusing the buffer. */
+				if (have_carry &&
+				    carry_start != (__sm_idx_t)out_aligned +
+				        SM_CHUNK_MAX_CAPACITY) {
+					if (!__sm_flush_carry(&result,
+					        carry_words, carry_cap,
+					        carry_start)) {
+						sm_free(result);
+						return (NULL);
+					}
+					have_carry = false;
+				}
+				if (have_carry) {
+					__sm_merge_carry(overflow_words,
+					    overflow_cap, carry_words,
+					    carry_cap);
+				}
 				memcpy(carry_words, overflow_words,
 				    sizeof(carry_words));
 				memcpy(carry_cap, overflow_cap,
