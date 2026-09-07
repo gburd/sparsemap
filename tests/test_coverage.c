@@ -2633,28 +2633,16 @@ CASE(test_offset_edges)
             }
         }
         /* The result must be a structurally sound map, not just have the
-         * right population: a negative shift used to emit two chunks
-         * with the same start offset, which left the map failing
-         * sm_validate and unable to survive its own round trip.
-         *
-         * ponytail: sm_offset still produces duplicate chunk starts when
-         * the SOURCE mixes a sparse chunk and an RLE chunk and the shift
-         * is not chunk-aligned -- the RLE split path appends directly at
-         * its own aligned starts while the sparse shift path parks words
-         * in the carry buffer, and the two can pick the same output
-         * chunk in an order the carry flush does not catch.  Population
-         * and placement stay correct, only the structure is wrong.
-         * Fixing it properly means giving sm_offset a single ordered
-         * emitter instead of two independent ones; until then the RLE
-         * cases below assert population and placement but only warn
-         * about validity, so the known-good sparse path stays guarded.
-         */
+         * right population.  sm_offset emits each source piece into an
+         * aligned output chunk, and several pieces can land in the same
+         * one; when they were appended independently the map ended up
+         * with duplicate chunk starts, failing sm_validate and unable to
+         * survive its own round trip. */
         if (r != NULL) {
             if (!sm_validate(r)) {
-                fprintf(stderr,
-                    "    NOTE: offset %+lld result fails validate "
-                    "(known sm_offset RLE/sparse emitter overlap)\n",
+                fprintf(stderr, "    offset %+lld: result fails validate\n",
                     (long long)cases[k].off);
+                g_failures++;
             } else {
                 const size_t need = sm_serialized_size(r);
                 uint8_t *tmp = malloc(need);
@@ -2846,6 +2834,128 @@ CASE(test_rle_separation_sweep)
                 sm_free(g);
             }
         }
+    }
+    return 0;
+}
+
+/*
+ * Regression: sm_offset on a source that mixes sparse and RLE chunks.
+ *
+ * sm_offset shifts each source chunk into an aligned output chunk, and a
+ * shift is not a bijection on chunk boundaries -- several source pieces
+ * (including the pieces of one split RLE run) can land in the same
+ * output chunk.  The function used to have five independent append sites
+ * plus a carry buffer, each choosing its own start, so two of them could
+ * append chunks with identical starts.  Everything now routes through
+ * one ordered emitter.
+ *
+ * The subtler half was RLE capacity: a partial run's capacity is rounded
+ * up to whole output chunks, so the chunk claimed indices it had no bits
+ * for.  A later source piece needing one of those either produced an
+ * out-of-order chunk (bits unreachable) or, when the run was widened to
+ * cover it, filled the gap between the two runs with spurious set bits
+ * -- a 1000-bit hole came back as 1000 set bits.  An RLE chunk now only
+ * covers the whole output chunks its run actually fills; the sub-chunk
+ * remainder goes through the words path where it can merge.
+ *
+ * Checks population, exact placement, the preserved gap, structural
+ * validity and the round trip.
+ */
+CASE(test_offset_mixed_sparse_rle_source)
+{
+    /* [0,9000) then a gap of 1000 then [10000,15000): the low run spans
+     * several chunks (so it is RLE with a partial tail) and the high run
+     * lands in chunks the low run's rounded-up capacity claimed. */
+    static const ssize_t offs[] = {
+        0, 1, -1, 37, -37, 1871, -1871, -2008, -3926, 2048, -2048,
+        -1000, 5000, -5000, 8192, -8192,
+    };
+
+    for (size_t k = 0; k < sizeof(offs) / sizeof(*offs); k++) {
+        const ssize_t off = offs[k];
+        sm_t *s = sm_create(4096);
+        EXPECT(s != NULL, "setup");
+        if (s == NULL) continue;
+        for (uint64_t i = 0; i < 9000; i++) sm_add_grow(&s, i);
+        for (uint64_t i = 0; i < 5000; i++) sm_add_grow(&s, 10000 + i);
+        EXPECT(sm_cardinality(s) == 14000, "source populated");
+
+        sm_t *r = sm_offset(s, off);
+
+        size_t want = 0;
+        for (uint64_t i = 0; i < 9000; i++)
+            if ((long long)i + off >= 0) want++;
+        for (uint64_t i = 0; i < 5000; i++)
+            if ((long long)(10000 + i) + off >= 0) want++;
+
+        const size_t got = (r != NULL) ? sm_cardinality(r) : 0;
+        if (got != want) {
+            fprintf(stderr, "    mixed offset %+ld: card %zu want %zu\n",
+                (long)off, got, want);
+            g_failures++;
+            sm_free(r); sm_free(s);
+            continue;
+        }
+
+        if (r != NULL) {
+            /* The 1000-bit gap must stay unset: widening the run to
+             * swallow the next one is the failure mode here. */
+            bool gap_ok = true;
+            for (uint64_t i = 9000; i < 10000; i++) {
+                const long long d = (long long)i + off;
+                if (d < 0) continue;
+                if (sm_contains(r, (uint64_t)d, NULL)) {
+                    fprintf(stderr,
+                        "    mixed offset %+ld: gap bit %lld set\n",
+                        (long)off, d);
+                    gap_ok = false;
+                    break;
+                }
+            }
+            if (!gap_ok) g_failures++;
+
+            /* Both runs must be present at their shifted positions. */
+            bool place_ok = true;
+            for (uint64_t i = 0; i < 9000 && place_ok; i += 97) {
+                const long long d = (long long)i + off;
+                if (d >= 0 && !sm_contains(r, (uint64_t)d, NULL))
+                    place_ok = false;
+            }
+            for (uint64_t i = 0; i < 5000 && place_ok; i += 97) {
+                const long long d = (long long)(10000 + i) + off;
+                if (d >= 0 && !sm_contains(r, (uint64_t)d, NULL))
+                    place_ok = false;
+            }
+            if (!place_ok) {
+                fprintf(stderr, "    mixed offset %+ld: bit misplaced\n",
+                    (long)off);
+                g_failures++;
+            }
+
+            if (!sm_validate(r)) {
+                fprintf(stderr, "    mixed offset %+ld: fails validate\n",
+                    (long)off);
+                g_failures++;
+            } else {
+                const size_t need = sm_serialized_size(r);
+                uint8_t *buf = malloc(need);
+                if (buf != NULL) {
+                    if (sm_serialize(r, buf, need) == need) {
+                        sm_t *back = sm_deserialize(buf, need);
+                        if (back == NULL || !sm_equals(back, r)) {
+                            fprintf(stderr,
+                                "    mixed offset %+ld: round trip failed\n",
+                                (long)off);
+                            g_failures++;
+                        }
+                        sm_free(back);
+                    }
+                    free(buf);
+                }
+            }
+        }
+        sm_free(r);
+        sm_free(s);
     }
     return 0;
 }
@@ -4934,6 +5044,7 @@ int main(void)
     RUN(test_select_at_word_boundaries);
     RUN(test_offset_edges);
     RUN(test_rle_separation_sweep);
+    RUN(test_offset_mixed_sparse_rle_source);
 
     /* flip / validate / statistics / shrink_to_fit */
     RUN(test_flip_range);
