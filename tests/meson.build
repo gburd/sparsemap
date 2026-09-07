@@ -39,13 +39,28 @@ test_main = executable('test_main',
 
 # Standalone tests link against the library proper (not its source) so
 # they exercise the public API exactly as a downstream consumer would.
+#
+# Under a coverage build, tell the tests so the timing-ratio scaling
+# guards can skip themselves: gcov's per-arc counters distort the
+# small-vs-large ratio they measure, and a spurious failure also
+# truncates the coverage report (a failing test is killed before it
+# flushes .gcda).
+test_defines = ['-Wno-unused-parameter']
+if get_option('b_coverage')
+  test_defines += '-DSM_COVERAGE_BUILD=1'
+endif
+
 foreach name : ['test_rle_standalone', 'test_heisenbug', 'test_empty_map', 'test_coverage', 'test_portability', 'test_large_index']
   exe = executable(name,
     name + '.c',
     dependencies : libsparsemap_dep,
-    c_args : ['-Wno-unused-parameter'],
+    c_args : test_defines,
   )
-  test(name, exe, timeout : 120)
+  # test_coverage is the long one; give the whole family enough headroom
+  # that a gcov-instrumented run cannot be SIGTERMed mid-flight (a killed
+  # test never writes its .gcda, so its coverage silently disappears from
+  # the report rather than failing loudly).
+  test(name, exe, timeout : 300)
 endforeach
 
 # The big munit-driven suite.  Long-running scale/perf cases live here.

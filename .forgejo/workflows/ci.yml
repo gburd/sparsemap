@@ -42,6 +42,9 @@ jobs:
       - name: Test
         run: meson test -C builddir --print-errorlogs
 
+      - name: Check every exported symbol is prefix-renameable
+        run: scripts/check_prefix_coverage.sh builddir/libsparsemap.so
+
   # Cross-architecture builds via qemu-user-static.  Verifies that
   # sparsemap's serialization, alignment, and shift logic actually
   # work on the other ISAs we claim to support.  These take ~5x
@@ -199,6 +202,12 @@ jobs:
       - name: Check sources are ASCII-only
         run: scripts/check_ascii.sh
 
+      - name: Check no endian-unsafe descriptor byte walks
+        run: scripts/check_endian_safety.sh
+
+      - name: Check the docs/API.md index matches sm.h
+        run: scripts/gen_api_index.sh --check
+
   # libFuzzer harness for the deserialize path.  Runs for 60 seconds
   # on every push; longer runs (campaigns) happen on a schedule
   # outside of CI.  A crash short-circuits the build and posts the
@@ -227,3 +236,42 @@ jobs:
           mkdir -p tests/fuzz-corpus  # corpus is committed; ensure dir exists
           builddir-fuzz/tests/fuzz_deserialize tests/fuzz-corpus \
               -max_total_time=60 -print_final_stats=1
+
+  # Property-based tests against the official Hegel C library
+  # (hegeldev/hegel-rust hegel-c): an in-process FFI, so we just need
+  # the prebuilt libhegel plus the tagged header.  Pinned to the same
+  # release flake.nix uses so CI and the dev shell agree.
+  hegel:
+    runs-on: codeberg-medium
+    env:
+      HEGEL_VERSION: v0.30.3
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc meson ninja-build pkg-config curl
+
+      - name: Checkout
+        uses: https://code.forgejo.org/actions/checkout@v4
+
+      - name: Fetch official libhegel + header
+        run: |
+          mkdir -p .hegel/include .hegel/lib
+          curl -sSfL -o .hegel/include/hegel.h \
+            "https://raw.githubusercontent.com/hegeldev/hegel-rust/${HEGEL_VERSION}/hegel-c/include/hegel.h"
+          curl -sSfL -o .hegel/lib/libhegel.so \
+            "https://github.com/hegeldev/hegel-rust/releases/download/${HEGEL_VERSION}/libhegel-linux-amd64.so"
+
+      - name: Setup meson with hegel enabled
+        run: |
+          export CPATH="$PWD/.hegel/include:${CPATH:-}"
+          export LIBRARY_PATH="$PWD/.hegel/lib:${LIBRARY_PATH:-}"
+          meson setup builddir-hegel -Dhegel=enabled
+
+      - name: Build
+        run: ninja -C builddir-hegel
+
+      - name: Run property tests
+        run: |
+          export LD_LIBRARY_PATH="$PWD/.hegel/lib:${LD_LIBRARY_PATH:-}"
+          meson test -C builddir-hegel hegel hegel_white --print-errorlogs

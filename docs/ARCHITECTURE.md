@@ -60,15 +60,23 @@ The top-level `sm_t` manages an ordered sequence of chunks.
 Layout in the data buffer:
 
 ```
-  [4 bytes: chunk count]
-  [chunk 0:   4-byte start offset | 8-byte descriptor | optional vectors]
-  [chunk 1:   4-byte start offset | 8-byte descriptor | optional vectors]
+  [8 bytes: chunk count]
+  [chunk 0:   8-byte start offset | 8-byte descriptor | optional vectors]
+  [chunk 1:   8-byte start offset | 8-byte descriptor | optional vectors]
   ...
 ```
 
 Each chunk's *start offset* is an absolute bit index, aligned to a
 chunk-capacity boundary.  Chunks are stored in increasing-offset
-order so binary search and merge-style algorithms work.
+order so binary search and merge-style algorithms work.  Duplicate
+or out-of-order start offsets are a corrupt map: `sm_validate()`
+rejects them, and the readers assume the ordering.
+
+The count and the start offsets were 4 bytes each before v4.0.0,
+which silently truncated any index at or above 2^32.  Both are
+`__sm_idx_t` (a `uint64_t`) now; `SM_SIZEOF_OVERHEAD` is
+`sizeof(__sm_idx_t)`, so it is the single place that width is
+decided.
 
 ### Encoding transitions
 
@@ -100,10 +108,34 @@ The lineage tag drives `sm_set_data_size`'s behavior so it can
 never silently no-op a resize — see [API.md](API.md) for the full
 contract and [MIGRATION.md](MIGRATION.md) for what changed in v1.
 
+## Serialized wire format (version 2)
+
+`sm_serialize` / `sm_deserialize` write a self-describing stream,
+unlike the in-memory buffer, which is host-order and not portable.
+
+```
+  offset 0   [4 bytes]  magic 0x30316d73 ("sm10", little-endian)
+  offset 4   [1 byte ]  format version (currently 2)
+  offset 5   [1 byte ]  flags; bit 0 set = little-endian writer
+  offset 6   [2 bytes]  reserved, zero
+  offset 8   [8 bytes]  cardinality (set-bit count)
+  offset 16  [...]      the chunk stream described above
+```
+
+The 16-byte header is `SM_WIRE_HEADER_LEN`.  Version 1 used 4-byte
+chunk counts and start offsets; version 2 widened both to 8 bytes to
+fix silent truncation at indices >= 2^32.  A reader checks the magic,
+rejects an unknown version, and byte-swaps the body when the writer's
+endianness flag disagrees with the host.
+
+The C and Rust implementations are not required to produce
+byte-identical streams, only mutually readable ones; CI exchanges
+fixtures in both directions to enforce that.
+
 ## Thread safety
 
-Sparsemap is **not** thread-safe.  Concurrent reads of an immutable
-map are safe; any writer must hold an external lock.  A lock-free /
-wait-free variant is being designed in `experiment/thread-safe`; see
-[../.agent/notes/sparsemap-cleanup-plan.md](../.agent/notes/sparsemap-cleanup-plan.md)
-Phase 6 for the design track.
+Sparsemap is **not** thread-safe, and there is no plan to make it so.
+Concurrent reads of an unmutated map are safe; any writer needs an
+external lock.  The `experiment/thread-safe` branch explored a
+lock-free variant in 2024 and was not pursued -- treat it as an
+archive.  See [ROADMAP.md](ROADMAP.md) for the settled decisions.
