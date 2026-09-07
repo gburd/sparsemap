@@ -1441,6 +1441,50 @@ CASE(test_oom_paths)
         sm_free(b);
     }
 
+    /* A fine budget sweep on one representative shape pair: the set
+     * operations allocate their result and then grow it repeatedly as
+     * chunks are appended, so each distinct allocation ordinal fails at
+     * a different point inside the merge loop.  Coarse budgets only
+     * reach the first couple of failure arms; stepping one at a time up
+     * to a few dozen walks the rest of them. */
+    for (long budget = 0; budget < 40; budget++) {
+        sm_t *a = sm_create(8192);
+        sm_t *b = sm_create(8192);
+        if (a == NULL || b == NULL) { sm_free(a); sm_free(b); oom_reset(); continue; }
+        /* Many chunks on both sides, mixing runs and strides so the
+         * merge walk takes every branch on the way through. */
+        for (uint64_t i = 0; i < 6000; i++) sm_add_grow(&a, i);
+        for (uint64_t i = 6000; i < 12000; i += 5) sm_add_grow(&a, i);
+        for (uint64_t i = 3000; i < 9000; i++) sm_add_grow(&b, i);
+        for (uint64_t i = 0; i < 3000; i += 7) sm_add_grow(&b, i);
+        const size_t a0 = sm_cardinality(a), b0 = sm_cardinality(b);
+
+        oom_install(budget);
+        sm_t *r1 = sm_union(a, b);
+        sm_t *r2 = sm_intersection(a, b);
+        sm_t *r3 = sm_difference(a, b);
+        sm_t *r4 = sm_xor(a, b);
+        sm_t *r5 = sm_offset(a, 137);
+        sm_t *r6 = sm_offset(a, -137);
+        sm_t *r7 = sm_extract_range(a, 1000, 9000);
+        oom_reset();
+
+        /* Whatever failed, the inputs must be untouched and every
+         * result that did come back must be structurally sound. */
+        EXPECT(sm_cardinality(a) == a0 && sm_cardinality(b) == b0,
+            "inputs intact across the OOM sweep");
+        EXPECT(r1 == NULL || sm_validate(r1), "union result valid");
+        EXPECT(r2 == NULL || sm_validate(r2), "intersection result valid");
+        EXPECT(r3 == NULL || sm_validate(r3), "difference result valid");
+        EXPECT(r4 == NULL || sm_validate(r4), "xor result valid");
+        EXPECT(r5 == NULL || sm_validate(r5), "offset result valid");
+        EXPECT(r6 == NULL || sm_validate(r6), "negative offset valid");
+        EXPECT(r7 == NULL || sm_validate(r7), "extract result valid");
+        sm_free(r1); sm_free(r2); sm_free(r3); sm_free(r4);
+        sm_free(r5); sm_free(r6); sm_free(r7);
+        sm_free(a); sm_free(b);
+    }
+
     oom_reset();
     return 0;
 }
@@ -3260,6 +3304,186 @@ CASE(test_rank_unset_and_range_growth)
             EXPECT(sm_validate(cr), "created range is valid");
         }
         sm_free(cr);
+    }
+
+    sm_free(m);
+    return 0;
+}
+
+/*
+ * A crafted map whose chunks use every descriptor flag value, driven
+ * through the readers.
+ *
+ * The chunk primitives (__sm_chunk_get_capacity, _get_position,
+ * _is_set, _get_size) are SM_ALWAYS_INLINE, so gcov tracks their arcs
+ * separately at each of the ~30 call sites they land in.  Several of
+ * those arms -- SM_PAYLOAD_NONE anywhere, and the MIXED payload lookup
+ * in _is_set -- only trigger on descriptors no code path writes, so they
+ * need a map opened from a foreign buffer.  Build one with a mix of
+ * NONE, ZEROS, ONES and MIXED slots spread over several chunks and check
+ * every reader against a dense oracle derived from the same descriptor
+ * semantics.
+ */
+CASE(test_crafted_all_flag_values)
+{
+    /* Four chunks, each mixing flag values differently.  Flag i of a
+     * descriptor covers bits [64i, 64i+64) of its chunk; NONE and ZEROS
+     * contribute nothing, ONES contributes 64 set bits, MIXED takes the
+     * next payload word. */
+    enum { NCH = 4, UNIV = NCH * 2048 };
+    static const struct {
+        uint64_t start;
+        uint8_t flags[8];      /* flag value for slots 0..7 */
+        uint64_t payload[8];   /* payload for MIXED slots, in order */
+        int npay;
+    } spec[NCH] = {
+        /* NONE, ONES, ZEROS, NONE, MIXED, ZEROS, ONES, MIXED */
+        { 0,    { 1, 3, 0, 1, 2, 0, 3, 2 },
+          { 0x00000000FFFFFFFFULL, 0xAAAAAAAAAAAAAAAAULL }, 2 },
+        /* all MIXED in the first two slots, rest NONE */
+        { 2048, { 2, 2, 1, 1, 1, 1, 1, 1 },
+          { 0x0000000000000001ULL, 0x8000000000000000ULL }, 2 },
+        /* all ONES in the low half, NONE above */
+        { 4096, { 3, 3, 3, 3, 1, 1, 1, 1 }, { 0 }, 0 },
+        /* single MIXED slot far up the chunk */
+        { 6144, { 1, 1, 1, 1, 1, 1, 1, 2 },
+          { 0x00000000000000FFULL }, 1 },
+    };
+
+    uint8_t buf[2048];
+    memset(buf, 0, sizeof(buf));
+    static bool ref[UNIV];
+    memset(ref, 0, sizeof(ref));
+
+    size_t off = 0;
+    const uint64_t nch = NCH;
+    memcpy(buf + off, &nch, 8); off += 8;
+
+    for (int c = 0; c < NCH; c++) {
+        uint64_t desc = 0;
+        int pay = 0;
+        for (int slot = 0; slot < 8; slot++) {
+            const uint8_t f = spec[c].flags[slot];
+            desc |= (uint64_t)f << (slot * 2);
+            const uint64_t base = spec[c].start +
+                (uint64_t)slot * 64;
+            if (f == 3) {                     /* ONES */
+                for (int b = 0; b < 64; b++) ref[base + b] = true;
+            } else if (f == 2) {              /* MIXED */
+                const uint64_t w = spec[c].payload[pay++];
+                for (int b = 0; b < 64; b++)
+                    if (w & ((uint64_t)1 << b)) ref[base + b] = true;
+            }
+            /* NONE and ZEROS contribute no set bits. */
+        }
+        memcpy(buf + off, &spec[c].start, 8); off += 8;
+        memcpy(buf + off, &desc, 8); off += 8;
+        for (int k = 0; k < spec[c].npay; k++) {
+            memcpy(buf + off, &spec[c].payload[k], 8); off += 8;
+        }
+    }
+
+    sm_t *m = sm_open_copy(buf, off + 512, 512);
+    EXPECT(m != NULL, "crafted multi-flag map opens");
+    if (m == NULL) return 1;
+
+    size_t want = 0;
+    uint64_t want_min = SM_IDX_MAX, want_max = 0;
+    for (uint64_t i = 0; i < UNIV; i++) {
+        if (!ref[i]) continue;
+        want++;
+        if (i < want_min) want_min = i;
+        want_max = i;
+    }
+    EXPECT(want > 0, "oracle has bits");
+
+    /* Membership at every index, which walks _is_set's four flag arms
+     * including the MIXED payload lookup. */
+    bool ok = true;
+    for (uint64_t i = 0; i < UNIV && ok; i++) {
+        if (sm_contains(m, i, NULL) != ref[i]) {
+            fprintf(stderr, "    contains(%llu) got %d want %d\n",
+                (unsigned long long)i, (int)sm_contains(m, i, NULL),
+                (int)ref[i]);
+            ok = false;
+        }
+    }
+    EXPECT(ok, "membership matches the oracle everywhere");
+
+    EXPECT(sm_cardinality(m) == want, "cardinality");
+    EXPECT(sm_minimum(m) == want_min, "minimum");
+    EXPECT(sm_maximum(m) == want_max, "maximum");
+    EXPECT(sm_rank(m, 0, UNIV - 1, true) == want, "rank over everything");
+
+    /* select at every rank must agree with iteration. */
+    {
+        size_t k = 0;
+        sm_cursor_t cur = SM_CURSOR_INIT;
+        uint64_t it = SM_IDX_MAX;
+        bool sel_ok = true;
+        while ((it = sm_next_member(m, it, &cur)) != SM_IDX_MAX) {
+            if (sm_select(m, k, true) != it) {
+                fprintf(stderr,
+                    "    select(%zu) = %llu, iteration says %llu\n", k,
+                    (unsigned long long)sm_select(m, k, true),
+                    (unsigned long long)it);
+                sel_ok = false;
+                break;
+            }
+            k++;
+        }
+        EXPECT(sel_ok, "select agrees with iteration at every rank");
+        EXPECT(k == want, "iteration visits every bit");
+    }
+
+    /* Reverse iteration too. */
+    {
+        size_t k = 0;
+        uint64_t it = SM_IDX_MAX;
+        while ((it = sm_prev_member(m, it, NULL)) != SM_IDX_MAX) k++;
+        EXPECT(k == want, "reverse iteration visits every bit");
+    }
+
+    EXPECT(sm_validate(m), "crafted map validates");
+
+    /* Set operations against a normal map put the crafted chunks through
+     * the merge loops, where these primitives are inlined again. */
+    sm_t *n = sm_create(1 << 16);
+    if (n != NULL) {
+        for (uint64_t i = 1000; i < 7000; i += 3) sm_add_grow(&n, i);
+        sm_t *u = sm_union(m, n);
+        sm_t *x = sm_intersection(m, n);
+        sm_t *d = sm_difference(m, n);
+        sm_t *xo = sm_xor(m, n);
+        bool set_ok = true;
+        for (uint64_t i = 0; i < UNIV && set_ok; i++) {
+            const bool bn = (i >= 1000 && i < 7000 && (i - 1000) % 3 == 0);
+            if ((u && sm_contains(u, i, NULL)) != (ref[i] || bn) ||
+                (x && sm_contains(x, i, NULL)) != (ref[i] && bn) ||
+                (d && sm_contains(d, i, NULL)) != (ref[i] && !bn) ||
+                (xo && sm_contains(xo, i, NULL)) != (ref[i] != bn)) {
+                fprintf(stderr, "    setop disagrees at %llu\n",
+                    (unsigned long long)i);
+                set_ok = false;
+            }
+        }
+        EXPECT(set_ok, "set operations match the oracle");
+        sm_free(u); sm_free(x); sm_free(d); sm_free(xo);
+        sm_free(n);
+    }
+
+    /* Round trip and copy. */
+    sm_t *c = sm_copy(m);
+    EXPECT(c != NULL && sm_equals(c, m), "copy round trips");
+    sm_free(c);
+    const size_t need = sm_serialized_size(m);
+    uint8_t *out = malloc(need);
+    if (out != NULL) {
+        EXPECT(sm_serialize(m, out, need) == need, "serialize");
+        sm_t *r = sm_deserialize(out, need);
+        EXPECT(r != NULL && sm_equals(r, m), "deserialize round trips");
+        sm_free(r);
+        free(out);
     }
 
     sm_free(m);
@@ -5348,6 +5572,7 @@ int main(void)
     RUN(test_difference_rle_minus_rle);
     RUN(test_reduced_capacity_all_readers);
     RUN(test_reduced_capacity_more_ops);
+    RUN(test_crafted_all_flag_values);
     RUN(test_select_at_word_boundaries);
     RUN(test_offset_edges);
     RUN(test_rle_separation_sweep);
