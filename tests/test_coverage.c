@@ -1336,6 +1336,13 @@ CASE(test_oom_paths)
         for (uint64_t i = 0; i < 3000; i++) sm_add(a, i);        /* RLE */
         for (uint64_t i = 1500; i < 4500; i += 3) sm_add(b, i);  /* sparse */
 
+        /* Destinations for the operations that need a caller-provided
+         * map must be allocated BEFORE the allocator starts failing,
+         * otherwise the operation is never reached and its internal
+         * out-of-memory arms stay untested. */
+        sm_t *sp = sm_create(64);      /* deliberately too small */
+        sm_t *sp2 = sm_create(8192);
+
         /* Operations that allocate a result map. */
         oom_install(budget);
         sm_t *u = sm_union(a, b);
@@ -1344,24 +1351,29 @@ CASE(test_oom_paths)
         sm_t *xo = sm_xor(a, b);
         sm_t *c = sm_copy(a);
         sm_t *o = sm_offset(a, 4096);
-        /* sp itself may fail to allocate once the budget is spent. */
-        sm_t *sp = sm_create(8192);
+        /* Split into an undersized destination with the allocator
+         * failing: exercises the grow-and-fail arms inside sm_split
+         * rather than just its argument checks. */
         bool split_ran = false;
         if (sp != NULL) {
             (void)sm_split(a, 2048, sp);
             split_ran = true;
         }
+        if (sp2 != NULL) {
+            (void)sm_split(a, 1024, sp2);
+        }
         /* Each result either succeeded or came back NULL; both are
          * fine.  What must hold is that the inputs stay intact and
          * nothing is leaked or double-freed (ASan/valgrind check that). */
         if (split_ran) {
-            EXPECT(sm_cardinality(a) + sm_cardinality(sp) == 3000,
+            EXPECT(sm_cardinality(a) + sm_cardinality(sp) +
+                   (sp2 != NULL ? sm_cardinality(sp2) : 0) == 3000,
                 "split conserves bits even under OOM");
         } else {
             EXPECT(sm_cardinality(a) == 3000, "lhs intact after OOM");
         }
         sm_free(u); sm_free(x); sm_free(d); sm_free(xo);
-        sm_free(c); sm_free(o); sm_free(sp);
+        sm_free(c); sm_free(o); sm_free(sp); sm_free(sp2);
 
         /* Grow paths: add beyond capacity, and the explicit resizers. */
         (void)sm_add_grow(&a, 1u << 20);
@@ -2708,6 +2720,133 @@ CASE(test_offset_edges)
         sm_free(s);
     }
 
+    return 0;
+}
+
+/*
+ * RLE chunk separation across every interesting split position.
+ *
+ * __sm_separate_rle_chunk turns one RLE chunk into up to three pieces
+ * when a bit inside a run has to change.  It is driven from three call
+ * sites with different states: removing a set bit from a run (state 0),
+ * adding a bit that forces a run to split (state 1), and the size probe
+ * used to decide whether the split fits (state -1).  Its many branches
+ * depend on where the split lands relative to the run's start, its end,
+ * the 64-bit word boundaries and the 2048-bit chunk boundary, and the
+ * existing tests only pin a handful of positions.  Sweep them and check
+ * every result against a dense oracle plus sm_validate and a round
+ * trip, so a mis-split shows up as a wrong bit rather than a plausible
+ * count.
+ */
+CASE(test_rle_separation_sweep)
+{
+    static const uint64_t lens[] = { 64, 65, 127, 128, 2048, 2049, 4096, 5000 };
+    static const uint64_t bases[] = { 0, 1, 63, 64, 2000, 2048 };
+
+    for (size_t li = 0; li < sizeof(lens) / sizeof(*lens); li++) {
+        for (size_t bi = 0; bi < sizeof(bases) / sizeof(*bases); bi++) {
+            const uint64_t base = bases[bi];
+            const uint64_t len = lens[li];
+
+            /* Split positions: both ends, both ends minus one, the
+             * middle, and each word/chunk boundary inside the run. */
+            uint64_t pos[10];
+            size_t np = 0;
+            pos[np++] = base;
+            pos[np++] = base + 1;
+            pos[np++] = base + len / 2;
+            pos[np++] = base + len - 1;
+            if (len > 64)   pos[np++] = base + 64;
+            if (len > 65)   pos[np++] = base + 65;
+            if (len > 2048) pos[np++] = base + 2048;
+            if (len > 2049) pos[np++] = base + 2049;
+
+            for (size_t k = 0; k < np; k++) {
+                /* Remove one bit from the middle of a run (state 0). */
+                sm_t *m = sm_create(4096);
+                if (m == NULL) continue;
+                for (uint64_t i = 0; i < len; i++) sm_add_grow(&m, base + i);
+
+                sm_remove(m, pos[k]);
+
+                if (sm_cardinality(m) != len - 1) {
+                    fprintf(stderr,
+                        "    remove base=%llu len=%llu pos=%llu: card %zu want %llu\n",
+                        (unsigned long long)base, (unsigned long long)len,
+                        (unsigned long long)pos[k], sm_cardinality(m),
+                        (unsigned long long)(len - 1));
+                    g_failures++;
+                } else if (sm_contains(m, pos[k], NULL)) {
+                    fprintf(stderr,
+                        "    remove base=%llu len=%llu pos=%llu: bit still set\n",
+                        (unsigned long long)base, (unsigned long long)len,
+                        (unsigned long long)pos[k]);
+                    g_failures++;
+                } else {
+                    /* Every other bit of the run must survive, and the
+                     * neighbours of the hole specifically. */
+                    bool bad = false;
+                    if (pos[k] > base && !sm_contains(m, pos[k] - 1, NULL))
+                        bad = true;
+                    if (pos[k] + 1 < base + len &&
+                        !sm_contains(m, pos[k] + 1, NULL))
+                        bad = true;
+                    if (!sm_contains(m, base, NULL) && pos[k] != base)
+                        bad = true;
+                    if (!sm_contains(m, base + len - 1, NULL) &&
+                        pos[k] != base + len - 1)
+                        bad = true;
+                    if (bad) {
+                        fprintf(stderr,
+                            "    remove base=%llu len=%llu pos=%llu: neighbour lost\n",
+                            (unsigned long long)base,
+                            (unsigned long long)len,
+                            (unsigned long long)pos[k]);
+                        g_failures++;
+                    }
+                    if (!sm_validate(m)) {
+                        fprintf(stderr,
+                            "    remove base=%llu len=%llu pos=%llu: invalid map\n",
+                            (unsigned long long)base,
+                            (unsigned long long)len,
+                            (unsigned long long)pos[k]);
+                        g_failures++;
+                    }
+                }
+
+                /* Putting the bit back must restore the original run. */
+                sm_add_grow(&m, pos[k]);
+                if (sm_cardinality(m) != len) {
+                    fprintf(stderr,
+                        "    re-add base=%llu len=%llu pos=%llu: card %zu want %llu\n",
+                        (unsigned long long)base, (unsigned long long)len,
+                        (unsigned long long)pos[k], sm_cardinality(m),
+                        (unsigned long long)len);
+                    g_failures++;
+                }
+                sm_free(m);
+
+                /* Add a bit just past the end of a run, which makes the
+                 * run grow or split depending on the gap (state 1). */
+                sm_t *g = sm_create(4096);
+                if (g == NULL) continue;
+                for (uint64_t i = 0; i < len; i++) sm_add_grow(&g, base + i);
+                const uint64_t far = base + len + (pos[k] % 3) * 64 + 1;
+                sm_add_grow(&g, far);
+                if (sm_cardinality(g) != len + 1 ||
+                    !sm_contains(g, far, NULL) ||
+                    !sm_contains(g, base, NULL) ||
+                    !sm_validate(g)) {
+                    fprintf(stderr,
+                        "    add-past base=%llu len=%llu far=%llu failed\n",
+                        (unsigned long long)base, (unsigned long long)len,
+                        (unsigned long long)far);
+                    g_failures++;
+                }
+                sm_free(g);
+            }
+        }
+    }
     return 0;
 }
 
@@ -4794,6 +4933,7 @@ int main(void)
     RUN(test_reduced_capacity_all_readers);
     RUN(test_select_at_word_boundaries);
     RUN(test_offset_edges);
+    RUN(test_rle_separation_sweep);
 
     /* flip / validate / statistics / shrink_to_fit */
     RUN(test_flip_range);
