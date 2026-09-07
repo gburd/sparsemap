@@ -184,6 +184,9 @@ jobs:
       - name: Check no endian-unsafe descriptor byte walks
         run: scripts/check_endian_safety.sh
 
+      - name: Check the docs/API.md index matches sm.h
+        run: scripts/gen_api_index.sh --check
+
   fuzz:
     runs-on: ubuntu-latest
     steps:

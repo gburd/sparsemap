@@ -96,6 +96,14 @@ if [ -f python/pyproject.toml ]; then
     check "python/pyproject.toml:" "$(toml_section_version python/pyproject.toml '[project]')"
 fi
 
+# --- 7. man pages (.TH line carries the version) ---
+# These drifted two majors behind before anything checked them.
+for page in man/sparsemap.3 man/sparsemap.7; do
+    if [ -f "$page" ]; then
+        check "$page:" "$(sed -n 's/^\.TH .* "sparsemap \([0-9][0-9.]*\)".*/\1/p' "$page" | head -1)"
+    fi
+done
+
 if [ "$fail" -ne 0 ]; then
     printf '\ncheck_version: FAILED -- sources disagree\n' >&2
     exit 1

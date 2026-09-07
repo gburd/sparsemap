@@ -40,9 +40,11 @@ Good fit:
 
 Not a fit:
 
-- Multi-threaded workloads: sparsemap is not thread-safe.  A
-  lock-free / wait-free variant is in design (see
-  `experiment/thread-safe`).
+- Multi-threaded workloads: sparsemap is not thread-safe, and there
+  is no plan to make it so.  Concurrent readers of an unmutated map
+  are fine; any mutation needs external synchronisation.  (An
+  `experiment/thread-safe` branch explored a lock-free variant in
+  2024 and was not pursued; treat it as an archive, not a roadmap.)
 - 32-bit integer universes: sparsemap uses 64-bit indices.
 
 ## Quick start
@@ -245,69 +247,67 @@ source-level breaks, all mechanical:
 The serialized wire format is **unchanged**: 4.x bytes deserialize
 under 5.0.
 
-## Future work: SIMD
+## SIMD: a settled decision, not a roadmap item
 
-Sparsemap is scalar-only by design.  No `__builtin_popcount` chains,
-no AVX intrinsics, no NEON — nothing target-specific.  The same
-source compiles unchanged on x86_64, ARM, RISC-V, and anything else
-with a C99 compiler.  This is deliberate: single-file vendoring and
-cross-platform reproducibility outrank per-architecture peak
-performance for our consumer profile (PostgreSQL extensions,
-embedded indexers, undo logs).
+Sparsemap is scalar-only by design, and intends to stay that way.
+No hand-written AVX or NEON intrinsics, nothing target-specific:
+the same source compiles unchanged on x86_64, ARM, RISC-V, s390x
+and SPARC.  Single-file vendoring and cross-platform
+reproducibility outrank per-architecture peak performance for the
+consumer profile (PostgreSQL extensions, embedded indexers, undo
+logs).
+
+Two measurements back this up rather than leaving it a matter of
+taste:
+
+- The compiler already vectorizes the inner loops that matter.
+  Building with `-O3 -march=native` auto-vectorizes five loops in
+  `sm.c` with no source change (`gcc -fopt-info-vec`).
+- The payoff is small.  Against `-O2`, `-O3 -march=native` moves
+  `sm_union` by roughly 6-13% on the microbenchmark (random/random
+  153.2 -> 144.6 us median; random/dense 39.5 -> 34.4 us).  That is
+  the same order as the gather overhead any hand-written kernel
+  would have to pay back first.
+
+So a consumer who wants vectorization can have most of the
+available win today by compiling with their own `-march`, without
+sparsemap growing a second code path, runtime CPU dispatch, or
+target-feature flags in every downstream build system.
 
 The allocator hooks (`sm_set_allocator`) are deliberately a minimal
 `malloc`/`realloc`/`free` triple, matching CRoaring's
-`roaring_init_memory_hook`.  If a future SIMD effort needs aligned
-allocation it can add an aligned-alloc hook then; the current API
-carries no speculative slots.  Two tiers of SIMD work are plausible
-if a real workload ever justifies it.  Both are deferred until a
-downstream consumer profiles a hotspot in a sparsemap operation.
+`roaring_init_memory_hook`.  If a future SIMD effort ever needs
+aligned allocation it can add an aligned-alloc hook then; the
+current API carries no speculative slots.
 
-### Tier 1 — vectorize the inner loops without changing the wire format
+### What it would take, if a profile ever justified it
 
-  - **`sm_cardinality` over MIXED runs.**  Walk chunks scalar-style
-    to identify contiguous runs of MIXED bitvecs of length ≥ K
-    (~4), gather them into an aligned scratch buffer, run
-    AVX2/AVX-512 (or NEON) popcount, accumulate.  Falls back to the
-    current scalar loop for short runs and unsupported platforms.
-  - **Set ops on MIXED-MIXED chunk-pair runs.**  Same idea applied
-    to `sm_union` / `sm_intersection` / `sm_xor` / `sm_difference`:
-    when both inputs have aligned MIXED runs, dispatch to a
-    vectorized `vpand` / `vpor` / `vpxor` loop.
-  - Roughly 500 LOC of intrinsics, runtime CPU dispatch via
-    `__attribute__((target("avx2")))` plus a `cpuid` probe, and one
-    aligned scratch buffer per inner-loop call (an aligned-alloc
-    hook would be added to `sm_allocator_t` at that point).
-  - Realistic gain: 1.5–3× on dense (mostly-MIXED) maps; near zero
-    on sparse maps because the gather overhead eats the win.
+Kept here so the analysis does not have to be redone, not as
+planned work.  **Neither tier is scheduled.**
 
-### Tier 2 — wire-format extension for native SIMD layout
+Tier 1, no wire-format change: identify contiguous runs of MIXED
+bitvecs (length >= ~4) while walking chunks, gather them into an
+aligned scratch buffer, run vectorized popcount for
+`sm_cardinality` or `vpand`/`vpor`/`vpxor` for the set operations,
+fall back to the scalar loop otherwise.  Roughly 500 lines of
+intrinsics, runtime dispatch via `__attribute__((target("avx2")))`
+plus a `cpuid` probe, one aligned scratch buffer per inner-loop
+call.  Realistic gain 1.5-3x on dense (mostly-MIXED) maps, near
+zero on sparse maps because the gather overhead eats the win.
 
-  - Add a fifth chunk payload type (e.g. `SM_PAYLOAD_DENSE_RUN`)
-    that stores N contiguous bitvecs aligned on a 32-byte boundary,
-    with a length prefix.  The encoder switches to dense-run mode
-    when emitting a long MIXED run.
-  - The 2-bit flag space is full (00/01/10/11 all assigned), so
-    the new mode requires an escape encoding via the chunk header.
-  - Removes the gather step entirely; SIMD ops run directly on the
-    serialized bytes.
-  - Roughly 1500 LOC, codec rewrite, deserialize-backward-compat
-    work, consumer wire format changes.
-  - Realistic gain: 4–6× on dense maps.
+Tier 2, wire-format extension: add a payload type storing N
+contiguous bitvecs aligned to 32 bytes with a length prefix, so
+SIMD runs directly on the serialized bytes with no gather.  The
+2-bit flag space is full (00/01/10/11 all assigned), so it needs an
+escape encoding in the chunk header.  Roughly 1500 lines, a codec
+rewrite, deserialize backward-compatibility work and a consumer
+wire-format migration.  Realistic gain 4-6x on dense maps.
 
-### Why neither is shipped today
-
-Sparsemap's value proposition is "small wire format, single-file
-vendoring, no SIMD assumptions".  Adding SIMD splits the code
-(scalar fallback + vector fast path), introduces runtime CPU
-dispatch, and forces every consumer's build system to handle
-target-feature flags.  We will not pay that cost speculatively.
-
-If and when a real workload pins `sm_cardinality` or set-op
-throughput as a measured bottleneck, **Tier 1 is the right answer**
-(small, contained, no wire-format change).  Tier 2 is a CRoaring-shaped
+If a real workload ever pins `sm_cardinality` or set-op throughput
+as a measured bottleneck, Tier 1 is the right answer -- small,
+contained, no wire-format change.  Tier 2 is a CRoaring-shaped
 rewrite and probably the wrong tool for sparsemap's niche.  Open an
-issue with profile data if you hit such a workload.
+issue with profile data.
 
 ## License
 
