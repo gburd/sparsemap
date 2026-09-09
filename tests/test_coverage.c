@@ -554,6 +554,75 @@ CASE(test_offset_carry_across_chunks)
 /*  sm_split -- exotic positions                                       */
 /* ------------------------------------------------------------------ */
 
+/*
+ * sm_split into an undersized destination must refuse, not overflow.
+ *
+ * The documented contract is SM_IDX_MAX with errno=ENOSPC when the
+ * buffer is too small, but nothing enforced it: the move loop used
+ * __sm_append_data, which had no bounds check (it only carried an
+ * __sm_assert, and that expands to ((void)0) in a release build).  A
+ * too-small destination therefore wrote past its allocation, and the
+ * damage surfaced much later as an unrelated glibc "realloc(): invalid
+ * next size", which is why it only showed up under meson's
+ * MALLOC_PERTURB_.
+ *
+ * There are now two layers, and this pins both: sm_split totals the
+ * bytes to move and refuses up front (so the operation is
+ * all-or-nothing, since the move loop cannot be unwound), and
+ * __sm_append_data itself returns false rather than performing an
+ * overflowing copy (so a future caller that forgets the check gets a
+ * failure instead of heap corruption).
+ */
+CASE(test_split_undersized_destination)
+{
+    /* Widely strided bits produce many sparse chunks, each carrying
+     * payload words, so the bytes to move greatly exceed a small
+     * buffer.  A dense run would compress to a couple of RLE chunks and
+     * would fit, which is not the case under test. */
+    sm_t *m = sm_create(1 << 20);
+    EXPECT(m != NULL, "setup");
+    if (m == NULL) return 1;
+    for (uint64_t i = 0; i < 200000; i += 2048) {
+        sm_add_grow(&m, i);
+        sm_add_grow(&m, i + 5);
+    }
+    const size_t card = sm_cardinality(m);
+    const size_t bytes = sm_get_size(m);
+    EXPECT(bytes > 64, "source is larger than the destination buffer");
+
+    sm_t *small = sm_create(64);
+    EXPECT(small != NULL, "undersized destination allocated");
+    if (small == NULL) { sm_free(m); return 1; }
+
+    errno = 0;
+    const uint64_t rc = sm_split(m, 4096, small);
+    EXPECT(rc == SM_IDX_MAX, "split refuses an undersized destination");
+    EXPECT(errno == ENOSPC, "and reports ENOSPC");
+
+    /* All-or-nothing: the refusal happens before the first byte moves,
+     * so the source keeps every bit and the destination stays empty. */
+    EXPECT(sm_cardinality(m) == card, "source is unchanged");
+    EXPECT(sm_cardinality(small) == 0, "destination stays empty");
+    EXPECT(sm_validate(m) && sm_validate(small), "both maps still valid");
+
+    /* A destination that is big enough must still work, so the check is
+     * not simply refusing everything. */
+    sm_t *big = sm_create(1 << 20);
+    if (big != NULL) {
+        errno = 0;
+        const uint64_t ok = sm_split(m, 4096, big);
+        EXPECT(ok != SM_IDX_MAX, "split succeeds with room");
+        EXPECT(sm_cardinality(m) + sm_cardinality(big) == card,
+            "split conserves every bit");
+        EXPECT(sm_validate(m) && sm_validate(big), "both halves valid");
+        sm_free(big);
+    }
+
+    sm_free(small);
+    sm_free(m);
+    return 0;
+}
+
 CASE(test_split_at_zero)
 {
     sm_t *m = sm_create(2048);
@@ -5482,6 +5551,7 @@ int main(void)
 
     /* split exotic */
     RUN(test_split_at_zero);
+    RUN(test_split_undersized_destination);
     RUN(test_split_past_end);
     RUN(test_split_in_middle_sparse);
 

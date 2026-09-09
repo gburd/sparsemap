@@ -5,6 +5,48 @@ Notable changes per release.  The Rust port keeps its own log in
 across the C library, the Rust crate and the Python binding, so a
 release exists even where one of them is functionally unchanged.
 
+## 5.5.1
+
+Internal hardening.  No API or wire-format change; a drop-in source
+swap for any 5.5.0 vendored copy.
+
+### Changed
+
+- `__sm_append_data`, the helper every chunk write goes through, now
+  returns `bool` and is marked `warn_unused_result` (`_Check_return_` on
+  MSVC).  It previously returned void and recorded its capacity
+  precondition only through `__sm_assert`, which expands to `((void)0)`
+  unless `SPARSEMAP_DIAGNOSTIC` is defined -- so in a release build a
+  caller that forgot to reserve space got a silent heap overflow.  That
+  is what happened in `sm_split` before 5.5.0, and the corruption
+  surfaced much later as an unrelated glibc "realloc(): invalid next
+  size".  All eight call sites now propagate a failure (`false` for the
+  chunk appenders, `SM_IDX_MAX` for `__sm_map_set` and `sm_split`), and
+  a future caller that forgets will not compile clean.
+
+  The recovery *policy* deliberately stays with the caller: the
+  library-owned result maps in `sm_union` and friends grow their buffer,
+  while operations on a caller-supplied buffer must fail with
+  `errno = ENOSPC`, and a callee cannot choose between the two.
+  `sm_split` additionally keeps its up-front total, because its move
+  loop cannot be unwound -- with only the per-append guard a refusal
+  still leaves a partially filled destination.
+
+  Performance-neutral: `sm_union`'s object code is byte-identical and
+  total text grows 88 bytes.
+
+### Testing
+
+`test_split_undersized_destination` pins the contract: refusal,
+`ENOSPC`, source unchanged, destination empty, and that a large-enough
+destination still succeeds.  Verified to fail when the guard is removed.
+
+Coverage is unchanged at 78.8% branches / 91.0% lines / 99.3%
+functions.  (An earlier 80.2% reading was an artifact of reusing a
+coverage build directory, which accumulates `.gcda` counters across runs
+and inflates the denominators; `measure_coverage.sh` should be pointed
+at a fresh directory.)
+
 ## 5.5.0
 
 A correctness release.  Seven bugs, three of them data-loss or
