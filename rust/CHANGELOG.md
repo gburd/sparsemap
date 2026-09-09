@@ -4,6 +4,23 @@ All notable changes to the Rust `sparsemap` crate are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com), and
 the crate follows [SemVer](https://semver.org).
 
+## [5.5.1] - 2026-09-07
+
+Version realigned with the C `sparsemap` library, which is at 5.5.1.
+That release makes the C helper `__sm_append_data` return `bool` with
+`warn_unused_result`, so a caller that forgets to reserve capacity fails
+to compile rather than silently overflowing the heap in a release build.
+
+**Nothing to port.**  The hazard is specific to the C representation: a
+flat byte buffer written through an unchecked `memcpy` helper, with the
+capacity precondition recorded only by an assert that vanishes under
+`NDEBUG`.  This crate stores chunks in a `BTreeMap` and grows its
+payload `Vec`s, so there is no caller-supplied buffer to overflow and no
+unchecked append to guard -- the same reason the 5.5.0 `sm_split` bug
+did not exist here (`split_off` returns an owned map).
+
+No source or wire change for consumers.
+
 ## [5.5.0] - 2026-09-07
 
 Version realigned with the C `sparsemap` library, which is at 5.5.0.

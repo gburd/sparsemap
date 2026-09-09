@@ -5,7 +5,7 @@ build-backend = "maturin"
 
 [project]
 name = "sparsemap"
-version = "5.5.0"
+version = "5.5.1"
 description = "Sparse, compressed, run-length-encoded bitmap over 64-bit indices."
 readme = "README.md"
 requires-python = ">=3.9"
