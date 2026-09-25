@@ -2,20 +2,14 @@
 
 ## Supported versions
 
-Only the most recent minor release on the current major version
-receives security fixes.  At the time of writing that is
-**v2.2.x**.  Older majors are unsupported.
+Security fixes land on the current release line only: the latest
+released minor on the current major version.  Earlier minors and
+earlier majors are unsupported -- a fix goes into the newest release,
+and vendoring an older version means porting that fix back yourself.
 
-| Version | Supported |
-|---------|-----------|
-| 2.2.x   | ✓ |
-| 2.1.x   | ✗ |
-| 2.0.x   | ✗ |
-| 1.x.x   | ✗ |
-
-If you are vendoring an older version and need a backport, a fix
-to the latest version plus a port-back-yourself patch is the
-expected path.
+Check the current version in `meson.build` / `sm.h` (`SM_VERSION_STRING`)
+or the latest git tag; that release line is the supported one.  We do
+not freeze a version number here, so this section does not go stale.
 
 ## Reporting a vulnerability
 

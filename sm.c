@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 /*
+ * Copyright (c) 2014 Christoph Rupp <chris@crupp.de>.
  * Copyright (c) 2024 Gregory Burd <greg@burd.me>.  All rights reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy

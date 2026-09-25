@@ -7,6 +7,16 @@
 A sparse, compressed bitmap library for C.  Optimized for workloads
 with long runs of consecutive set or unset bits.
 
+## Origin
+
+sparsemap is a hard fork of Christoph Rupp's
+[cruppstahl/sparsemap](https://github.com/cruppstahl/sparsemap) (2014),
+continued with his blessing.  His original MIT-licensed implementation
+is the origin and inspiration for this project; the compressed-chunk
+design and the two-bit descriptor encoding are his.  This fork has
+since been substantially rewritten and extended, but it would not
+exist without his work.  Thank you, Christoph.
+
 ## Why sparsemap
 
 Bitmaps are great when bits are dense and the universe is small.

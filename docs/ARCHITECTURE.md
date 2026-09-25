@@ -110,11 +110,17 @@ contract and [MIGRATION.md](MIGRATION.md) for what changed in v1.
 
 ## Serialized wire format (version 2)
 
-`sm_serialize` / `sm_deserialize` write a self-describing stream,
-unlike the in-memory buffer, which is host-order and not portable.
+`sm_serialize` / `sm_deserialize` write a self-describing header in
+front of the internal buffer.  The header records the format version,
+the writer's byte order, and the cardinality; the body is the internal
+`m_data` layout copied verbatim.  The magic and body are written with
+native `memcpy`, so **the stream is host-endian, not portable across
+byte orders** -- see the reader rules below.
 
 ```
-  offset 0   [4 bytes]  magic 0x30316d73 ("sm10", little-endian)
+  offset 0   [4 bytes]  magic 0x30316d73 ("sm10"); a little-endian writer
+                        emits the bytes 73 6d 31 30, a big-endian writer
+                        30 31 6d 73
   offset 4   [1 byte ]  format version (currently 2)
   offset 5   [1 byte ]  flags; bit 0 set = little-endian writer
   offset 6   [2 bytes]  reserved, zero
@@ -125,12 +131,17 @@ unlike the in-memory buffer, which is host-order and not portable.
 The 16-byte header is `SM_WIRE_HEADER_LEN`.  Version 1 used 4-byte
 chunk counts and start offsets; version 2 widened both to 8 bytes to
 fix silent truncation at indices >= 2^32.  A reader checks the magic,
-rejects an unknown version, and byte-swaps the body when the writer's
-endianness flag disagrees with the host.
+rejects an unknown version, and then compares the writer's endianness
+flag against the host: **if they disagree it rejects the file and
+returns NULL** -- it does not byte-swap the body.  Serialized maps are
+therefore portable only between hosts of the **same** byte order
+(verified x86_64 <-> sparcv9).  Cross-endian reads are a deferred
+wire-format change, not current behaviour; see
+[ROADMAP.md](ROADMAP.md) section 5.
 
 The C and Rust implementations are not required to produce
-byte-identical streams, only mutually readable ones; CI exchanges
-fixtures in both directions to enforce that.
+byte-identical streams, only mutually readable ones on a host of a
+given byte order; CI exchanges fixtures to enforce that.
 
 ## Thread safety
 
