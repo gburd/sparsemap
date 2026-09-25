@@ -88,7 +88,25 @@
  * sm_owned_copy(), sm_wrap()) return `NULL` on allocation
  * failure.
  *
- * ## Allocation lineage and disposal
+ * ## The NULL-map contract
+ *
+ * A `NULL` map pointer is treated as an **empty, read-only map**.  Every
+ * public `sm_*` function accepts `NULL` for its map argument without
+ * crashing:
+ *
+ * - Read/query functions return the value an empty map would return
+ *   (`sm_cardinality` -> 0, `sm_minimum`/`sm_maximum` -> 0,
+ *   `sm_is_empty` -> true, `sm_contains` -> false, `sm_get_data` ->
+ *   `NULL`, `sm_get_size`/`sm_get_capacity` -> 0, and so on).
+ * - Mutating functions cannot change a `NULL` map, so they perform no
+ *   action and return their documented failure value -- `SM_IDX_MAX`,
+ *   `false`, or `NULL` as the signature dictates -- and set `errno` to
+ *   `EINVAL`.
+ *
+ * This makes it safe to pass the result of an operation that can
+ * legitimately return `NULL` (an empty `sm_intersection` / `sm_xor` /
+ * `sm_difference`) straight into another call without a guard.
+ * * ## Allocation lineage and disposal
  *
  * Every sm_t has an internal allocation lineage tag that determines
  * which functions may safely realloc its data buffer and how it must be

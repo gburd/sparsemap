@@ -3519,6 +3519,10 @@ sm_owned_copy(const sm_t *map)
 sm_t *
 sm_copy(const sm_t *other)
 {
+	if (other == NULL) {
+		errno = EINVAL;
+		return (NULL);
+	}
 	const size_t cap = sm_get_capacity(other);
 	sm_t *map = sparsemap(cap);
 	if (map) {
@@ -3566,6 +3570,10 @@ sm_wrap(uint8_t *data, const size_t size)
 void
 sm_init(sm_t *map, uint8_t *data, const size_t size)
 {
+	if (map == NULL) {
+		errno = EINVAL;
+		return;
+	}
 	map->m_data = data;
 	map->m_data_used = 0;
 	__sm_set_cap_kind(map, size, SM_WRAPPED);
@@ -3592,6 +3600,10 @@ sm_init(sm_t *map, uint8_t *data, const size_t size)
 void
 sm_open(sm_t *map, uint8_t *data, const size_t size)
 {
+	if (map == NULL) {
+		errno = EINVAL;
+		return;
+	}
 	map->m_data = data;
 	/*
 	 * Set m_capacity and a temporary m_data_used = capacity *before*
@@ -3850,6 +3862,8 @@ sm_set_data_size(sm_t *map, uint8_t *data, const size_t size)
 double
 sm_capacity_remaining(const sm_t *map)
 {
+	if (map == NULL)
+		return (0.0);
 	const size_t cap = __sm_cap(map);
 	if (map->m_data_used >= cap) {
 		return (0);
@@ -3872,6 +3886,8 @@ sm_capacity_remaining(const sm_t *map)
 size_t
 sm_get_capacity(const sm_t *map)
 {
+	if (map == NULL)
+		return (0);
 	return (__sm_cap(map));
 }
 
@@ -4112,6 +4128,10 @@ done:;
 SM_HOT uint64_t
 sm_remove(sm_t *map, const uint64_t idx)
 {
+	if (map == NULL) {
+		errno = EINVAL;
+		return (SM_IDX_MAX);
+	}
 	return (__sm_map_unset(map, idx, true));
 }
 
@@ -4459,6 +4479,10 @@ done:;
 SM_HOT uint64_t
 sm_add(sm_t *map, const uint64_t idx)
 {
+	if (map == NULL) {
+		errno = EINVAL;
+		return (SM_IDX_MAX);
+	}
 	return (__sm_map_set(map, idx, true, NULL));
 }
 
@@ -4548,6 +4572,10 @@ sm_add_grow_cursor(sm_t **mapp, uint64_t idx, sm_cursor_t *cur)
 uint64_t
 sm_assign(sm_t *map, const uint64_t idx, const bool value)
 {
+	if (map == NULL) {
+		errno = EINVAL;
+		return (SM_IDX_MAX);
+	}
 	__sm_check_invariants(map);
 	return (value ? sm_add(map, idx) : sm_remove(map, idx));
 }
@@ -4570,6 +4598,8 @@ sm_assign(sm_t *map, const uint64_t idx, const bool value)
 uint64_t
 sm_minimum(const sm_t *map)
 {
+	if (map == NULL)
+		return (0);
 	__sm_check_invariants(map);
 	uint64_t offset = 0;
 	const size_t count = __sm_get_chunk_count(map);
@@ -4638,6 +4668,8 @@ done:;
 uint64_t
 sm_maximum(const sm_t *map)
 {
+	if (map == NULL)
+		return (0);
 	__sm_check_invariants(map);
 	const size_t count = __sm_get_chunk_count(map);
 
@@ -4724,6 +4756,8 @@ sm_maximum(const sm_t *map)
 double
 sm_fill_factor(sm_t *map)
 {
+	if (map == NULL)
+		return (0.0);
 	__sm_check_invariants(map);
 	const size_t rank = sm_rank(map, 0, SM_IDX_MAX, true);
 	if (rank == 0) {
@@ -4751,6 +4785,8 @@ sm_fill_factor(sm_t *map)
 void *
 sm_get_data(const sm_t *map)
 {
+	if (map == NULL)
+		return (NULL);
 	return (map->m_data);
 }
 
@@ -4766,6 +4802,8 @@ sm_get_data(const sm_t *map)
 size_t
 sm_get_size(sm_t *map)
 {
+	if (map == NULL)
+		return (0);
 	if (map->m_data_used) {
 		const size_t size = __sm_get_size_impl(map);
 		if (size != map->m_data_used) {
@@ -8426,6 +8464,10 @@ fail:
 uint64_t
 sm_split(sm_t *map, uint64_t idx, sm_t *other)
 {
+	if (map == NULL || other == NULL) {
+		errno = EINVAL;
+		return (SM_IDX_MAX);
+	}
 	__sm_check_invariants(map);
 	__sm_check_invariants(other);
 	size_t i;
@@ -8717,6 +8759,11 @@ sm_split(sm_t *map, uint64_t idx, sm_t *other)
 uint64_t
 sm_select(sm_t *map, uint64_t n, bool value)
 {
+	if (map == NULL) {
+		/* Empty map: no set bits; unset bits are the whole line, so
+		 * the n-th unset bit is n.  Matches the count == 0 path. */
+		return (value ? SM_IDX_MAX : n);
+	}
 	__sm_check_invariants(map);
 	__sm_assert(sm_get_size(map) >= SM_SIZEOF_OVERHEAD);
 	const size_t count = __sm_get_chunk_count(map);
@@ -8849,6 +8896,8 @@ __sm_rank_vec(sm_t *map, uint64_t begin, uint64_t end, bool value,
 size_t
 sm_rank(sm_t *map, uint64_t begin, uint64_t end, bool value)
 {
+	if (map == NULL)
+		return (0);
 	__sm_check_invariants(map);
 	__sm_bitvec_t vec;
 	return (__sm_rank_vec(map, begin, end, value, &vec));
@@ -8857,6 +8906,8 @@ sm_rank(sm_t *map, uint64_t begin, uint64_t end, bool value)
 uint64_t
 sm_span(sm_t *map, uint64_t idx, size_t len, bool value)
 {
+	if (map == NULL)
+		return (SM_IDX_MAX);
 	__sm_check_invariants(map);
 	__sm_bitvec_t vec = 0;
 
@@ -8918,6 +8969,10 @@ sm_contains_many(const sm_t *map, const uint64_t *idxs, bool *results,
     size_t n)
 {
 	if (n == 0) {
+		return;
+	}
+	if (idxs == NULL || results == NULL) {
+		errno = EINVAL;
 		return;
 	}
 	if (map == NULL) {
