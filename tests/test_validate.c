@@ -2,15 +2,16 @@
 /*
  * test_validate.c - S1 regression: one definition of a valid map.
  *
- * sm_validate must reject RLE-length-over-capacity, unaligned chunk
- * starts, start+capacity overflow, overlapping spans, and a stored
- * chunk count that disagrees with the walk; and sm_open, sm_open_copy
- * and sm_deserialize must all enforce it (empty map / NULL on failure)
- * -- exactly the contract sm_deserialize already had.
+ * sm_validate must reject any RLE-flagged chunk (this RLE-free build
+ * cannot represent one), unaligned chunk starts, start+capacity
+ * overflow, overlapping spans, and a stored chunk count that disagrees
+ * with the walk; and sm_open, sm_open_copy and sm_deserialize must all
+ * enforce it (empty map / NULL on failure) -- exactly the contract
+ * sm_deserialize already had.
  *
  * Without the S1 fix, sm_open_copy returns a half-parsed map that later
- * crashes sm_add / sm_offset (the review's RLE-len>cap crash), and
- * sm_validate accepts unaligned / overlapping / overflowing chunks.
+ * crashes sm_add / sm_offset, and sm_validate accepts unaligned /
+ * overlapping / overflowing chunks.
  */
 #define SM_EXPOSE_STRUCT 1
 #include <sm.h>
@@ -136,7 +137,9 @@ main(void)
 	o = put(o, 3);
 	CHECK(reject("start near 2^64", o) == 0);
 
-	/* (a) RLE length > capacity. */
+	/* (a) An RLE-flagged descriptor: this RLE-free build cannot
+	 * represent one, so sm_validate rejects any chunk carrying the RLE
+	 * flag (top two bits 01) regardless of its length/capacity fields. */
 	memset(body, 0, sizeof body);
 	o = put(0, 1);
 	o = put(o, 0);
@@ -144,7 +147,7 @@ main(void)
 		uint64_t rle = (1ULL << 62) | ((uint64_t)100 << 31) | 5000;
 		o = put(o, rle);
 	}
-	CHECK(reject("RLE len > cap", o) == 0);
+	CHECK(reject("RLE flag rejected", o) == 0);
 
 	/* (e) stored chunk count 2^32-1 but a tiny body. */
 	memset(body, 0, sizeof body);
@@ -153,8 +156,8 @@ main(void)
 	o = put(o, 3);
 	CHECK(reject("count 2^32-1", o) == 0);
 
-	/* (d) two RLE chunks whose spans overlap: start 0 with cap 4096
-	 * covers [0, 4096), the second starts at 2048 (< 4096). */
+	/* (d) two RLE-flagged chunks: rejected on the first RLE flag seen
+	 * (the RLE-free reader never reaches the overlap check). */
 	memset(body, 0, sizeof body);
 	o = put(0, 2);
 	o = put(o, 0);
@@ -167,7 +170,7 @@ main(void)
 		uint64_t rle = (1ULL << 62) | ((uint64_t)2048 << 31) | 10;
 		o = put(o, rle);
 	}
-	CHECK(reject("overlapping spans", o) == 0);
+	CHECK(reject("RLE-flagged chunks", o) == 0);
 
 	/* A legitimate map at the very top of the index space must NOT be
 	 * rejected: the last valid chunk ends exactly at 2^64. */

@@ -740,17 +740,19 @@ CASE(test_sparse_with_unused_flags)
 }
 
 /* ------------------------------------------------------------------ */
-/*  RLE <-> sparse transitions                                          */
+/*  runs crossing chunk boundaries (were RLE in the RLE variant)        */
 /* ------------------------------------------------------------------ */
 
 CASE(test_rle_to_sparse_transition)
 {
-    /* Build an RLE chunk, then clear a bit in the middle to force
-     * separation back into sparse + RLE pieces. */
+    /* Build a run longer than one chunk, then clear a bit in the
+     * middle.  In the RLE variant this separated an RLE chunk; here the
+     * run is already sparse chunks, so clearing a middle bit just turns
+     * one all-ONES chunk MIXED.  Behaviour is identical either way. */
     sm_t *m = sm_create(8192);
     populate_run(m, 0, 4096);
-    EXPECT(sm_cardinality(m) == 4096, "populated RLE");
-    /* Clear bit 100 -- forces RLE separation. */
+    EXPECT(sm_cardinality(m) == 4096, "populated run");
+    /* Clear bit 100. */
     sm_remove(m, 100);
     EXPECT(sm_cardinality(m) == 4095, "one bit cleared");
     EXPECT(!sm_contains(m, 100, NULL), "bit 100 unset");
@@ -762,12 +764,14 @@ CASE(test_rle_to_sparse_transition)
 
 CASE(test_sparse_to_rle_transition)
 {
-    /* Fill a chunk completely with set bits -- should transition to RLE. */
+    /* Fill a chunk completely, then cross the chunk boundary.  In the
+     * RLE variant this transitioned to an RLE chunk; here it just adds a
+     * second sparse chunk.  Same observable result. */
     sm_t *m = sm_create(8192);
     /* SM_CHUNK_MAX_CAPACITY = 2048 bits per chunk. */
     populate_run(m, 0, 2048);
     EXPECT(sm_cardinality(m) == 2048, "chunk full");
-    /* Add one more, crosses chunk boundary, may transition to RLE. */
+    /* Add one more, crosses chunk boundary. */
     sm_add(m, 2048);
     EXPECT(sm_cardinality(m) == 2049, "chunk extended");
     sm_free(m);
@@ -776,12 +780,12 @@ CASE(test_sparse_to_rle_transition)
 
 CASE(test_rle_extend)
 {
-    /* Adding a bit at the end of an RLE run extends the run. */
+    /* Adding a bit at the end of a multi-chunk run extends it. */
     sm_t *m = sm_create(8192);
-    populate_run(m, 0, 2049); /* triggers RLE transition */
-    /* The next bit should extend the existing run. */
+    populate_run(m, 0, 2049); /* run crosses one chunk boundary */
+    /* The next bit should extend the run. */
     sm_add(m, 2049);
-    EXPECT(sm_cardinality(m) == 2050, "RLE extended");
+    EXPECT(sm_cardinality(m) == 2050, "run extended");
     EXPECT(sm_contains(m, 2049, NULL), "appended bit set");
     sm_free(m);
     return 0;
@@ -1877,13 +1881,15 @@ CASE(test_statistics)
     EXPECT(s.chunks_sparse == 1 && s.chunks_rle == 0, "all sparse");
     EXPECT(s.bits_set == 2 && s.bits_in_sparse == 2, "2 bits sparse");
 
-    /* Dense run forces RLE. */
+    /* Dense run: RLE-free build stores it as all-ONES sparse chunks. */
     sm_clear(m);
     for (uint64_t i = 0; i < 4096; i++) sm_add(m, i);
     sm_statistics(m, &s);
     EXPECT(s.bits_set == 4096, "4096 bits set");
-    /* RLE chunks store 2048 bits each in 8 bytes; very efficient. */
-    EXPECT(s.bytes_per_set_bit < 0.1, "RLE: low bytes per bit");
+    EXPECT(s.chunks_rle == 0, "no-rle: dense run is sparse chunks");
+    /* Two all-ONES sparse chunks (descriptor-only, 8 bytes each) hold
+     * 2048 bits apiece; still very efficient. */
+    EXPECT(s.bytes_per_set_bit < 0.1, "all-ONES sparse: low bytes per bit");
 
     sm_free(m);
     return 0;

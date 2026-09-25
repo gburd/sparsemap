@@ -65,30 +65,38 @@ prop_calc_vector_size(hegel_test_case *tc, void *ctx)
 }
 
 /*
- * Build an RLE chunk buffer (start-offset prefix + single descriptor
- * word) the way the encoder lays one out, with a drawn run length.
- * The buffer's start-offset field is set to the run length so the
- * get_capacity property can recover it.  Caller frees.
+ * Build a raw RLE chunk stream (start-offset prefix + single RLE
+ * descriptor word) the way the RLE variant lays one out, with a drawn
+ * run length and capacity.  This build cannot represent such a chunk;
+ * the property below feeds it to sm_deserialize and asserts a clean
+ * rejection.  Caller frees.
  */
+#define SM_RLE_FLAGS_BIT   0x4000000000000000ULL
+#define SM_RLE_LEN_MASK    0x7FFFFFFFULL
+#define SM_RLE_CAP_SHIFT   31
+
 static uint8_t *
-make_rle_chunk(hegel_test_case *tc)
+make_rle_wire(hegel_test_case *tc, size_t *out_len)
 {
-	const int64_t len = hegel_draw_int(tc,
-	    hegel_integers(1, SM_CHUNK_RLE_MAX_LENGTH));
-	uint8_t *p = malloc(SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) * 2);
-	assert(p != NULL);
-	__sm_store_idx(p, (__sm_idx_t)len);
-	__sm_chunk_t chunk = {
-		.m_data = (__sm_bitvec_unaligned_t *)((uintptr_t)p +
-		    SM_SIZEOF_OVERHEAD)
-	};
-	chunk.m_data[0] = 0;
-	__sm_chunk_set_rle(&chunk);
-	__sm_chunk_rle_set_capacity(&chunk, SM_CHUNK_RLE_MAX_CAPACITY);
-	__sm_chunk_rle_set_length(&chunk, (size_t)len);
-	assert(__sm_chunk_is_rle(&chunk));
-	assert(__sm_chunk_rle_get_length(&chunk) == (size_t)len);
-	return (p);
+	const int64_t len = hegel_draw_int(tc, hegel_integers(1, 0x7FFFFFFF));
+	int64_t cap = hegel_draw_int(tc, hegel_integers(len, 0x7FFFFFFF));
+	/* header: chunk count = 1 */
+	const size_t n = SM_SIZEOF_OVERHEAD /* count */
+	    + SM_SIZEOF_OVERHEAD             /* chunk start offset */
+	    + sizeof(uint64_t);              /* RLE descriptor */
+	uint8_t *buf = calloc(1, n);
+	assert(buf != NULL);
+	uint64_t one = 1;
+	memcpy(buf, &one, sizeof(one));
+	__sm_idx_t start = 0;
+	memcpy(buf + SM_SIZEOF_OVERHEAD, &start, SM_SIZEOF_OVERHEAD);
+	const uint64_t desc = SM_RLE_FLAGS_BIT |
+	    (((uint64_t)cap << SM_RLE_CAP_SHIFT) &
+	        0x3FFFFFFF80000000ULL) |
+	    ((uint64_t)len & SM_RLE_LEN_MASK);
+	memcpy(buf + SM_SIZEOF_OVERHEAD * 2, &desc, sizeof(desc));
+	*out_len = n;
+	return (buf);
 }
 
 /*
@@ -147,23 +155,19 @@ make_sparse_chunk(hegel_test_case *tc)
  * MIXED vectors before index i, so that m_data[1 + position] points
  * at the payload word for a MIXED vector (verified against the marker
  * planted by make_sparse_chunk), and for non-MIXED vectors equals the
- * count of MIXED vectors seen so far.  RLE chunks always report 0.
+ * count of MIXED vectors seen so far.  Every chunk is sparse here.
  */
 static void
 prop_get_position(hegel_test_case *tc, void *ctx)
 {
 	(void)ctx;
-	bool rle = hegel_draw_bool(tc, hegel_booleans());
-	uint8_t *p = rle ? make_rle_chunk(tc) : make_sparse_chunk(tc);
+	uint8_t *p = make_sparse_chunk(tc);
 	__sm_chunk_t chunk = {
 		.m_data = (__sm_bitvec_unaligned_t *)((uintptr_t)p +
 		    SM_SIZEOF_OVERHEAD)
 	};
 
-	if (__sm_chunk_is_rle(&chunk)) {
-		for (size_t i = 0; i < SM_FLAGS_PER_INDEX; i++)
-			assert(__sm_chunk_get_position(&chunk, i) == 0);
-	} else {
+	{
 		size_t mixed = 0;
 		for (size_t i = 0; i < SM_FLAGS_PER_INDEX; i++) {
 			size_t pos = __sm_chunk_get_position(&chunk, i);
@@ -186,27 +190,54 @@ prop_get_position(hegel_test_case *tc, void *ctx)
 }
 
 /*
- * Property: the chunk's recoverable capacity matches the value stored
- * in the start-offset prefix by the generator -- run length for RLE
- * chunks, bit capacity for sparse chunks.
+ * Property: a sparse chunk's recoverable capacity matches the value
+ * stored in the start-offset prefix by the generator.
  */
 static void
 prop_get_capacity(hegel_test_case *tc, void *ctx)
 {
 	(void)ctx;
-	bool rle = hegel_draw_bool(tc, hegel_booleans());
-	uint8_t *p = rle ? make_rle_chunk(tc) : make_sparse_chunk(tc);
+	uint8_t *p = make_sparse_chunk(tc);
 	uint64_t want = __sm_load_idx(p);
 	__sm_chunk_t chunk = {
 		.m_data = (__sm_bitvec_unaligned_t *)((uintptr_t)p +
 		    SM_SIZEOF_OVERHEAD)
 	};
 
-	if (__sm_chunk_is_rle(&chunk))
-		assert(__sm_chunk_rle_get_length(&chunk) == want);
-	else
-		assert(__sm_chunk_get_capacity(&chunk) == want);
+	assert(__sm_chunk_get_capacity(&chunk) == want);
 	free(p);
+}
+
+/*
+ * Property (RLE-free reader decision): a wire stream carrying an RLE
+ * descriptor -- which this build cannot represent -- must be rejected
+ * cleanly.  sm_deserialize returns NULL or a valid map, and any
+ * survivor is RLE-free and passes sm_validate.  Never a crash.
+ */
+static void
+prop_reject_rle_wire(hegel_test_case *tc, void *ctx)
+{
+	(void)ctx;
+	size_t body_len = 0;
+	uint8_t *body = make_rle_wire(tc, &body_len);
+
+	/* Wrap in the portable header sm_deserialize expects. */
+	const size_t hdr = 16;
+	uint8_t *wire = calloc(1, hdr + body_len);
+	assert(wire != NULL);
+	const uint32_t magic = 0x30316d73u; /* "sm10" */
+	memcpy(wire, &magic, 4);
+	wire[4] = 2;    /* version */
+	wire[5] = 0x01; /* little-endian flag */
+	memcpy(wire + hdr, body, body_len);
+
+	sm_t *m = sm_deserialize(wire, hdr + body_len);
+	if (m != NULL) {
+		assert(sm_validate(m));
+		sm_free(m);
+	}
+	free(wire);
+	free(body);
 }
 
 static int
@@ -235,6 +266,7 @@ main(void)
 	rc |= run(s, prop_calc_vector_size, "calc_vector_size");
 	rc |= run(s, prop_get_position, "get_position");
 	rc |= run(s, prop_get_capacity, "get_capacity");
+	rc |= run(s, prop_reject_rle_wire, "reject_rle_wire");
 	hegel_session_free(s);
 	return (rc);
 }

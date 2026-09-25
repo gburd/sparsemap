@@ -2,16 +2,20 @@
 /*
  * test_amplify.c - S4 regression: termination and amplification.
  *
- * A tiny serialized map can declare a 2^31-bit RLE run.  Before the S4
- * fix, sm_xor / sm_hash / the *_cardinality family / sm_jaccard_index /
- * sm_extract_range walked that run bit-by-bit (O(cardinality)), taking
- * seconds, and sm_split's per-bit loop never terminated near 2^64.
- * They now walk run-by-run, so cost tracks the encoded size.
+ * RLE-free variant.  The RLE build could declare a 2^31-bit run in a
+ * 24-byte serialized map; this build cannot represent an RLE chunk at
+ * all, so that smuggled descriptor is REJECTED by sm_validate /
+ * sm_open_copy / sm_deserialize (see make_smuggled_rle + the rejection
+ * checks in main).  Without RLE a real 2^31-bit run would need ~1M
+ * sparse chunks, so a hostile serialized input is naturally bounded by
+ * its byte length -- the amplification vector is gone by construction.
  *
- * This test builds a valid single-RLE-chunk map spanning ~2^31 bits and
- * asserts every one of those ops finishes in well under 10 ms, then
- * cross-checks sm_xor / the cardinalities against the scalar bit-by-bit
- * answer on small maps.
+ * What remains to prove is that the run-based ops still cost O(encoded
+ * size), not O(popcount): this test builds the largest run that fits in
+ * a reasonable input (BIG_LEN bits stored as all-ONES sparse chunks)
+ * and asserts every op finishes well under the ceiling, then
+ * cross-checks sm_xor / the cardinalities / the comparison ops against
+ * the scalar bit-by-bit answer on small maps.
  */
 #define SM_EXPOSE_STRUCT 1
 #include <sm.h>
@@ -32,21 +36,76 @@
 	} while (0)
 
 #define SM_RLE_FLAGS 0x4000000000000000ULL
-#define BIG_LEN      0x7FFFFFFFULL /* 2^31 - 1 bits */
+/*
+ * The largest run this test materialises as sparse chunks.  BIG_LEN
+ * must be a whole multiple of SM_CHUNK_MAX_CAPACITY (2048) so the run
+ * is exactly N all-ONES sparse chunks.  ~5,000,000 bits rounds to 2442
+ * chunks (~24 KB encoded) -- large enough that an O(popcount) op would
+ * blow the timing ceiling, small enough to build in O(chunks).  This is
+ * the "largest run that FITS in a reasonable input": the byte length
+ * bounds the run, which is exactly why removing RLE removes the
+ * amplification vector.
+ */
+#define SM_CHUNK_CAP 2048ULL
+#define BIG_CHUNKS   2442ULL
+#define BIG_LEN      (BIG_CHUNKS * SM_CHUNK_CAP) /* 5,001,216 bits */
 
-/* A valid one-chunk map: start 0, RLE descriptor cap==len==2^31-1. */
+/*
+ * A valid all-sparse map holding the run [0, BIG_LEN), built directly
+ * as a chunk stream of all-ONES sparse descriptors (descriptor ~0, no
+ * payload words) so construction is O(chunks), not O(bits).  Feeding it
+ * through sm_open_copy also proves the reader accepts a legitimately
+ * large sparse run.
+ */
 static sm_t *
 make_big_rle(void)
 {
+	/* header (count) + BIG_CHUNKS * (8-byte start + 8-byte descriptor) */
+	const size_t n = 8 + (size_t)BIG_CHUNKS * 16;
+	uint8_t *body = calloc(1, n);
+	if (body == NULL)
+		return (NULL);
+	uint64_t count = BIG_CHUNKS;
+	memcpy(body, &count, 8);
+	uint8_t *p = body + 8;
+	const uint64_t ones = ~(uint64_t)0; /* all 32 slots ONES */
+	for (uint64_t c = 0; c < BIG_CHUNKS; c++) {
+		uint64_t start = c * SM_CHUNK_CAP;
+		memcpy(p, &start, 8);
+		memcpy(p + 8, &ones, 8);
+		p += 16;
+	}
+	sm_t *m = sm_open_copy(body, n, 1 << 16);
+	free(body);
+	return (m);
+}
+
+/* A serialized map carrying a smuggled 2^31-bit RLE descriptor.  This
+ * build must reject it (never represent or expand it).  Returns a
+ * malloc'd buffer of `*out_n` bytes wrapped in the portable header. */
+static uint8_t *
+make_smuggled_rle(size_t *out_n)
+{
+	const uint64_t big = 0x7FFFFFFFULL; /* 2^31 - 1 */
 	uint8_t body[24];
 	uint64_t count = 1;
 	uint64_t start = 0;
-	uint64_t desc = SM_RLE_FLAGS | (BIG_LEN << 31) | BIG_LEN;
+	uint64_t desc = SM_RLE_FLAGS | (big << 31) | big;
 	memcpy(body + 0, &count, 8);
 	memcpy(body + 8, &start, 8);
 	memcpy(body + 16, &desc, 8);
-	sm_t *m = sm_open_copy(body, sizeof body, 64);
-	return (m);
+
+	const size_t hdr = 16;
+	uint8_t *wire = calloc(1, hdr + sizeof(body));
+	if (wire == NULL)
+		return (NULL);
+	const uint32_t magic = 0x30316d73u; /* "sm10" */
+	memcpy(wire, &magic, 4);
+	wire[4] = 2;    /* version */
+	wire[5] = 0x01; /* little-endian flag */
+	memcpy(wire + hdr, body, sizeof(body));
+	*out_n = hdr + sizeof(body);
+	return (wire);
 }
 
 /* -------------------------------------------------------------------
@@ -168,6 +227,32 @@ elapsed_ms(struct timespec a, struct timespec b)
 int
 main(void)
 {
+	/* The smuggled 2^31-bit RLE descriptor: this build cannot represent
+	 * it, so every decode entry point must reject it cleanly (NULL or an
+	 * empty/valid map), never crash and never materialise ~1M chunks. */
+	{
+		size_t n = 0;
+		uint8_t *wire = make_smuggled_rle(&n);
+		CHECK(wire != NULL);
+		struct timespec t0, t1;
+		clock_gettime(CLOCK_MONOTONIC, &t0);
+		sm_t *smuggled = sm_deserialize(wire, n);
+		clock_gettime(CLOCK_MONOTONIC, &t1);
+		/* Rejected outright, or (defensively) a valid RLE-free map. */
+		if (smuggled != NULL) {
+			CHECK(sm_validate(smuggled));
+			sm_free(smuggled);
+		}
+		/* And the raw-body entry point rejects it too. */
+		sm_t *opened = sm_open_copy(wire + 16, n - 16, 64);
+		if (opened != NULL) {
+			CHECK(sm_validate(opened));
+			sm_free(opened);
+		}
+		CHECK(elapsed_ms(t0, t1) < 100.0); /* instant rejection */
+		free(wire);
+	}
+
 	sm_t *big = make_big_rle();
 	CHECK(big != NULL);
 	CHECK(sm_validate(big));
@@ -177,15 +262,15 @@ main(void)
 	sm_t *big2 = make_big_rle();
 	CHECK(big2 != NULL);
 
-	/* A small map to pair against the big one. */
+	/* A small map to pair against the big one; all bits inside the run. */
 	sm_t *small = sm_create(1024);
 	CHECK(small != NULL);
 	sm_add(small, 5);
 	sm_add(small, 1000000);
-	sm_add(small, 2000000000ULL);
+	sm_add(small, 4000000ULL);
 
-	/* Every op below must finish in well under 10 ms on a 2^31-bit
-	 * operand. */
+	/* Every op below must finish in well under the ceiling on a
+	 * multi-megabit run stored as thousands of sparse chunks. */
 	TIME_OP("union_cardinality",
 	    { volatile size_t r = sm_union_cardinality(big, small); (void)r; });
 	TIME_OP("intersection_cardinality", {
@@ -214,12 +299,12 @@ main(void)
 	TIME_OP("xor_big_nonempty", { xr_big = sm_xor(big, small); });
 	CHECK(xr_big != NULL);
 	CHECK(sm_validate(xr_big));
-	/* small = {5, 1000000, 2000000000}; all three lie inside [0,2^31-1),
+	/* small = {5, 1000000, 4000000}; all three lie inside [0,BIG_LEN),
 	 * so xor clears exactly those three bits from the giant run. */
 	CHECK(sm_cardinality(xr_big) == BIG_LEN - 3);
 	CHECK(!sm_contains(xr_big, 5, NULL));
 	CHECK(!sm_contains(xr_big, 1000000, NULL));
-	CHECK(!sm_contains(xr_big, 2000000000ULL, NULL));
+	CHECK(!sm_contains(xr_big, 4000000ULL, NULL));
 	CHECK(sm_contains(xr_big, 4, NULL));
 	CHECK(sm_contains(xr_big, 6, NULL));
 	CHECK(sm_contains(xr_big, 999999, NULL));
@@ -286,7 +371,7 @@ main(void)
 	/* split near the middle of the run. */
 	sm_t *other = sm_create(1 << 16);
 	CHECK(other != NULL);
-	TIME_OP("split", { (void)sm_split(big, 1000000000ULL, other); });
+	TIME_OP("split", { (void)sm_split(big, 2500000ULL, other); });
 	sm_free(other);
 
 	/* The last S4 gap: the three public comparison functions used to
