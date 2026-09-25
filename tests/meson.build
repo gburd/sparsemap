@@ -50,7 +50,7 @@ if get_option('b_coverage')
   test_defines += '-DSM_COVERAGE_BUILD=1'
 endif
 
-foreach name : ['test_rle_standalone', 'test_heisenbug', 'test_empty_map', 'test_coverage', 'test_portability', 'test_large_index', 'test_validate', 'test_amplify']
+foreach name : ['test_rle_standalone', 'test_heisenbug', 'test_empty_map', 'test_coverage', 'test_portability', 'test_large_index', 'test_validate', 'test_amplify', 'test_split_safety']
   exe = executable(name,
     name + '.c',
     dependencies : libsparsemap_dep,

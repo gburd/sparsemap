@@ -8477,7 +8477,7 @@ sm_split(sm_t *map, uint64_t idx, sm_t *other)
 		}
 		__sm_chunk_t chunk;
 		__sm_chunk_init(&chunk, src + SM_SIZEOF_OVERHEAD);
-		if (start + __sm_chunk_get_capacity(&chunk) > idx) {
+		if (start <= idx && start + __sm_chunk_get_capacity(&chunk) > idx) {
 			in_middle = true;
 			break;
 		}
@@ -8582,6 +8582,25 @@ sm_split(sm_t *map, uint64_t idx, sm_t *other)
 		 * (3) We're in the middle of a sparse chunk, let's split it.
 		 */
 
+		/* The destination is caller-provided and may be too small for
+		 * even the single chunk this phase splits off (the review's
+		 * mutating harness always passed a large `other`, but a small
+		 * one wrote past its buffer here -- an ASan heap-buffer-
+		 * overflow in the memcpy below, before any capacity was
+		 * checked).  A split-off sparse chunk occupies at most the
+		 * overhead word plus a full descriptor and 32 payload words;
+		 * refuse up front with the documented ENOSPC if it will not
+		 * fit, leaving both maps untouched. */
+		{
+			const size_t max_chunk = SM_SIZEOF_OVERHEAD +
+			    sizeof(__sm_bitvec_t) *
+			        (size_t)(1 + SM_FLAGS_PER_INDEX);
+			if (other->m_data_used + max_chunk > __sm_cap(other)) {
+				errno = ENOSPC;
+				return (SM_IDX_MAX);
+			}
+		}
+
 		/* Zero out the space we'll need at the proper location in dst. */
 		uint8_t buf[SM_SIZEOF_OVERHEAD +
 		    (sizeof(__sm_bitvec_t) * 2)] = { 0 };
@@ -8612,6 +8631,14 @@ sm_split(sm_t *map, uint64_t idx, sm_t *other)
 	/* Save the offset where moved chunks start, so we can truncate map later */
 	size_t split_offset = src - map->m_data;
 	size_t chunks_to_move = count - i;
+	/* The chunk stream ends here; the move must never read past it.  On
+	 * a valid-but-adversarial map the RLE-separation and sparse-split
+	 * phases above can leave `i` disagreeing with the bytes actually
+	 * present, so `count - i` may claim more chunks than remain -- a
+	 * source-side over-read in __sm_append_data (ASan heap-buffer-
+	 * overflow READ, then heap corruption on reuse).  Bounding every
+	 * walk by map_end keeps the move within the source buffer. */
+	uint8_t *const map_end = map->m_data + map->m_data_used;
 
 	/*
 	 * The destination is caller-provided and may be far smaller than
@@ -8622,19 +8649,31 @@ sm_split(sm_t *map, uint64_t idx, sm_t *other)
 	 * next size" once the corrupted heap was reused).  The documented
 	 * contract is SM_IDX_MAX with errno=ENOSPC when the buffer is too
 	 * small, so total the bytes first and refuse up front, leaving both
-	 * maps untouched.
+	 * maps untouched.  The same pass also re-derives how many chunks
+	 * actually fit in the source before its data end, so a desynced
+	 * count can never drive the move loop past the buffer.
 	 */
 	{
 		uint8_t *probe = src;
 		size_t need = 0;
+		size_t movable = 0;
 		for (size_t j = 0; j < chunks_to_move; j++) {
+			if (probe + SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) >
+			    map_end) {
+				break;
+			}
 			__sm_chunk_t c;
 			__sm_chunk_init(&c, probe + SM_SIZEOF_OVERHEAD);
 			const size_t sz = SM_SIZEOF_OVERHEAD +
 			    __sm_chunk_get_size(&c);
+			if (probe + sz > map_end) {
+				break;
+			}
 			need += sz;
 			probe += sz;
+			movable++;
 		}
+		chunks_to_move = movable;
 		if (other->m_data_used + need > __sm_cap(other)) {
 			errno = ENOSPC;
 			return (SM_IDX_MAX);
