@@ -50,7 +50,7 @@ if get_option('b_coverage')
   test_defines += '-DSM_COVERAGE_BUILD=1'
 endif
 
-foreach name : ['test_rle_standalone', 'test_heisenbug', 'test_empty_map', 'test_coverage', 'test_portability', 'test_large_index']
+foreach name : ['test_rle_standalone', 'test_heisenbug', 'test_empty_map', 'test_coverage', 'test_portability', 'test_large_index', 'test_validate']
   exe = executable(name,
     name + '.c',
     dependencies : libsparsemap_dep,
@@ -149,6 +149,14 @@ if fuzz_opt.allowed()
     fuzz_args = ['-fsanitize=fuzzer,address,undefined', '-g', '-O1']
     executable('fuzz_deserialize',
       'fuzz_deserialize.c',
+      dependencies : libsparsemap_dep,
+      c_args : fuzz_args,
+      link_args : fuzz_args,
+      build_by_default : true,
+    )
+    # Mutating harness: reaches the write paths fuzz_deserialize cannot.
+    executable('fuzz_mutate',
+      'fuzz_mutate.c',
       dependencies : libsparsemap_dep,
       c_args : fuzz_args,
       link_args : fuzz_args,

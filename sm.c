@@ -3609,7 +3609,21 @@ sm_open(sm_t *map, uint8_t *data, const size_t size)
 	 */
 	__sm_set_cap_kind(map, size, SM_WRAPPED);
 	map->m_data_used = __sm_cap(map);
+	/* The stored count as the buffer claims it, before __sm_get_size_impl
+	 * silently truncates it to the valid prefix.  A mismatch is an S1(e)
+	 * violation (stored count disagrees with the walk). */
+	const size_t claimed_count = __sm_get_chunk_count(map);
 	map->m_data_used = __sm_get_size_impl(map);
+	const size_t walked_count = __sm_get_chunk_count(map);
+	/* An untrusted buffer must be structurally valid or it is replaced
+	 * with an empty (valid) map -- the same contract sm_deserialize
+	 * already enforces.  size 0 is the documented "leave it empty" call
+	 * (sm_init/sm_wrap of a fresh buffer), so don't validate that. */
+	if (size >= SM_SIZEOF_OVERHEAD &&
+	    (claimed_count != walked_count || !sm_validate(map))) {
+		__sm_store_u64(&map->m_data[0], 0);
+		map->m_data_used = SM_SIZEOF_OVERHEAD;
+	}
 }
 
 sm_t *
@@ -3631,7 +3645,15 @@ sm_open_copy(const uint8_t *data, size_t n, size_t slack)
 		 * temporarily set m_data_used = capacity so the empty-map guard
 		 * in __sm_get_chunk_count doesn't short-circuit during the walk. */
 		m->m_data_used = __sm_cap(m);
+		const size_t claimed_count = __sm_get_chunk_count(m);
 		m->m_data_used = __sm_get_size_impl(m);
+		const size_t walked_count = __sm_get_chunk_count(m);
+		/* Untrusted bytes: reject anything not structurally valid
+		 * rather than returning a half-parsed map. */
+		if (claimed_count != walked_count || !sm_validate(m)) {
+			sm_free(m);
+			return (NULL);
+		}
 	}
 	/* sm_open's regular implementation transitions the lineage to
 	 * SM_WRAPPED -- but here the buffer is contiguous with the struct
@@ -6939,6 +6961,7 @@ sm_validate(const sm_t *map)
 	uint8_t *p = __sm_get_chunk_data(map, 0);
 	uint8_t *end = map->m_data + map->m_data_used;
 	__sm_idx_t prev_start = 0;
+	uint64_t prev_end = 0; /* start + capacity of the previous chunk */
 	bool first = true;
 	for (size_t i = 0; i < count; i++) {
 		if (p + SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) > end) {
@@ -6948,16 +6971,45 @@ sm_validate(const sm_t *map)
 		if (!first && start <= prev_start) {
 			return (false);
 		}
+		/* (b) chunk starts are chunk-aligned bit indices. */
+		if (start % SM_CHUNK_MAX_CAPACITY != 0) {
+			return (false);
+		}
 		__sm_chunk_t chunk;
 		__sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
 		const size_t chunk_size = __sm_chunk_get_size(&chunk);
 		if (p + SM_SIZEOF_OVERHEAD + chunk_size > end) {
 			return (false);
 		}
+		const size_t capacity = __sm_chunk_get_capacity(&chunk);
+		/* (a) an RLE chunk's run length cannot exceed its capacity. */
+		if (__sm_chunk_is_rle(&chunk) &&
+		    __sm_chunk_rle_get_length(&chunk) > capacity) {
+			return (false);
+		}
+		/* (c) [start, start + capacity) must not extend past the
+		 * addressable index space.  A chunk that ends exactly at 2^64
+		 * (start + capacity wraps to 0) is legal -- it holds the top
+		 * bits [2^64 - capacity, 2^64).  Only a wrap to a nonzero end
+		 * is an overflow. */
+		const uint64_t chunk_end = start + capacity;
+		if (chunk_end != 0 && chunk_end < start) {
+			return (false);
+		}
+		/* (d) [start, start + capacity) must not overlap the span of
+		 * the preceding chunk.  prev_end == 0 means the previous chunk
+		 * reached 2^64; ascending starts already forbid a follower. */
+		if (!first && prev_end != 0 && start < prev_end) {
+			return (false);
+		}
 		p += SM_SIZEOF_OVERHEAD + chunk_size;
 		prev_start = start;
+		prev_end = chunk_end;
 		first = false;
 	}
+	/* (e) the stored chunk count must match the walk exactly: the walk
+	 * consumed `count` chunks above, so leftover bytes mean the count
+	 * disagrees with the encoded stream. */
 	return (p == end);
 }
 
