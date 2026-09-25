@@ -1610,15 +1610,19 @@ sm_t *sm_shrink_to_fit(sm_t *map);
  *
  * Format (16 bytes header + body):
  *
- *   uint32_t magic     = 0x736d3130 ("sm10")  -- versions <2
- *   uint8_t  version   = 1
+ *   uint32_t magic     = 0x30316d73 ("sm10", stored in host byte order)
+ *   uint8_t  version   = 2
  *   uint8_t  flags     = 0x01 if little-endian, 0x00 if big-endian
  *   uint16_t reserved  = 0 (must be ignored on read)
  *   uint64_t cardinality           -- size hint for callers
  *   <body: existing internal m_data layout, in source endian>
  *
- * Cross-endian deserialization is not yet supported; sm_deserialize
- * returns NULL if the source endian doesn't match the host.
+ * The magic and body are written with native memcpy, so the stream is
+ * host-endian: a little-endian writer emits the magic bytes 73 6d 31 30
+ * and a big-endian writer 30 31 6d 73.  Cross-endian deserialization is
+ * not yet supported; sm_deserialize returns NULL if the source endian
+ * flag doesn't match the host.  Serialized maps are therefore portable
+ * only between hosts of the same byte order.
  * ------------------------------------------------------------------- */
 
 /** @brief Compute the buffer size needed to serialize \a map.
