@@ -1809,7 +1809,7 @@ __sm_get_chunk_offset(const sm_t *map, const uint64_t idx, sm_cursor_t *cur)
 	    cur->offset + sizeof(__sm_idx_t) <= stream_end &&
 	    idx >= cur->start_idx) {
 		/* Self-validate the cached offset before trusting it: a prior
-		 * mutation (a chunk shrinking to RLE, a leftward coalesce, a
+		 * mutation (a chunk being rewritten, a leftward coalesce, a
 		 * separate) can shift or remove the cached chunk without the
 		 * caller resetting.  If the chunk now at the cached offset no
 		 * longer starts where we recorded, the cursor is stale -- walk
@@ -3697,12 +3697,11 @@ __sm_append_sparse_chunk(sm_t **resultp, __sm_idx_t start, __sm_bitvec_t desc,
 /**
  * @brief Append a run of all-ONES sparse chunks to the result map.
  *
- * RLE-free replacement for __sm_append_rle_chunk: a whole-chunk run is
- * stored as one or more all-ONES sparse chunks (descriptor ~0, no payload
- * words), never a single RLE descriptor.  Callers only ever pass a
- * chunk-aligned capacity equal to the length (whole 2048-bit windows);
- * any sub-chunk remainder is emitted through the words path by the
- * caller (see __sm_emit_rle).
+ * A whole-chunk run of set bits is stored as one or more all-ONES
+ * sparse chunks (descriptor ~0, no payload words).  Callers only ever
+ * pass a chunk-aligned capacity equal to the length (whole 2048-bit
+ * windows); any sub-chunk remainder is emitted through the words path
+ * by the caller (see __sm_emit_ones_run).
  *
  * @param[in,out] resultp    Pointer to result map pointer (may grow).
  * @param[in]     start      The (chunk-aligned) start offset.
@@ -3735,8 +3734,7 @@ __sm_append_ones_chunks(sm_t **resultp, __sm_idx_t start, size_t capacity,
  *
  * sm_offset shifts each source chunk into an aligned output chunk, but
  * a shift is not a bijection on chunk boundaries: several source chunks
- * (and, for a split RLE run, several pieces of one source chunk) can
- * land in the SAME output chunk.  The function used to have five
+ * can land in the SAME output chunk.  The function used to have five
  * independent append sites plus a carry buffer, each deciding its own
  * start, so two of them could append chunks with identical start
  * offsets.  That breaks the ascending-start invariant every reader
@@ -3750,10 +3748,10 @@ __sm_append_ones_chunks(sm_t **resultp, __sm_idx_t start, size_t capacity,
  * Since output starts are produced in ascending order, one slot is
  * enough, and each output chunk is appended exactly once.
  *
- * An RLE emit always begins a fresh output chunk, so it just flushes
- * whatever is pending; instrumenting the whole sweep showed the only
- * collisions that ever occur are sparse-into-sparse and
- * sparse-after-RLE, never anything into an RLE chunk.
+ * An all-ONES run emit always begins a fresh output chunk, so it just
+ * flushes whatever is pending; instrumenting the whole sweep showed the
+ * only collisions that ever occur are sparse-into-sparse and
+ * sparse-after-run, never anything into a claimed run window.
  */
 typedef struct __sm_emitter {
 	sm_t **resultp;
@@ -3761,13 +3759,13 @@ typedef struct __sm_emitter {
 	int cap[32];
 	__sm_idx_t start;
 	bool pending;
-	/* Span of the RLE chunk emitted most recently.  Its capacity is
-	 * rounded up to whole output chunks, so a later sparse emit can
-	 * target a start that already lies inside it. */
-	__sm_idx_t rle_start;
-	size_t rle_end;
-	size_t rle_len;
-	bool have_rle;
+	/* Span of the all-ONES run emitted most recently.  Its capacity is
+	 * whole output chunks, so a later sparse emit can target a start
+	 * that already lies inside it. */
+	__sm_idx_t run_start;
+	size_t run_end;
+	size_t run_len;
+	bool have_run;
 } __sm_emitter_t;
 
 static bool
@@ -3783,9 +3781,9 @@ __sm_emit_flush(__sm_emitter_t *e)
 	if (!__sm_encode_sparse_chunk(e->words, e->cap, &desc, vecs, &nvecs)) {
 		return (true); /* nothing set: emit nothing */
 	}
-	/* Once a sparse chunk lands after the RLE chunk, that chunk is no
-	 * longer the tail and its span must not absorb later emits. */
-	e->have_rle = false;
+	/* Once a sparse chunk lands after the run, that run is no longer the
+	 * tail and its span must not absorb later emits. */
+	e->have_run = false;
 	return (__sm_append_sparse_chunk(e->resultp, e->start, desc, vecs,
 	    nvecs));
 }
@@ -3805,13 +3803,13 @@ __sm_emit_words(__sm_emitter_t *e, __sm_idx_t start,
 		return (true);
 	}
 
-	/* A start inside the last RLE chunk's span must never happen: an RLE
-	 * chunk is emitted with capacity == its own (chunk-aligned) length,
-	 * so it never advertises indices it does not own.  Assert it rather
+	/* A start inside the last run's span must never happen: an all-ONES
+	 * run is emitted with capacity == its own (chunk-aligned) length, so
+	 * it never advertises indices it does not own.  Assert it rather
 	 * than trying to repair it here -- an overlap means an upstream
 	 * caller computed the wrong output start. */
-	__sm_assert(!(e->have_rle && (size_t)start >= (size_t)e->rle_start &&
-	    (size_t)start < e->rle_end));
+	__sm_assert(!(e->have_run && (size_t)start >= (size_t)e->run_start &&
+	    (size_t)start < e->run_end));
 
 	if (!__sm_emit_flush(e)) {
 		return (false);
@@ -3824,21 +3822,20 @@ __sm_emit_words(__sm_emitter_t *e, __sm_idx_t start,
 }
 
 /* Emit a whole-chunk run of set bits as one or more all-ONES sparse
- * output chunks (RLE-free build).
+ * output chunks.
  *
- * The name is kept from the RLE variant, but there is no RLE chunk: a
- * run of `length` bits starting at `start` is emitted as the whole
+ * A run of `length` bits starting at `start` is emitted as the whole
  * 2048-bit windows it fills (as all-ONES sparse chunks via
  * __sm_append_ones_chunks) plus a sub-chunk remainder handled through
  * the words path.  The caller passes capacity == length; only the whole
  * output chunks are emitted here, the remainder rolls into a following
  * emit for the same chunk.
  *
- * The span (rle_start/rle_end) is still recorded so __sm_emit_words can
+ * The span (run_start/run_end) is recorded so __sm_emit_words can
  * assert a later start never lands inside the just-emitted run.
  */
 static bool
-__sm_emit_rle(__sm_emitter_t *e, __sm_idx_t start, size_t capacity,
+__sm_emit_ones_run(__sm_emitter_t *e, __sm_idx_t start, size_t capacity,
     size_t length)
 {
 	/*
@@ -3860,10 +3857,10 @@ __sm_emit_rle(__sm_emitter_t *e, __sm_idx_t start, size_t capacity,
 		if (!__sm_append_ones_chunks(e->resultp, start, full, full)) {
 			return (false);
 		}
-		e->rle_start = start;
-		e->rle_end = (size_t)start + full;
-		e->rle_len = full;
-		e->have_rle = true;
+		e->run_start = start;
+		e->run_end = (size_t)start + full;
+		e->run_len = full;
+		e->have_run = true;
 	}
 
 	const size_t rem = length - full;
@@ -3888,11 +3885,11 @@ __sm_emit_rle(__sm_emitter_t *e, __sm_idx_t start, size_t capacity,
 		    ~(__sm_bitvec_t)0 :
 		    (((__sm_bitvec_t)1 << n) - 1);
 	}
-	/* The remainder starts exactly where the RLE part ended, so it is
-	 * outside that chunk's span; clear the marker so the assertion in
+	/* The remainder starts exactly where the run part ended, so it is
+	 * outside that run's span; clear the marker so the assertion in
 	 * __sm_emit_words (which forbids a start *inside* the span) is not
 	 * confused by the boundary case. */
-	e->have_rle = false;
+	e->have_run = false;
 	return (__sm_emit_words(e, (__sm_idx_t)((size_t)start + full), w, c));
 }
 
@@ -3905,13 +3902,14 @@ __sm_emit_rle(__sm_emitter_t *e, __sm_idx_t start, size_t capacity,
  * time via sm_add -- so a single [0, 2^31) run cost 2^31 add calls and
  * the amplification DoS lived here, not in the run reader.  A run is
  * instead split at chunk boundaries: a sub-chunk head goes to the words
- * path, the whole output chunks it fills go out as RLE, and the
- * sub-chunk tail is handled by __sm_emit_rle's own remainder path.
+ * path, the whole output chunks it fills go out as all-ONES sparse
+ * chunks, and the sub-chunk tail is handled by __sm_emit_ones_run's own
+ * remainder path.
  *
  * runs are delivered ascending and non-overlapping, so consecutive
  * emits for the same output chunk merge in __sm_emit_words and each
  * output chunk is appended exactly once.  Capacity stays chunk-aligned
- * (see __sm_emit_rle) so the coalesce pass never walks off the buffer.
+ * (see __sm_emit_ones_run) so the coalesce pass never walks off the buffer.
  */
 static bool
 __sm_emit_run(__sm_emitter_t *e, uint64_t lo, uint64_t hi)
@@ -3932,7 +3930,7 @@ __sm_emit_run(__sm_emitter_t *e, uint64_t lo, uint64_t hi)
 		__sm_bitvec_t w[32];
 		int c[32];
 		memset(w, 0, sizeof(w));
-		/* Full 32-slot capacity, matching __sm_expand_rle_as_words: a
+		/* Full 32-slot capacity: a
 		 * sparse chunk with front slots marked NONE (cap 0) instead of
 		 * ZEROS confuses the reader, which then finds only the first set
 		 * bit.  Every emitted sparse chunk claims the whole 2048-bit
@@ -3955,11 +3953,12 @@ __sm_emit_run(__sm_emitter_t *e, uint64_t lo, uint64_t hi)
 		return (true);
 	}
 
-	/* body_lo is now chunk-aligned; __sm_emit_rle emits the whole
-	 * output chunks as RLE and forwards its own sub-chunk tail to the
-	 * words path.  capacity == length keeps the RLE chunk-aligned. */
+	/* body_lo is now chunk-aligned; __sm_emit_ones_run emits the whole
+	 * output chunks as all-ONES sparse chunks and forwards its own
+	 * sub-chunk tail to the words path.  capacity == length keeps the
+	 * run chunk-aligned. */
 	const size_t len = (size_t)(hi - body_lo);
-	return (__sm_emit_rle(e, (__sm_idx_t)body_lo, len, len));
+	return (__sm_emit_ones_run(e, (__sm_idx_t)body_lo, len, len));
 }
 
 sm_t *
@@ -4510,16 +4509,17 @@ sm_singleton_member(const sm_t *map)
  * Maximal-run iterator.
  *
  * The set-algebra and hashing helpers below used to walk bit-by-bit via
- * sm_next_member, making them O(cardinality): a single 24-byte RLE
- * chunk declaring a 2^31-bit run turned sm_xor / sm_hash / the
+ * sm_next_member, making them O(cardinality): a run of set bits stored
+ * as a stretch of all-ONES sparse chunks (each 8 bytes, declaring a
+ * full 2048-bit window) turned sm_xor / sm_hash / the
  * *_cardinality family / sm_jaccard_index / sm_extract_range into
  * multi-second (or, for sm_split, non-terminating) loops on an
  * attacker-sized input.
  *
  * This iterator instead yields half-open runs [lo, hi) of set bits, so
- * its cost tracks the ENCODED size: an RLE chunk is one run no matter
- * how long, and a sparse chunk yields at most a chunk's worth of runs
- * (<= 2048 bits, physically present).
+ * its cost tracks the ENCODED size: a stretch of adjacent all-ONES
+ * sparse chunks yields one run, and a partial sparse chunk yields at
+ * most a chunk's worth of runs (<= 2048 bits, physically present).
  *
  * Runs are decomposed per chunk and are NOT merged across chunk
  * boundaries.  That is deliberate: chunk windows are fixed 2048-aligned
@@ -4658,8 +4658,9 @@ __sm_run_next(__sm_run_iter_t *it, uint64_t *lo, uint64_t *hi)
 /*
  * The cardinality / set-algebra / hashing helpers below walk maps
  * run-by-run (see __sm_run_iter_t) rather than bit-by-bit, so their
- * cost tracks the encoded size, not the popcount.  A 2^31-bit RLE run
- * is a single run.
+ * cost tracks the encoded size, not the popcount.  A run stored as a
+ * stretch of adjacent all-ONES sparse chunks decomposes into a single
+ * run.
  */
 
 /*
@@ -5866,16 +5867,13 @@ sm_intersection(const sm_t *a, const sm_t *b)
 /**
  * @brief Emit set bits from a sparse chunk within [from, to) into result.
  *
- * Uses expand-mask-encode for bulk processing.  The is_rle parameter is
- * retained for call-site compatibility but is always false in this
- * RLE-free build (no chunk is ever RLE).
+ * Uses expand-mask-encode for bulk processing.  Every chunk is sparse in
+ * this RLE-free build.
  */
 static bool
-__sm_emit_chunk_bits(sm_t **resultp, const __sm_chunk_t *chunk, bool is_rle,
+__sm_emit_chunk_bits(sm_t **resultp, const __sm_chunk_t *chunk,
     __sm_idx_t chunk_start, size_t from, size_t to)
 {
-	(void)is_rle;
-	__sm_assert(!is_rle);
 	if (from >= to)
 		return (true);
 
@@ -5978,7 +5976,6 @@ sm_difference(const sm_t *a, const sm_t *b)
 		const __sm_idx_t a_start = __sm_load_idx((const uint8_t *)ap);
 		__sm_chunk_t a_chunk;
 		__sm_chunk_init(&a_chunk, ap + SM_SIZEOF_OVERHEAD);
-		const bool a_rle = __sm_chunk_is_rle(&a_chunk);
 		const size_t a_cap_bits = __sm_chunk_get_capacity(&a_chunk);
 		const size_t a_size = __sm_chunk_get_size(&a_chunk);
 		const size_t a_end = (size_t)a_start + a_cap_bits;
@@ -6012,7 +6009,6 @@ sm_difference(const sm_t *a, const sm_t *b)
 			    __sm_load_idx((const uint8_t *)bp);
 			__sm_chunk_t b_chunk;
 			__sm_chunk_init(&b_chunk, bp + SM_SIZEOF_OVERHEAD);
-			const bool b_rle = __sm_chunk_is_rle(&b_chunk);
 			const size_t b_cap_bits =
 			    __sm_chunk_get_capacity(&b_chunk);
 			const size_t b_size = __sm_chunk_get_size(&b_chunk);
@@ -6037,7 +6033,7 @@ sm_difference(const sm_t *a, const sm_t *b)
 			(void)ov_end; /* overlap fully consumes a below */
 
 			/* Emit a's surviving bits in the gap [a_cursor, ov_start) */
-			if (!__sm_emit_chunk_bits(&result, &a_chunk, a_rle,
+			if (!__sm_emit_chunk_bits(&result, &a_chunk,
 			        a_start, a_cursor, ov_start)) {
 				sm_free(result);
 				return (NULL);
@@ -6045,8 +6041,7 @@ sm_difference(const sm_t *a, const sm_t *b)
 
 			/* Process overlap: every chunk is sparse and two
 			 * overlapping chunks share the same aligned start. */
-			(void)b_rle;
-			__sm_assert(!a_rle && !b_rle && a_start == b_start);
+			__sm_assert(a_start == b_start);
 			{
 				__sm_bitvec_t aw[32], bw[32];
 				int ac[32], bc[32];
@@ -6096,7 +6091,7 @@ sm_difference(const sm_t *a, const sm_t *b)
 
 		/* Emit remaining a bits [a_cursor, a_end) that had no b overlap */
 		if (a_cursor < a_end) {
-			if (!__sm_emit_chunk_bits(&result, &a_chunk, a_rle,
+			if (!__sm_emit_chunk_bits(&result, &a_chunk,
 			        a_start, a_cursor, a_end)) {
 				sm_free(result);
 				return (NULL);
@@ -6186,7 +6181,6 @@ sm_union(const sm_t *a, const sm_t *b)
 		const __sm_idx_t a_start = __sm_load_idx((const uint8_t *)ap);
 		__sm_chunk_t a_chunk;
 		__sm_chunk_init(&a_chunk, ap + SM_SIZEOF_OVERHEAD);
-		const bool a_rle = __sm_chunk_is_rle(&a_chunk);
 		const size_t a_cap_bits = __sm_chunk_get_capacity(&a_chunk);
 		const size_t a_size = __sm_chunk_get_size(&a_chunk);
 		const size_t a_end = (size_t)a_start + a_cap_bits;
@@ -6199,7 +6193,6 @@ sm_union(const sm_t *a, const sm_t *b)
 		const __sm_idx_t b_start = __sm_load_idx((const uint8_t *)bp);
 		__sm_chunk_t b_chunk;
 		__sm_chunk_init(&b_chunk, bp + SM_SIZEOF_OVERHEAD);
-		const bool b_rle = __sm_chunk_is_rle(&b_chunk);
 		const size_t b_cap_bits = __sm_chunk_get_capacity(&b_chunk);
 		const size_t b_size = __sm_chunk_get_size(&b_chunk);
 		const size_t b_end = (size_t)b_start + b_cap_bits;
@@ -6220,7 +6213,7 @@ sm_union(const sm_t *a, const sm_t *b)
 					goto fail;
 			} else {
 				if (!__sm_emit_chunk_bits(&result, &a_chunk,
-				        a_rle, a_start, a_cursor, a_end))
+				        a_start, a_cursor, a_end))
 					goto fail;
 			}
 			ap += SM_SIZEOF_OVERHEAD + a_size;
@@ -6236,7 +6229,7 @@ sm_union(const sm_t *a, const sm_t *b)
 					goto fail;
 			} else {
 				if (!__sm_emit_chunk_bits(&result, &b_chunk,
-				        b_rle, b_start, b_cursor, b_end))
+				        b_start, b_cursor, b_end))
 					goto fail;
 			}
 			bp += SM_SIZEOF_OVERHEAD + b_size;
@@ -6254,8 +6247,10 @@ sm_union(const sm_t *a, const sm_t *b)
 
 		/* ---- Fast path: both sparse, aligned ---- */
 		/* When aligned, handle the full chunk with per-cursor masking.
-       This avoids creating separate pre-overlap chunks at the same start. */
-		if (!a_rle && !b_rle && a_start == b_start) {
+       This avoids creating separate pre-overlap chunks at the same start.
+       Every chunk is sparse and two overlapping chunks share the same
+       aligned start, so this path always applies. */
+		if (a_start == b_start) {
 			__sm_bitvec_t aw[SM_FLAGS_PER_INDEX],
 			    bw[SM_FLAGS_PER_INDEX];
 			int ac[SM_FLAGS_PER_INDEX], bc[SM_FLAGS_PER_INDEX];
@@ -6321,10 +6316,10 @@ sm_union(const sm_t *a, const sm_t *b)
 
 		} else {
 			/*
-			 * RLE-free build: every chunk is sparse, and two
-			 * overlapping sparse chunks share the same aligned
-			 * start, so the fast path above always applies.  This
-			 * arm (mixed / misaligned / both-RLE) is unreachable.
+			 * Every chunk is sparse, and two overlapping sparse
+			 * chunks share the same aligned start, so the fast path
+			 * above always applies.  This arm (mixed / misaligned)
+			 * is unreachable.
 			 */
 			__sm_assert(false && "union: non-aligned overlap in sparse-only build");
 			goto fail;
@@ -6339,9 +6334,8 @@ sm_union(const sm_t *a, const sm_t *b)
 		const size_t sz = __sm_chunk_get_size(&c);
 		if (a_cursor > 0 && a_cursor > (size_t)start) {
 			/* Partially consumed: emit only remaining bits. */
-			const bool rle = __sm_chunk_is_rle(&c);
 			const size_t cap_bits = __sm_chunk_get_capacity(&c);
-			if (!__sm_emit_chunk_bits(&result, &c, rle, start,
+			if (!__sm_emit_chunk_bits(&result, &c, start,
 			        a_cursor, (size_t)start + cap_bits))
 				goto fail;
 		} else {
@@ -6358,9 +6352,8 @@ sm_union(const sm_t *a, const sm_t *b)
 		__sm_chunk_init(&c, bp + SM_SIZEOF_OVERHEAD);
 		const size_t sz = __sm_chunk_get_size(&c);
 		if (b_cursor > 0 && b_cursor > (size_t)start) {
-			const bool rle = __sm_chunk_is_rle(&c);
 			const size_t cap_bits = __sm_chunk_get_capacity(&c);
-			if (!__sm_emit_chunk_bits(&result, &c, rle, start,
+			if (!__sm_emit_chunk_bits(&result, &c, start,
 			        b_cursor, (size_t)start + cap_bits))
 				goto fail;
 		} else {
@@ -6684,7 +6677,7 @@ __sm_rank_vec(sm_t *map, uint64_t begin, uint64_t end, bool value,
 	 *
 	 * __sm_chunk_rank does the per-chunk work (it takes from/to
 	 * positions relative to the chunk start and is validated by the
-	 * get_position / RLE property tests).  We only ever ask it for
+	 * get_position property tests).  We only ever ask it for
 	 * set bits here; unset is derived once at the end.
 	 */
 	const size_t count = __sm_get_chunk_count(map);

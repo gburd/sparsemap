@@ -24,10 +24,15 @@
 
 /**
  * @file sparsemap.h
- * @brief A sparse, compressed bitmap with run-length encoding (RLE).
+ * @brief A sparse, compressed bitmap (RLE-free variant).
  *
- * Sparsemap is a mutable, resizable, compressed bitmap optimized for workloads
- * that contain long runs of consecutive set or unset bits.
+ * Sparsemap is a mutable, resizable, compressed bitmap.  This is the
+ * **RLE-free** sibling of the library: it stores only sparse chunks (no
+ * run-length-encoded chunks) and additionally supports a compact
+ * **small-set** mode for sets whose indices all lie near zero.  It reads
+ * and writes sparse-only maps and **rejects** any serialized stream that
+ * carries an RLE-encoded chunk (see "RLE input rejection" below and
+ * docs/NO-RLE.md).
  *
  * ## Architecture
  *
@@ -37,7 +42,7 @@
  * (`uint64_t`).
  *
  * **Tier 1 (chunks):** Groups of bit vectors are managed by chunk maps.
- * Chunks use one of two internal encodings:
+ * A chunk uses the sparse encoding:
  *
  *   - **Sparse encoding:** A descriptor word holds 2-bit flags for up to 32
  *     bit vectors (2048 bits total).  Only vectors with a mix of set and unset
@@ -49,30 +54,39 @@
  *         10  mixed      -- vector stored after the descriptor
  *         01  unused     -- reduces chunk capacity
  *
- *   - **RLE encoding:** A single 64-bit descriptor represents a contiguous
- *     run of set bits starting at index 0 within the chunk:
+ *   A run of set bits longer than one 2048-bit chunk window is stored as
+ *   a stretch of adjacent all-ONES sparse chunks (descriptor ~0, no
+ *   payload words), never as a single RLE descriptor.
  *
- *         Bits 63:62 = 01  (RLE flag)
- *         Bits 61:31       chunk capacity in bits  (max ~2 billion)
- *         Bits 30:0        run length in bits      (max ~2 billion)
- *
- *     Bits [0, length) are set; bits [length, capacity) are unset.
+ *   The descriptor top-two-bits pattern `01` is the RLE flag of the
+ *   sibling RLE variant.  This build never emits it and cannot represent
+ *   such a chunk, so sm_validate() (and thus sm_open / sm_deserialize)
+ *   rejects any map that contains one.
  *
  * **Tier 2 (map):** The top-level sparsemap manages an ordered sequence of
  * chunks, each tagged with a 4-byte starting offset.  The map grows and
  * shrinks the underlying byte buffer as chunks are added or removed.
  *
+ * ## Small-set mode
+ *
+ * When every set index is below a small threshold, the map instead
+ * stores a bare `uint64_t` bitmapword[] from bit 0 (bit i in word i/64),
+ * exactly like PostgreSQL's Bitmapset, behind an 8-byte header.  This
+ * matches or beats Bitmapset's footprint for near-zero sets while chunk
+ * mode still wins once indices spread.  The map **promotes**
+ * small->chunk when an added index leaves the small span (or the small
+ * form would exceed chunk form) and **demotes** chunk->small when
+ * removals bring every index back under the threshold; transitions are
+ * transparent and lossless.  Every public `sm_*` function behaves
+ * identically in both modes.  See docs/NO-RLE.md.
+ *
  * ## Encoding transitions
  *
  * - A sparse chunk whose vectors are all ones (2048 consecutive set bits)
- *   transitions to RLE when the next adjacent bit is set, extending the run
- *   beyond 2048.
- * - Modifying bits inside an RLE run (clearing a bit in the middle, for
- *   example) causes the RLE chunk to be separated back into one or more
- *   sparse chunks plus (optionally) smaller RLE chunks for the remaining
- *   contiguous runs.
- * - Adjacent chunks (sparse or RLE) that form a contiguous run of set bits
- *   are coalesced into a single RLE chunk automatically.
+ *   extends into the next chunk as another all-ONES sparse chunk when the
+ *   next adjacent bit is set; there is no RLE transition.
+ * - Clearing a bit inside such a run simply rewrites the affected sparse
+ *   chunk in place.
  *
  * ## Thread safety
  *
@@ -143,6 +157,17 @@
  * whose lifetime is intertwined with someone else's: the result is
  * self-contained, growable, and disposable with sm_free() or libc
  * free().
+ *
+ * ## RLE input rejection
+ *
+ * This variant reads and writes **sparse-only** maps.  The sibling RLE
+ * variant marks a run-length-encoded chunk with the descriptor top-two-
+ * bits pattern `01`.  This build cannot represent such a chunk, so
+ * sm_validate() rejects any map that contains one; sm_open() and
+ * sm_deserialize() therefore return `NULL` (or, per the S1 validation
+ * contract, an empty map) for an RLE-encoded stream rather than crashing
+ * or silently mis-decoding.  A same-endian sparse-only stream written by
+ * either variant round-trips through the other.  See docs/NO-RLE.md.
  */
 #ifndef SPARSEMAP_H
 #define SPARSEMAP_H
@@ -825,9 +850,8 @@ uint64_t sm_assign(sm_t *map, uint64_t idx, bool value);
  * If the buffer is full, returns SM_IDX_MAX and sets errno to ENOSPC.
  * Grow the buffer with sm_set_data_size() and retry.
  *
- * Setting a bit may trigger chunk coalescing: if the new bit extends a
- * contiguous run of set bits across chunk boundaries, adjacent chunks may be
- * merged into a single RLE chunk.
+ * Setting a bit may extend a contiguous run of set bits across chunk
+ * boundaries; such a run is stored as adjacent all-ONES sparse chunks.
  *
  * Note: sm_add takes no read cursor, so building a map by calling it in
  * an ascending loop is O(N^2) (each call rewalks the chunk list).
@@ -899,9 +923,9 @@ uint64_t sm_add_grow_cursor(sm_t **map, uint64_t idx, sm_cursor_t *cur);
 
 /** @brief Clear the bit at \a idx (set to 0).
  *
- * Clearing a bit inside an RLE run causes the RLE chunk to be separated
- * into sparse and/or smaller RLE chunks.  This may temporarily increase
- * buffer usage even though a bit was removed.
+ * Clearing a bit rewrites the affected sparse chunk in place.  In
+ * small-set mode it clears the corresponding bitmapword and may demote
+ * the map back to a smaller form.
  *
  * If the buffer is full (insufficient space for the new chunk layout),
  * returns SM_IDX_MAX and sets errno to ENOSPC.
@@ -973,7 +997,7 @@ size_t sm_rank(sm_t *map, uint64_t x, uint64_t y, bool value);
  * select(map, 0, true) returns the index of the first set bit.
  * select(map, 2, false) returns the index of the third unset bit.
  *
- * For RLE chunks this is O(1); for sparse chunks it scans bit vectors.
+ * For sparse chunks this scans bit vectors; an all-ONES chunk is O(1).
  *
  * @param[in] map    The sparsemap to query.
  * @param[in] n      Number of matching bits to skip (0 = first match).
@@ -1119,9 +1143,8 @@ sm_t *sm_difference(const sm_t *a, const sm_t *b);
  * When \a idx is SM_IDX_MAX, the map is split at the median set
  * bit, producing two halves of roughly equal cardinality.
  *
- * If the split crosses an RLE chunk, that chunk is first separated into
- * sparse/RLE pieces, then the split proceeds on the resulting sparse chunk.
- * Adjacent chunks that form contiguous runs are coalesced after the split.
+ * The split walks chunk by chunk (O(chunks), not O(bits)); a run stored
+ * as all-ONES sparse chunks is split at a chunk boundary in place.
  *
  * @param[in,out] map    Source map (retains [start, idx)).
  * @param[in]     idx    Split point, or SM_IDX_MAX for even split.
@@ -1171,8 +1194,8 @@ bool sm_is_empty(const sm_t *map);
  *
  * Two maps are equal iff every bit set in one is also set in the other.
  * The on-disk representations need not be byte-identical: equality is
- * defined by content, not encoding (so an RLE chunk and an equivalent
- * sparse chunk encoding the same bits compare equal).
+ * defined by content, not encoding (so a small-set map and an equivalent
+ * chunk-mode map encoding the same bits compare equal).
  *
  * @param[in] a  First sparsemap (may be NULL, treated as empty).
  * @param[in] b  Second sparsemap (may be NULL, treated as empty).
@@ -1475,7 +1498,7 @@ sm_t *sm_create_from_array(const uint64_t *arr, size_t n);
 /** @brief Stable content-based hash of the bit set.
  *
  * Two maps that compare equal under sm_equals() always hash to the
- * same value, regardless of internal RLE-vs-sparse encoding choices.
+ * same value, regardless of internal small-set-vs-chunk encoding choices.
  */
 uint64_t sm_hash(const sm_t *map);
 
@@ -1610,12 +1633,12 @@ bool sm_validate(const sm_t *map);
  */
 typedef struct sm_stats {
 	size_t chunks_total;      /**< total chunks */
-	size_t chunks_rle;        /**< chunks using RLE encoding */
+	size_t chunks_rle;        /**< always 0 (kept for API compatibility) */
 	size_t chunks_sparse;     /**< chunks using sparse encoding */
 	size_t bytes_used;        /**< sm_get_size(map) */
 	size_t bytes_capacity;    /**< sm_get_capacity(map) */
 	uint64_t bits_set;        /**< sm_cardinality(map) */
-	uint64_t bits_in_rle;     /**< bits set within RLE chunks */
+	uint64_t bits_in_rle;     /**< always 0 (kept for API compatibility) */
 	uint64_t bits_in_sparse;  /**< bits set within sparse chunks */
 	double bytes_per_set_bit; /**< bytes_used / bits_set */
 } sm_stats_t;
