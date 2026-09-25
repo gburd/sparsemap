@@ -5546,13 +5546,16 @@ __sm_emit_rle(__sm_emitter_t *e, __sm_idx_t start, size_t capacity,
 	__sm_bitvec_t w[32];
 	int c[32];
 	memset(w, 0, sizeof(w));
-	memset(c, 0, sizeof(c));
+	/* Full 32-slot capacity (see __sm_emit_run): a partial trailing run
+	 * still claims the whole chunk window, encoding the unset tail slots
+	 * as ZEROS rather than NONE. */
+	for (int i = 0; i < 32; i++)
+		c[i] = 1;
 	for (size_t bit = 0; bit < rem; bit += SM_BITS_PER_VECTOR) {
 		const size_t slot = bit / SM_BITS_PER_VECTOR;
 		const size_t n = (rem - bit < SM_BITS_PER_VECTOR) ?
 		    rem - bit :
 		    SM_BITS_PER_VECTOR;
-		c[slot] = 1;
 		w[slot] = (n == SM_BITS_PER_VECTOR) ?
 		    ~(__sm_bitvec_t)0 :
 		    (((__sm_bitvec_t)1 << n) - 1);
@@ -5563,6 +5566,72 @@ __sm_emit_rle(__sm_emitter_t *e, __sm_idx_t start, size_t capacity,
 	 * confused by the boundary case. */
 	e->have_rle = false;
 	return (__sm_emit_words(e, (__sm_idx_t)((size_t)start + full), w, c));
+}
+
+/*
+ * Emit an arbitrary half-open run [lo, hi) of set bits through the
+ * ordered emitter in O(output chunks), NOT O(hi-lo).
+ *
+ * The set-algebra ops (sm_xor, sm_extract_range) consume operand runs
+ * with __sm_run_next and used to materialise each survivor one bit at a
+ * time via sm_add -- so a single [0, 2^31) run cost 2^31 add calls and
+ * the amplification DoS lived here, not in the run reader.  A run is
+ * instead split at chunk boundaries: a sub-chunk head goes to the words
+ * path, the whole output chunks it fills go out as RLE, and the
+ * sub-chunk tail is handled by __sm_emit_rle's own remainder path.
+ *
+ * runs are delivered ascending and non-overlapping, so consecutive
+ * emits for the same output chunk merge in __sm_emit_words and each
+ * output chunk is appended exactly once.  Capacity stays chunk-aligned
+ * (see __sm_emit_rle) so the coalesce pass never walks off the buffer.
+ */
+static bool
+__sm_emit_run(__sm_emitter_t *e, uint64_t lo, uint64_t hi)
+{
+	if (lo >= hi) {
+		return (true);
+	}
+
+	/* Sub-chunk head: bits from lo up to the next chunk boundary. */
+	const uint64_t aligned = ((lo + SM_CHUNK_MAX_CAPACITY - 1) /
+	                             SM_CHUNK_MAX_CAPACITY) *
+	    SM_CHUNK_MAX_CAPACITY;
+	uint64_t body_lo = lo;
+	if (aligned > lo) {
+		const uint64_t head_hi = aligned < hi ? aligned : hi;
+		const __sm_idx_t chunk_start =
+		    (__sm_idx_t)(lo - (lo % SM_CHUNK_MAX_CAPACITY));
+		__sm_bitvec_t w[32];
+		int c[32];
+		memset(w, 0, sizeof(w));
+		/* Full 32-slot capacity, matching __sm_expand_rle_as_words: a
+		 * sparse chunk with front slots marked NONE (cap 0) instead of
+		 * ZEROS confuses the reader, which then finds only the first set
+		 * bit.  Every emitted sparse chunk claims the whole 2048-bit
+		 * window and encodes absent slots as ZEROS. */
+		for (int i = 0; i < 32; i++)
+			c[i] = 1;
+		for (uint64_t bit = lo; bit < head_hi; bit++) {
+			const uint64_t off = bit - chunk_start;
+			const size_t slot = off / SM_BITS_PER_VECTOR;
+			w[slot] |= (__sm_bitvec_t)1
+			    << (off % SM_BITS_PER_VECTOR);
+		}
+		if (!__sm_emit_words(e, chunk_start, w, c)) {
+			return (false);
+		}
+		body_lo = head_hi;
+	}
+
+	if (body_lo >= hi) {
+		return (true);
+	}
+
+	/* body_lo is now chunk-aligned; __sm_emit_rle emits the whole
+	 * output chunks as RLE and forwards its own sub-chunk tail to the
+	 * words path.  capacity == length keeps the RLE chunk-aligned. */
+	const size_t len = (size_t)(hi - body_lo);
+	return (__sm_emit_rle(e, (__sm_idx_t)body_lo, len, len));
 }
 
 sm_t *
@@ -6661,34 +6730,17 @@ sm_add_many_grow(sm_t **map, const uint64_t *arr, size_t n)
 }
 
 /*
- * Set every bit in [lo, hi) on a result map, growing geometrically on
- * ENOSPC.  Used by the run-based set-algebra helpers, whose runs are
- * emitted in ascending, non-overlapping order.  A cursor keeps the
- * per-bit sm_add O(1) across a contiguous run; the cost is O(hi-lo),
- * i.e. the size of the produced output, never the operands' popcount.
+ * Set every bit in [lo, hi) on a result map that is being built through
+ * the ordered emitter (__sm_emitter_t).  Runs arrive ascending and
+ * non-overlapping, so this is O(output chunks): whole chunks go out as
+ * RLE and only the sub-chunk head/tail touch the words path.  This is
+ * where the S4 amplification lived -- the old body added one bit at a
+ * time, so a single [0, 2^31) survivor cost 2^31 sm_add calls.
  */
 static bool
-__sm_add_run_grow(sm_t **map, uint64_t lo, uint64_t hi)
+__sm_add_run_grow(__sm_emitter_t *e, uint64_t lo, uint64_t hi)
 {
-	sm_cursor_t cur = SM_CURSOR_INIT;
-	for (uint64_t i = lo; i < hi; i++) {
-		int retries = 0;
-		sm_t *before = *map;
-		while (__sm_add_c(*map, i, &cur) == SM_IDX_MAX) {
-			if (++retries > 16)
-				return (false);
-			size_t new_cap = sm_get_capacity(*map) * 2;
-			if (new_cap < 4096)
-				new_cap = 4096;
-			sm_t *grown = sm_set_data_size(*map, NULL, new_cap);
-			if (grown == NULL)
-				return (false);
-			*map = grown;
-		}
-		if (*map != before)
-			cur = (sm_cursor_t)SM_CURSOR_INIT;
-	}
-	return (true);
+	return (__sm_emit_run(e, lo, hi));
 }
 
 void
@@ -6764,7 +6816,11 @@ sm_xor(const sm_t *a, const sm_t *b)
 	/* Walk both maps run-by-run and emit the symmetric-difference
 	 * runs (bits set in exactly one map).  Cost tracks the encoded
 	 * size of the operands, not their popcount, so a 2^31-bit run is
-	 * one iteration rather than 2^31. */
+	 * one iteration rather than 2^31.  Each survivor is emitted whole
+	 * through the ordered emitter, so a giant run costs O(chunks). */
+	__sm_emitter_t em;
+	memset(&em, 0, sizeof(em));
+	em.resultp = &r;
 	__sm_run_iter_t ia, ib;
 	__sm_run_iter_init(&ia, a);
 	__sm_run_iter_init(&ib, b);
@@ -6802,7 +6858,7 @@ sm_xor(const sm_t *a, const sm_t *b)
 		}
 		if (in_a != in_b) {
 			/* Bits [pos, next) are in exactly one map. */
-			if (!__sm_add_run_grow(&r, pos, next)) {
+			if (!__sm_add_run_grow(&em, pos, next)) {
 				sm_free(r);
 				return (NULL);
 			}
@@ -6813,6 +6869,12 @@ sm_xor(const sm_t *a, const sm_t *b)
 		if (have_b && pos >= bhi)
 			have_b = __sm_run_next(&ib, &blo, &bhi);
 	}
+	if (!__sm_emit_flush(&em)) {
+		sm_free(r);
+		return (NULL);
+	}
+	r = *em.resultp;
+	__sm_coalesce_map(r);
 	if (sm_is_empty(r)) {
 		sm_free(r);
 		return (NULL);
@@ -6855,7 +6917,11 @@ sm_extract_range(const sm_t *map, uint64_t lo, uint64_t hi)
 
 	/* Walk set-bit runs and add each run's intersection with [lo, hi).
 	 * Run-based, so a 2^31-bit run outside the window costs one
-	 * iteration rather than 2^31 bit lookups. */
+	 * iteration rather than 2^31 bit lookups, and a run inside the
+	 * window is emitted whole in O(chunks) via the ordered emitter. */
+	__sm_emitter_t em;
+	memset(&em, 0, sizeof(em));
+	em.resultp = &r;
 	__sm_run_iter_t it;
 	__sm_run_iter_init(&it, map);
 	uint64_t rlo = 0, rhi = 0;
@@ -6866,11 +6932,17 @@ sm_extract_range(const sm_t *map, uint64_t lo, uint64_t hi)
 			break; /* runs are ascending; nothing more overlaps */
 		const uint64_t clip_lo = rlo < lo ? lo : rlo;
 		const uint64_t clip_hi = rhi > hi ? hi : rhi;
-		if (!__sm_add_run_grow(&r, clip_lo, clip_hi)) {
+		if (!__sm_add_run_grow(&em, clip_lo, clip_hi)) {
 			sm_free(r);
 			return (NULL);
 		}
 	}
+	if (!__sm_emit_flush(&em)) {
+		sm_free(r);
+		return (NULL);
+	}
+	r = *em.resultp;
+	__sm_coalesce_map(r);
 
 	if (sm_is_empty(r)) {
 		sm_free(r);

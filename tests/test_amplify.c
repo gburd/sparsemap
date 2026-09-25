@@ -131,11 +131,84 @@ main(void)
 	sm_t *xr = NULL;
 	TIME_OP("xor", { xr = sm_xor(big, big2); });
 	CHECK(xr == NULL); /* identical -> empty symmetric difference */
+
+	/* The real amplification test: xor a 2^31-bit run against a small
+	 * map so the OUTPUT is itself a 2^31-bit run.  Pre-fix this emitted
+	 * the survivor one bit at a time and took tens of seconds; it must
+	 * now finish in well under 10 ms and be correct. */
+	sm_t *xr_big = NULL;
+	TIME_OP("xor_big_nonempty", { xr_big = sm_xor(big, small); });
+	CHECK(xr_big != NULL);
+	CHECK(sm_validate(xr_big));
+	/* small = {5, 1000000, 2000000000}; all three lie inside [0,2^31-1),
+	 * so xor clears exactly those three bits from the giant run. */
+	CHECK(sm_cardinality(xr_big) == BIG_LEN - 3);
+	CHECK(!sm_contains(xr_big, 5, NULL));
+	CHECK(!sm_contains(xr_big, 1000000, NULL));
+	CHECK(!sm_contains(xr_big, 2000000000ULL, NULL));
+	CHECK(sm_contains(xr_big, 4, NULL));
+	CHECK(sm_contains(xr_big, 6, NULL));
+	CHECK(sm_contains(xr_big, 999999, NULL));
+	CHECK(sm_contains(xr_big, 1000001, NULL));
+	CHECK(sm_contains(xr_big, BIG_LEN - 1, NULL));
+	/* Survives a serialize -> deserialize round-trip. */
+	{
+		size_t n = sm_serialized_size(xr_big);
+		CHECK(n > 0);
+		uint8_t *buf = malloc(n);
+		CHECK(buf != NULL);
+		CHECK(sm_serialize(xr_big, buf, n) == n);
+		sm_t *rt = sm_deserialize(buf, n);
+		CHECK(rt != NULL);
+		CHECK(sm_validate(rt));
+		CHECK(sm_cardinality(rt) == BIG_LEN - 3);
+		/* Compare encoded bytes rather than sm_equals(), which walks
+		 * bit-by-bit and would itself take O(2^31) on this map. */
+		size_t n2 = sm_serialized_size(rt);
+		CHECK(n2 == n);
+		uint8_t *buf2 = malloc(n2);
+		CHECK(buf2 != NULL);
+		CHECK(sm_serialize(rt, buf2, n2) == n2);
+		CHECK(memcmp(buf, buf2, n) == 0);
+		free(buf2);
+		sm_free(rt);
+		free(buf);
+	}
+	sm_free(xr_big);
+
 	/* extract a small window out of the huge run. */
 	sm_t *ex = NULL;
 	TIME_OP("extract_range", { ex = sm_extract_range(big, 100, 200); });
 	CHECK(ex != NULL && sm_cardinality(ex) == 100);
 	sm_free(ex);
+
+	/* The real range-amplification test: extract a window that spans a
+	 * large slice of the run (crossing many 2048-bit chunk boundaries).
+	 * Pre-fix this materialised the clipped run bit-by-bit and took
+	 * seconds; it must now be fast and exact. */
+	sm_t *ex_big = NULL;
+	TIME_OP("extract_range_big",
+	    { ex_big = sm_extract_range(big, 0, 1000000); });
+	CHECK(ex_big != NULL);
+	CHECK(sm_validate(ex_big));
+	CHECK(sm_cardinality(ex_big) == 1000000);
+	CHECK(sm_contains(ex_big, 0, NULL));
+	CHECK(sm_contains(ex_big, 999999, NULL));
+	CHECK(!sm_contains(ex_big, 1000000, NULL));
+	sm_free(ex_big);
+
+	/* An offset window that both starts and ends mid-chunk over the run. */
+	sm_t *ex_mid = NULL;
+	TIME_OP("extract_range_mid",
+	    { ex_mid = sm_extract_range(big, 3000, 500003); });
+	CHECK(ex_mid != NULL);
+	CHECK(sm_validate(ex_mid));
+	CHECK(sm_cardinality(ex_mid) == 497003);
+	CHECK(!sm_contains(ex_mid, 2999, NULL));
+	CHECK(sm_contains(ex_mid, 3000, NULL));
+	CHECK(sm_contains(ex_mid, 500002, NULL));
+	CHECK(!sm_contains(ex_mid, 500003, NULL));
+	sm_free(ex_mid);
 	/* split near the middle of the run. */
 	sm_t *other = sm_create(1 << 16);
 	CHECK(other != NULL);
