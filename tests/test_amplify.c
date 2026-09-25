@@ -49,6 +49,80 @@ make_big_rle(void)
 	return (m);
 }
 
+/* -------------------------------------------------------------------
+ * Reference (pre-rewrite) implementations of sm_equals / sm_compare /
+ * sm_subset_compare, copied verbatim from the bit-by-bit versions they
+ * replaced.  They walk sm_next_member per set bit, so they are
+ * O(cardinality) -- correct on small maps, and the oracle the run-based
+ * rewrite is cross-checked against below.  (They HANG on the 2^31-bit
+ * map, which is exactly what the timing test proves the rewrite fixed.)
+ * ------------------------------------------------------------------- */
+static bool
+ref_equals(const sm_t *a, const sm_t *b)
+{
+	const bool a_empty = (a == NULL) || sm_is_empty((sm_t *)a);
+	const bool b_empty = (b == NULL) || sm_is_empty((sm_t *)b);
+	if (a_empty && b_empty)
+		return (true);
+	if (a_empty != b_empty)
+		return (false);
+	uint64_t ia = sm_next_member(a, SM_IDX_MAX, NULL);
+	uint64_t ib = sm_next_member(b, SM_IDX_MAX, NULL);
+	while (ia != SM_IDX_MAX && ib != SM_IDX_MAX) {
+		if (ia != ib)
+			return (false);
+		ia = sm_next_member(a, ia, NULL);
+		ib = sm_next_member(b, ib, NULL);
+	}
+	return (ia == ib);
+}
+
+static int
+ref_compare(const sm_t *a, const sm_t *b)
+{
+	uint64_t ia = sm_next_member(a, SM_IDX_MAX, NULL);
+	uint64_t ib = sm_next_member(b, SM_IDX_MAX, NULL);
+	while (ia != SM_IDX_MAX && ib != SM_IDX_MAX) {
+		if (ia < ib)
+			return (-1);
+		if (ia > ib)
+			return (1);
+		ia = sm_next_member(a, ia, NULL);
+		ib = sm_next_member(b, ib, NULL);
+	}
+	if (ia == SM_IDX_MAX && ib == SM_IDX_MAX)
+		return (0);
+	return ((ia == SM_IDX_MAX) ? -1 : 1);
+}
+
+static sm_subset_relation_t
+ref_subset_compare(const sm_t *a, const sm_t *b)
+{
+	bool a_subset_b = true;
+	bool b_subset_a = true;
+	uint64_t ia = sm_next_member(a, SM_IDX_MAX, NULL);
+	uint64_t ib = sm_next_member(b, SM_IDX_MAX, NULL);
+	while (ia != SM_IDX_MAX || ib != SM_IDX_MAX) {
+		if (ia == ib) {
+			ia = sm_next_member(a, ia, NULL);
+			ib = sm_next_member(b, ib, NULL);
+		} else if (ia != SM_IDX_MAX && (ib == SM_IDX_MAX || ia < ib)) {
+			a_subset_b = false;
+			ia = sm_next_member(a, ia, NULL);
+		} else {
+			b_subset_a = false;
+			ib = sm_next_member(b, ib, NULL);
+		}
+		if (!a_subset_b && !b_subset_a)
+			return (SM_REL_DIFFERENT);
+	}
+	if (a_subset_b && b_subset_a)
+		return (SM_REL_EQUAL);
+	if (a_subset_b)
+		return (SM_REL_SUBSET_A);
+	return (SM_REL_SUBSET_B);
+}
+
 static double
 elapsed_ms(struct timespec a, struct timespec b)
 {
@@ -215,12 +289,46 @@ main(void)
 	TIME_OP("split", { (void)sm_split(big, 1000000000ULL, other); });
 	sm_free(other);
 
+	/* The last S4 gap: the three public comparison functions used to
+	 * walk bit-by-bit (via sm_next_member) and so hung on a 2^31-bit
+	 * operand.  They are now run-based and must finish well under the
+	 * ceiling.  Use fresh identical 2^31-bit maps (big/big2 were mutated
+	 * by sm_split above): equals is true and compare is 0; small's bits
+	 * all lie inside the run so small is a strict subset (SM_REL_SUBSET_A). */
+	{
+		sm_t *c1 = make_big_rle();
+		sm_t *c2 = make_big_rle();
+		CHECK(c1 != NULL && c2 != NULL);
+		volatile bool eq = false;
+		TIME_OP("equals", { eq = sm_equals(c1, c2); });
+		CHECK(eq == true);
+		volatile int cmp = 99;
+		TIME_OP("compare", { cmp = sm_compare(c1, c2); });
+		CHECK(cmp == 0);
+		volatile sm_subset_relation_t rel = SM_REL_DIFFERENT;
+		TIME_OP("subset_compare",
+		    { rel = sm_subset_compare(small, c1); });
+		CHECK(rel == SM_REL_SUBSET_A);
+		/* Superset direction too, still run-based. */
+		TIME_OP("subset_compare_rev",
+		    { rel = sm_subset_compare(c1, small); });
+		CHECK(rel == SM_REL_SUBSET_B);
+		sm_free(c1);
+		sm_free(c2);
+	}
+
 	sm_free(big);
 	sm_free(big2);
 	sm_free(small);
 
 	/* Correctness cross-check: sm_xor / cardinalities vs the scalar
-	 * bit-by-bit answer on small maps of assorted shapes. */
+	 * bit-by-bit answer, and the run-based sm_equals / sm_compare /
+	 * sm_subset_compare vs their bit-by-bit references, on small maps of
+	 * assorted shapes.  The shape grid crosses empty, single, sparse
+	 * scatter, RLE-length run, chunk-boundary straddle and chunk-aligned
+	 * run against each other, so equal / strict-subset / strict-superset
+	 * / overlapping / disjoint pairings all occur among the 36 pairs. */
+	size_t npairs = 0;
 	for (int sa = 0; sa < 6; sa++) {
 		for (int sb = 0; sb < 6; sb++) {
 			sm_t *a = sm_create(1 << 16);
@@ -259,6 +367,13 @@ main(void)
 			CHECK(sm_union_cardinality(a, b) == s_union);
 			CHECK(sm_intersection_cardinality(a, b) == s_inter);
 			CHECK(sm_xor_cardinality(a, b) == s_xor);
+			/* Run-based comparison ops must match the scalar
+			 * bit-by-bit reference on every shape pair. */
+			CHECK(sm_equals(a, b) == ref_equals(a, b));
+			CHECK(sm_compare(a, b) == ref_compare(a, b));
+			CHECK(sm_subset_compare(a, b) ==
+			    ref_subset_compare(a, b));
+			npairs++;
 			sm_t *x = sm_xor(a, b);
 			size_t xc = x ? sm_cardinality(x) : 0;
 			CHECK(xc == s_xor);
@@ -274,6 +389,47 @@ main(void)
 		}
 	}
 
-	printf("test_amplify: S4 termination + correctness OK\n");
+	/* Explicit edge pairs on top of the shape grid: adjacent runs, an
+	 * exactly-equal pair, disjoint, strict subset, strict superset, and
+	 * RLE-length runs straddling a chunk boundary.  Each is checked
+	 * against the same bit-by-bit reference for all three ops. */
+	{
+		const struct {
+			uint64_t alo, ahi, blo, bhi;
+		} pairs[] = {
+			{ 0, 5, 5, 10 },	    /* adjacent runs, disjoint */
+			{ 0, 100, 0, 100 },	    /* exactly equal */
+			{ 0, 10, 100, 110 },	    /* disjoint, gap */
+			{ 10, 20, 0, 100 },	    /* a strict subset of b */
+			{ 0, 100, 40, 60 },	    /* b strict subset of a */
+			{ 0, 50, 25, 75 },	    /* overlapping */
+			{ 2040, 2060, 2040, 2060 }, /* equal, chunk straddle */
+			{ 2000, 2050, 2050, 2100 }, /* adjacent across boundary */
+			{ 0, 1, 0, 1 },		    /* single-bit equal */
+			{ 0, 1, 1, 2 },		    /* single-bit disjoint */
+		};
+		for (size_t k = 0; k < sizeof(pairs) / sizeof(pairs[0]); k++) {
+			sm_t *a = sm_create(1 << 16);
+			sm_t *b = sm_create(1 << 16);
+			CHECK(a && b);
+			for (uint64_t i = pairs[k].alo; i < pairs[k].ahi; i++)
+				sm_add_grow(&a, i);
+			for (uint64_t i = pairs[k].blo; i < pairs[k].bhi; i++)
+				sm_add_grow(&b, i);
+			CHECK(sm_equals(a, b) == ref_equals(a, b));
+			CHECK(sm_compare(a, b) == ref_compare(a, b));
+			CHECK(sm_subset_compare(a, b) ==
+			    ref_subset_compare(a, b));
+			/* Order antisymmetry: compare(a,b) == -compare(b,a). */
+			CHECK(sm_compare(a, b) == -sm_compare(b, a));
+			npairs++;
+			sm_free(a);
+			sm_free(b);
+		}
+	}
+
+	printf("test_amplify: S4 termination + correctness OK "
+	    "(%zu comparison pairs, 0 mismatches)\n",
+	    npairs);
 	return (0);
 }

@@ -6261,27 +6261,6 @@ sm_prev_member(const sm_t *map, uint64_t prev_idx, sm_cursor_t *cur)
 }
 
 bool
-sm_equals(const sm_t *a, const sm_t *b)
-{
-	const bool a_empty = (a == NULL) || sm_is_empty(a);
-	const bool b_empty = (b == NULL) || sm_is_empty(b);
-	if (a_empty && b_empty)
-		return (true);
-	if (a_empty != b_empty)
-		return (false);
-
-	uint64_t ia = sm_next_member(a, SM_IDX_MAX, NULL);
-	uint64_t ib = sm_next_member(b, SM_IDX_MAX, NULL);
-	while (ia != SM_IDX_MAX && ib != SM_IDX_MAX) {
-		if (ia != ib)
-			return (false);
-		ia = sm_next_member(a, ia, NULL);
-		ib = sm_next_member(b, ib, NULL);
-	}
-	return (ia == ib);
-}
-
-bool
 sm_is_subset(const sm_t *a, const sm_t *b)
 {
 	if (a == NULL || sm_is_empty(a))
@@ -7045,24 +7024,77 @@ sm_hash(const sm_t *map)
 	return (h);
 }
 
+bool
+sm_equals(const sm_t *a, const sm_t *b)
+{
+	const bool a_empty = (a == NULL) || sm_is_empty(a);
+	const bool b_empty = (b == NULL) || sm_is_empty(b);
+	if (a_empty && b_empty)
+		return (true);
+	if (a_empty != b_empty)
+		return (false);
+
+	/* Two sets are equal iff their maximal-run decompositions are the
+	 * identical interval sequence.  Walk both run streams in lockstep
+	 * (see __sm_run_iter_t), so a 2^31-bit run is one comparison rather
+	 * than 2^31 bit lookups. */
+	__sm_run_iter_t ia, ib;
+	__sm_run_iter_init(&ia, a);
+	__sm_run_iter_init(&ib, b);
+	uint64_t alo = 0, ahi = 0, blo = 0, bhi = 0;
+	bool have_a = __sm_run_next(&ia, &alo, &ahi);
+	bool have_b = __sm_run_next(&ib, &blo, &bhi);
+	while (have_a && have_b) {
+		if (alo != blo || ahi != bhi)
+			return (false);
+		have_a = __sm_run_next(&ia, &alo, &ahi);
+		have_b = __sm_run_next(&ib, &blo, &bhi);
+	}
+	return (have_a == have_b);
+}
+
 int
 sm_compare(const sm_t *a, const sm_t *b)
 {
-	/* Lexicographic: walk both lockstep and return the difference at
-	 * the first point of divergence. */
-	uint64_t ia = sm_next_member(a, SM_IDX_MAX, NULL);
-	uint64_t ib = sm_next_member(b, SM_IDX_MAX, NULL);
-	while (ia != SM_IDX_MAX && ib != SM_IDX_MAX) {
-		if (ia < ib)
+	/* Lexicographic order on the ascending member sequences: at the
+	 * first index where the two sequences differ, the map with the
+	 * smaller index sorts first; if one sequence is a proper prefix of
+	 * the other, the shorter one sorts first.  Walk both run streams
+	 * (see __sm_run_iter_t) with a cursor into the current run of each,
+	 * advancing over shared prefixes a whole run at a time, so a
+	 * 2^31-bit run costs O(chunks) rather than O(cardinality). */
+	__sm_run_iter_t ia, ib;
+	__sm_run_iter_init(&ia, a);
+	__sm_run_iter_init(&ib, b);
+	uint64_t alo = 0, ahi = 0, blo = 0, bhi = 0;
+	bool have_a = __sm_run_next(&ia, &alo, &ahi);
+	bool have_b = __sm_run_next(&ib, &blo, &bhi);
+	/* pa/pb are the next unconsumed member of the current a/b run. */
+	uint64_t pa = alo, pb = blo;
+	while (have_a && have_b) {
+		if (pa < pb)
 			return (-1);
-		if (ia > ib)
+		if (pa > pb)
 			return (1);
-		ia = sm_next_member(a, ia, NULL);
-		ib = sm_next_member(b, ib, NULL);
+		/* pa == pb: both runs share consecutive members up to the
+		 * shorter run's end; skip that common prefix at once. */
+		const uint64_t a_rem = ahi - pa;
+		const uint64_t b_rem = bhi - pb;
+		const uint64_t step = a_rem < b_rem ? a_rem : b_rem;
+		pa += step;
+		pb += step;
+		if (pa >= ahi) {
+			have_a = __sm_run_next(&ia, &alo, &ahi);
+			pa = alo;
+		}
+		if (pb >= bhi) {
+			have_b = __sm_run_next(&ib, &blo, &bhi);
+			pb = blo;
+		}
 	}
-	if (ia == SM_IDX_MAX && ib == SM_IDX_MAX)
+	if (!have_a && !have_b)
 		return (0);
-	return ((ia == SM_IDX_MAX) ? -1 : 1); /* shorter sequence sorts first */
+	return (!have_a ? -1 : 1); /* shorter sequence sorts first */
 }
 
 sm_subset_relation_t
@@ -7071,24 +7103,55 @@ sm_subset_compare(const sm_t *a, const sm_t *b)
 	bool a_subset_b = true; /* every bit in a is in b */
 	bool b_subset_a = true; /* every bit in b is in a */
 
-	uint64_t ia = sm_next_member(a, SM_IDX_MAX, NULL);
-	uint64_t ib = sm_next_member(b, SM_IDX_MAX, NULL);
-	while (ia != SM_IDX_MAX || ib != SM_IDX_MAX) {
-		if (ia == ib) {
-			ia = sm_next_member(a, ia, NULL);
-			ib = sm_next_member(b, ib, NULL);
-		} else if (ia != SM_IDX_MAX && (ib == SM_IDX_MAX || ia < ib)) {
-			/* a has a bit b doesn't. */
-			a_subset_b = false;
-			ia = sm_next_member(a, ia, NULL);
-		} else {
-			/* b has a bit a doesn't. */
-			b_subset_a = false;
-			ib = sm_next_member(b, ib, NULL);
+	/* Interval sweep over the two run streams (see __sm_run_iter_t): a
+	 * span present in exactly one map witnesses that map is not a
+	 * subset of the other.  Once both witnesses fire the answer is
+	 * DIFFERENT.  Run-based, so a 2^31-bit run costs O(chunks) rather
+	 * than O(cardinality). */
+	__sm_run_iter_t ia, ib;
+	__sm_run_iter_init(&ia, a);
+	__sm_run_iter_init(&ib, b);
+	uint64_t alo = 0, ahi = 0, blo = 0, bhi = 0;
+	bool have_a = __sm_run_next(&ia, &alo, &ahi);
+	bool have_b = __sm_run_next(&ib, &blo, &bhi);
+	/* pos = left edge of the not-yet-classified region. */
+	uint64_t pos = 0;
+	bool have_pos = false;
+	while (have_a || have_b) {
+		uint64_t lo = have_a ? alo : blo;
+		if (have_b && blo < lo)
+			lo = blo;
+		if (!have_pos || pos < lo) {
+			pos = lo;
+			have_pos = true;
 		}
-		if (!a_subset_b && !b_subset_a) {
+		const bool in_a = have_a && pos >= alo && pos < ahi;
+		const bool in_b = have_b && pos >= blo && pos < bhi;
+		/* End of the current homogeneous segment. */
+		uint64_t next = UINT64_MAX;
+		if (have_a) {
+			if (pos < alo && alo < next)
+				next = alo;
+			if (pos >= alo && ahi < next)
+				next = ahi;
+		}
+		if (have_b) {
+			if (pos < blo && blo < next)
+				next = blo;
+			if (pos >= blo && bhi < next)
+				next = bhi;
+		}
+		if (in_a && !in_b)
+			a_subset_b = false; /* a has a bit b doesn't */
+		else if (in_b && !in_a)
+			b_subset_a = false; /* b has a bit a doesn't */
+		if (!a_subset_b && !b_subset_a)
 			return (SM_REL_DIFFERENT);
-		}
+		pos = next;
+		if (have_a && pos >= ahi)
+			have_a = __sm_run_next(&ia, &alo, &ahi);
+		if (have_b && pos >= bhi)
+			have_b = __sm_run_next(&ib, &blo, &bhi);
 	}
 	if (a_subset_b && b_subset_a)
 		return (SM_REL_EQUAL);
