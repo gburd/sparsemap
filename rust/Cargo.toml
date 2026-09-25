@@ -13,8 +13,9 @@ readme = "README.md"
 keywords = ["bitmap", "bitset", "compressed", "rle", "roaring"]
 categories = ["data-structures", "compression", "no-std"]
 # CI-only cross-language wire harness (contains C); never part of the
-# published, 100%-Rust crate.
-exclude = ["ci", "examples/wire_emit.rs"]
+# published, 100%-Rust crate.  The cargo-fuzz crate under fuzz/ is a
+# separate, unpublished package and is excluded too.
+exclude = ["ci", "examples/wire_emit.rs", "fuzz"]
 
 [features]
 default = ["std"]

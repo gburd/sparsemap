@@ -1,0 +1,25 @@
+[package]
+name = "sparsemap-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+sparsemap = { path = ".." }
+
+[[bin]]
+name = "from_bytes"
+path = "fuzz_targets/from_bytes.rs"
+test = false
+doc = false
+bench = false
+
+# overflow-checks turns a release build's silent wrap-around into a
+# detectable panic, so an unchecked add on a chunk span is a finding.
+[profile.release]
+debug = 1
+overflow-checks = true
