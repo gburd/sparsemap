@@ -36,6 +36,14 @@ chunk it picks one of two encodings depending on the local pattern:
 Best case: 16 KB of consecutive set bits in 8 bytes.  Worst case
 (random bits): identical to a raw bitmap plus 8 bytes of overhead.
 
+> **This is the RLE-free (`no-rle`) variant.**  It is a maintained
+> sibling of the mainline: the same public API with the run-length
+> encoding removed (long runs are stored as adjacent all-ONES sparse
+> chunks) and a compact **small-set** mode added that matches or beats
+> PostgreSQL's `Bitmapset` for near-zero index sets, transitioning to
+> sparse chunks as indices spread.  It reads and writes sparse-only maps
+> and **rejects** RLE-encoded input.  See [docs/NO-RLE.md](docs/NO-RLE.md).
+
 ## When to use sparsemap
 
 Good fit:
