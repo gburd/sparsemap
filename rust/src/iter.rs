@@ -5,8 +5,10 @@ use alloc::collections::btree_map;
 
 /// State for expanding the chunk currently being yielded.
 enum Cursor<'a> {
-    /// A run yielding `next..end`.
-    Run { next: u64, end: u64 },
+    /// A run yielding `next..=last` (inclusive last, so a run touching
+    /// the top of the universe can yield `u64::MAX` without needing an
+    /// exclusive end of 2^64).
+    Run { next: u64, last: u64, done: bool },
     /// A dense window: `base`, the word index, and the remaining bits
     /// of the current word.
     Dense {
@@ -40,7 +42,10 @@ impl<'a> Iter<'a> {
             Some((&base, Chunk::Run(n))) => {
                 self.cur = Some(Cursor::Run {
                     next: base,
-                    end: base + u64::from(*n) * CHUNK_BITS,
+                    // n*CHUNK_BITS fits in u64 (n < 2^32); the `-1`
+                    // groups so `base + span - 1` never reaches 2^64.
+                    last: base + (u64::from(*n) * CHUNK_BITS - 1),
+                    done: false,
                 });
                 true
             }
@@ -64,10 +69,15 @@ impl Iterator for Iter<'_> {
     fn next(&mut self) -> Option<u64> {
         loop {
             match &mut self.cur {
-                Some(Cursor::Run { next, end }) => {
-                    if *next < *end {
+                Some(Cursor::Run { next, last, done }) => {
+                    if !*done {
                         let v = *next;
-                        *next += 1;
+                        if *next == *last {
+                            // Last bit; stop before `next` would wrap.
+                            *done = true;
+                        } else {
+                            *next += 1;
+                        }
                         return Some(v);
                     }
                     self.cur = None;

@@ -126,7 +126,10 @@ impl SparseMap {
                     while remaining > 0 {
                         let span = remaining.min(RLE_MAX_SPAN & !(CHUNK_BITS - 1));
                         write_rle_chunk(&mut out, start, span, span);
-                        start += span;
+                        // The final add may reach 2^64 for a run that
+                        // touches the top of the universe; the wrapped
+                        // value is never read because the loop then ends.
+                        start = start.wrapping_add(span);
                         remaining -= span;
                         count += 1;
                     }
@@ -167,23 +170,48 @@ impl SparseMap {
         // Run-coalescing builder state.
         let mut run_base = 0u64;
         let mut run_len = 0u64;
-        let mut prev_start: Option<u64> = None;
+        // Inclusive index of the last bit the previous chunk's span
+        // claimed; the next chunk must start strictly above it (no
+        // overlap).  Tracked inclusively so a chunk touching the top of
+        // the universe (last bit == u64::MAX) needs no 2^64 sentinel.
+        // `None` before the first chunk.
+        let mut prev_last: Option<u64> = None;
 
         for _ in 0..count {
             let start = read_u64(body, pos, le).ok_or(DecodeError::Corrupt)?;
-            if let Some(p) = prev_start {
-                if start <= p {
+            // Chunk starts must be aligned to the window width, exactly
+            // as the C library emits them; an unaligned start cannot be
+            // reproduced on round-trip.
+            if start % CHUNK_BITS != 0 {
+                return Err(DecodeError::Corrupt);
+            }
+            // Strictly ascending, and no overlap with the previous
+            // chunk's claimed span.
+            if let Some(last) = prev_last {
+                if start <= last {
                     return Err(DecodeError::Corrupt);
                 }
             }
-            prev_start = Some(start);
             pos += 8;
             let desc = read_u64(body, pos, le).ok_or(DecodeError::Corrupt)?;
             pos += 8;
 
             if desc & RLE_FLAG_MASK == RLE_FLAG_BITS {
-                // RLE: bits [start, start+len) set.
+                // RLE: capacity in bits 61:31, length in bits 30:0.  The
+                // chunk claims `cap` bits [start, start+cap); the first
+                // `len` of them are set.
                 let len = desc & RLE_MAX_SPAN;
+                let cap = (desc >> 31) & RLE_MAX_SPAN;
+                // A run cannot be longer than its capacity, its capacity
+                // must be positive, and its last claimed bit must not run
+                // off the end of the universe.
+                if len > cap || cap == 0 {
+                    return Err(DecodeError::Corrupt);
+                }
+                let last = start.checked_add(cap - 1).ok_or(DecodeError::Corrupt)?;
+                prev_last = Some(last);
+                // len <= cap and start + (cap-1) did not overflow, so
+                // every add/mul on `start` below stays in range.
                 let full = len / CHUNK_BITS;
                 if full > 0 {
                     push_run(&mut chunks, &mut run_base, &mut run_len, start, full);
@@ -201,6 +229,11 @@ impl SparseMap {
                     insert_window(&mut chunks, &mut run_base, &mut run_len, pbase, *w);
                 }
             } else {
+                // Sparse chunk claims exactly one window; its last bit is
+                // start + CHUNK_BITS - 1 (== u64::MAX for the top
+                // window, which is valid and must round-trip).
+                let last = start.checked_add(CHUNK_BITS - 1).ok_or(DecodeError::Corrupt)?;
+                prev_last = Some(last);
                 // Sparse: 32 flags, payload word per mixed slot.
                 let mut w = [0u64; WORDS_PER_CHUNK];
                 for (i, slot) in w.iter_mut().enumerate() {
@@ -232,7 +265,12 @@ fn push_run(
     base: u64,
     span: u64,
 ) {
-    if *run_len > 0 && *run_base + *run_len * CHUNK_BITS == base {
+    // The pending run ends at `run_base + run_len*CHUNK_BITS`; that sum
+    // never overflows here because `from_bytes` rejects any chunk whose
+    // span reaches 2^64, but use a checked compare so the invariant is
+    // explicit rather than assumed.
+    let contiguous = *run_len > 0 && run_base.checked_add(*run_len * CHUNK_BITS) == Some(base);
+    if contiguous {
         *run_len += span;
     } else {
         if *run_len > 0 {
@@ -307,3 +345,160 @@ fn read_u64(b: &[u8], at: usize, le: bool) -> Option<u64> {
 }
 
 const _: () = assert!(BITS_PER_WORD == 64);
+
+#[cfg(test)]
+mod hostile {
+    //! Structural-validation tests: hostile serialized buffers must be
+    //! rejected with [`DecodeError::Corrupt`], not decoded into a
+    //! corrupt map (that iterates out of order, fails round-trip, or
+    //! overflows on iteration).  These reproduce the 2026-09 fuzzing
+    //! findings; each one decoded `Ok(..)` (or panicked) before the
+    //! overflow/validation hardening.
+    use super::*;
+    use crate::SparseMap;
+    use alloc::vec::Vec;
+
+    const SPAN31: u64 = 0x7FFF_FFFF;
+
+    fn header(count: u64) -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend_from_slice(&MAGIC.to_le_bytes());
+        b.push(VERSION);
+        b.push(FLAG_LE);
+        b.extend_from_slice(&[0, 0]);
+        b.extend_from_slice(&0u64.to_le_bytes()); // cardinality hint (recomputed)
+        b.extend_from_slice(&count.to_le_bytes());
+        b
+    }
+
+    fn chunk(b: &mut Vec<u8>, start: u64, desc: u64) {
+        b.extend_from_slice(&start.to_le_bytes());
+        b.extend_from_slice(&desc.to_le_bytes());
+    }
+
+    fn rle_desc(cap: u64, len: u64) -> u64 {
+        RLE_FLAG_BITS | ((cap & SPAN31) << 31) | (len & SPAN31)
+    }
+
+    /// A sparse descriptor with every slot ONES (`0b11`).
+    fn sparse_all_ones() -> u64 {
+        let mut d = 0u64;
+        for i in 0..WORDS_PER_CHUNK {
+            d |= 0b11u64 << (2 * i);
+        }
+        d
+    }
+
+    #[test]
+    fn rejects_rle_length_exceeding_capacity() {
+        let mut b = header(1);
+        chunk(&mut b, 0, rle_desc(CHUNK_BITS, CHUNK_BITS * 2));
+        assert_eq!(SparseMap::from_bytes(&b), Err(DecodeError::Corrupt));
+    }
+
+    #[test]
+    fn rejects_unaligned_chunk_start() {
+        let mut b = header(1);
+        chunk(&mut b, 100, rle_desc(CHUNK_BITS, CHUNK_BITS));
+        assert_eq!(SparseMap::from_bytes(&b), Err(DecodeError::Corrupt));
+    }
+
+    #[test]
+    fn rejects_start_plus_capacity_overflow() {
+        // A run whose last claimed bit runs past u64::MAX.
+        let mut b = header(1);
+        chunk(&mut b, u64::MAX - (CHUNK_BITS - 1), rle_desc(CHUNK_BITS * 2, CHUNK_BITS * 2));
+        assert_eq!(SparseMap::from_bytes(&b), Err(DecodeError::Corrupt));
+    }
+
+    #[test]
+    fn rejects_overlapping_chunk_spans() {
+        // Chunk 0 claims [0, 4096); chunk 1 starts at 2048, inside it.
+        let mut b = header(2);
+        chunk(&mut b, 0, rle_desc(CHUNK_BITS * 2, CHUNK_BITS * 2));
+        chunk(&mut b, CHUNK_BITS, sparse_all_ones());
+        assert_eq!(SparseMap::from_bytes(&b), Err(DecodeError::Corrupt));
+    }
+
+    #[test]
+    fn rejects_non_ascending_starts() {
+        let mut b = header(2);
+        chunk(&mut b, CHUNK_BITS, sparse_all_ones());
+        chunk(&mut b, 0, sparse_all_ones());
+        assert_eq!(SparseMap::from_bytes(&b), Err(DecodeError::Corrupt));
+    }
+
+    #[test]
+    fn rejects_duplicate_starts() {
+        let mut b = header(2);
+        chunk(&mut b, CHUNK_BITS, sparse_all_ones());
+        chunk(&mut b, CHUNK_BITS, sparse_all_ones());
+        assert_eq!(SparseMap::from_bytes(&b), Err(DecodeError::Corrupt));
+    }
+
+    #[test]
+    fn rejects_zero_capacity_rle() {
+        let mut b = header(1);
+        chunk(&mut b, 0, rle_desc(0, 0));
+        assert_eq!(SparseMap::from_bytes(&b), Err(DecodeError::Corrupt));
+    }
+
+    #[test]
+    fn accepts_single_bit_in_top_window() {
+        // A sparse chunk at the top window claims [2^64-2048, 2^64):
+        // valid, and its span's last bit is exactly u64::MAX.
+        let base = u64::MAX - (CHUNK_BITS - 1);
+        let mut m = SparseMap::new();
+        m.insert(base);
+        let back = SparseMap::from_bytes(&m.to_bytes()).expect("top-window bit is valid");
+        assert_eq!(back, m);
+    }
+
+    #[test]
+    fn accepts_full_top_window_run() {
+        // A full top window promotes to a run ending at 2^64; it must
+        // decode, iterate ascending, and round-trip.
+        let base = u64::MAX - (CHUNK_BITS - 1);
+        let mut m = SparseMap::new();
+        for off in 0..CHUNK_BITS {
+            m.insert(base + off);
+        }
+        let back = SparseMap::from_bytes(&m.to_bytes()).expect("top-window run is valid");
+        assert_eq!(back, m);
+        assert_eq!(back.max(), Some(u64::MAX));
+        assert_eq!(back.cardinality(), CHUNK_BITS);
+        let bits: Vec<u64> = back.iter().collect();
+        assert!(bits.windows(2).all(|w| w[0] < w[1]), "iterates ascending");
+    }
+
+    #[test]
+    fn decoded_maps_are_ascending_and_stable() {
+        // Every buffer either rejects or yields a map that iterates
+        // strictly ascending and round-trips unchanged.  A spread of
+        // hostile descriptors that used to decode into corrupt maps.
+        let base_top = u64::MAX - (CHUNK_BITS - 1);
+        let mut bufs: Vec<Vec<u8>> = Vec::new();
+        for &(start, desc) in &[
+            (0u64, rle_desc(CHUNK_BITS, CHUNK_BITS * 2)),
+            (base_top, rle_desc(SPAN31, SPAN31)),
+            (0, rle_desc(SPAN31, SPAN31)),
+            (CHUNK_BITS, sparse_all_ones()),
+            (base_top, sparse_all_ones()),
+        ] {
+            let mut b = header(1);
+            chunk(&mut b, start, desc);
+            bufs.push(b);
+        }
+        for buf in bufs {
+            if let Ok(m) = SparseMap::from_bytes(&buf) {
+                let bits: Vec<u64> = m.iter().take(8192).collect();
+                assert!(
+                    bits.windows(2).all(|w| w[0] < w[1]),
+                    "decoded map iterates non-ascending"
+                );
+                let re = SparseMap::from_bytes(&m.to_bytes());
+                assert_eq!(re.as_ref(), Ok(&m), "decoded map is not round-trip stable");
+            }
+        }
+    }
+}

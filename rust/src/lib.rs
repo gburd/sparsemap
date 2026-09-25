@@ -183,7 +183,10 @@ impl SparseMap {
         // <= idx.
         if let Some((&base, chunk)) = self.chunks.range(..=idx).next_back() {
             match chunk {
-                Chunk::Run(n) => idx < base + u64::from(*n) * CHUNK_BITS,
+                // `idx >= base` (floor entry), so compare offsets to
+                // avoid overflowing at the top of the universe where
+                // `base + n*CHUNK_BITS` would reach 2^64.
+                Chunk::Run(n) => idx - base < u64::from(*n) * CHUNK_BITS,
                 Chunk::Dense(w) => {
                     base == window_base(idx) && {
                         let o = window_offset(idx);
@@ -203,7 +206,7 @@ impl SparseMap {
 
         // Already covered by a run?
         if let Some((&rbase, Chunk::Run(n))) = self.chunks.range(..=idx).next_back() {
-            if idx < rbase + u64::from(*n) * CHUNK_BITS {
+            if idx - rbase < u64::from(*n) * CHUNK_BITS {
                 return false;
             }
         }
@@ -240,7 +243,7 @@ impl SparseMap {
         // Is idx inside a run?  (The covering chunk is the floor entry.)
         if let Some((&rbase, Chunk::Run(n))) = self.chunks.range(..=idx).next_back() {
             let n = u64::from(*n);
-            if idx < rbase + n * CHUNK_BITS {
+            if idx - rbase < n * CHUNK_BITS {
                 self.split_run(rbase, n, base, idx);
                 return true;
             }
@@ -295,17 +298,21 @@ impl SparseMap {
             Some(Chunk::Run(n)) => u64::from(*n),
             _ => return,
         };
-        let next_base = base + this_count * CHUNK_BITS;
-        if let Some(Chunk::Run(nn)) = self.chunks.get(&next_base) {
-            let merged = this_count + u64::from(*nn);
-            self.chunks.remove(&next_base);
-            self.chunks.insert(base, Chunk::Run(merged as u32));
+        // A run touching the top of the universe ends at 2^64, which is
+        // not representable and can have no following run, so a
+        // non-overflowing end is a precondition for a merge.
+        if let Some(next_base) = base.checked_add(this_count * CHUNK_BITS) {
+            if let Some(Chunk::Run(nn)) = self.chunks.get(&next_base) {
+                let merged = this_count + u64::from(*nn);
+                self.chunks.remove(&next_base);
+                self.chunks.insert(base, Chunk::Run(merged as u32));
+            }
         }
 
         // Merge with the previous run if it ends where this one starts.
         if let Some((&pbase, Chunk::Run(pn))) = self.chunks.range(..base).next_back() {
             let pn = u64::from(*pn);
-            if pbase + pn * CHUNK_BITS == base {
+            if pbase.checked_add(pn * CHUNK_BITS) == Some(base) {
                 let this_count = match self.chunks.get(&base) {
                     Some(Chunk::Run(n)) => u64::from(*n),
                     _ => return,
@@ -332,7 +339,9 @@ impl SparseMap {
     pub fn max(&self) -> Option<u64> {
         let (&base, chunk) = self.chunks.iter().next_back()?;
         Some(match chunk {
-            Chunk::Run(n) => base + u64::from(*n) * CHUNK_BITS - 1,
+            // Group the `-1` so a run touching the top of the universe
+            // (end == 2^64) yields u64::MAX without overflowing.
+            Chunk::Run(n) => base + (u64::from(*n) * CHUNK_BITS - 1),
             Chunk::Dense(w) => base + dense_last_set(w).expect("dense never empty"),
         })
     }
@@ -351,11 +360,13 @@ impl SparseMap {
             }
             match chunk {
                 Chunk::Run(n) => {
-                    let end = base + u64::from(*n) * CHUNK_BITS;
-                    total += if idx >= end { end - base } else { idx - base };
+                    // `base < idx` (loop breaks otherwise); compare the
+                    // in-run offset against the span to avoid overflow.
+                    let span = u64::from(*n) * CHUNK_BITS;
+                    total += (idx - base).min(span);
                 }
                 Chunk::Dense(w) => {
-                    if idx >= base + CHUNK_BITS {
+                    if idx - base >= CHUNK_BITS {
                         total += chunk.count();
                     } else {
                         total += dense_rank(w, (idx - base) as usize);
@@ -407,7 +418,7 @@ impl SparseMap {
     /// is not covered by an enclosing run.
     fn window_is_empty(&self, base: u64) -> bool {
         match self.chunks.range(..=base).next_back() {
-            Some((&rb, Chunk::Run(n))) => base >= rb + u64::from(*n) * CHUNK_BITS,
+            Some((&rb, Chunk::Run(n))) => base - rb >= u64::from(*n) * CHUNK_BITS,
             Some((&b2, Chunk::Dense(_))) => b2 != base,
             None => true,
         }

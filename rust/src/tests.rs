@@ -213,6 +213,34 @@ fn deserialize_rejects_garbage() {
     );
 }
 
+#[test]
+fn top_of_universe_run_is_panic_free() {
+    // A full window at the top of the universe promotes to a run ending
+    // at 2^64.  insert/coalesce, iterate, min/max/rank/select and the
+    // set operations must all handle the run end without overflowing.
+    let base = u64::MAX - (CHUNK_BITS - 1);
+    let mut m = SparseMap::new();
+    for off in 0..CHUNK_BITS {
+        m.insert(base + off);
+    }
+    assert_eq!(m.cardinality(), CHUNK_BITS);
+    assert_eq!(m.min(), Some(base));
+    assert_eq!(m.max(), Some(u64::MAX));
+    assert!(m.contains(u64::MAX));
+    assert_eq!(m.rank(u64::MAX), CHUNK_BITS - 1);
+    assert_eq!(m.select(CHUNK_BITS - 1), Some(u64::MAX));
+    let bits: Vec<u64> = m.iter().collect();
+    assert_eq!(bits.len() as u64, CHUNK_BITS);
+    assert_eq!(*bits.last().unwrap(), u64::MAX);
+    assert!(bits.windows(2).all(|w| w[0] < w[1]));
+    // Set operations touch the run-merge and cursor-advance paths.
+    let other: SparseMap = [base].into_iter().collect();
+    assert_eq!((&m | &other), m);
+    assert_eq!((&m & &other), other);
+    assert_eq!((&m - &other).cardinality(), CHUNK_BITS - 1);
+    assert_eq!((&m ^ &other).cardinality(), CHUNK_BITS - 1);
+}
+
 // A tiny deterministic FNV-1a hasher so the equality/hash test needs no
 // std-provided Hasher.
 #[derive(Default)]

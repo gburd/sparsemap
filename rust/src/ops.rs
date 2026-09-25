@@ -58,8 +58,14 @@ impl<'a> Cursor<'a> {
     }
 
     /// Advance past `k` windows of the current (run) chunk.
+    ///
+    /// `1 <= k <= remaining` is a structural invariant: callers derive
+    /// `k` from aligned window bases, so it holds for every valid map
+    /// (constructed or decoded).  Asserted unconditionally rather than
+    /// only in debug, because a violation would silently corrupt the
+    /// merge.
     fn advance(&mut self, k: u64) {
-        debug_assert!(k >= 1 && k <= self.remaining);
+        assert!(k >= 1 && k <= self.remaining);
         self.remaining -= k;
         if self.remaining == 0 {
             self.advance_chunk();
@@ -97,7 +103,16 @@ impl Builder {
 
     /// Append `span` all-ones windows starting at `base`.
     fn push_ones(&mut self, base: u64, span: u64) {
-        if self.run_len > 0 && self.run_base + self.run_len * CHUNK_BITS == base {
+        // The pending run ends at `run_base + run_len*CHUNK_BITS`; a run
+        // touching the top of the universe ends at 2^64 (not
+        // representable) and cannot be adjacent to anything above it, so
+        // an overflowing end simply means "not contiguous".
+        let contiguous = self.run_len > 0
+            && self
+                .run_base
+                .checked_add(self.run_len * CHUNK_BITS)
+                == Some(base);
+        if contiguous {
             self.run_len += span;
         } else {
             self.flush_run();
