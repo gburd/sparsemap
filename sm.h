@@ -1335,6 +1335,15 @@ bool sm_add_many_grow(sm_t **map, const uint64_t *arr, size_t n);
  * buffer.  Or pass a buffer of `*n_out` capacity; on return, `*n_out`
  * is the number actually written.
  *
+ * Cost is O(cardinality) by nature -- it emits one uint64_t per set
+ * bit -- and it is intentionally the one operation that stays that way
+ * (the set-algebra, hashing and range helpers were rewritten to track
+ * the encoded size instead).  A map decoded from untrusted bytes can
+ * legitimately declare a run of up to 2^31 bits per chunk, so a caller
+ * that hands `sm_to_array` such a map, or sizes an output buffer from
+ * `sm_cardinality`, must be prepared for a proportionally large result;
+ * bound it with `sm_extract_range` first if that is a concern.
+ *
  * @param[in]     map    Source.
  * @param[out]    out    Caller-allocated buffer (or NULL to query size).
  * @param[in,out] n_out  In: capacity of `out`.  Out: number written.

@@ -6251,13 +6251,219 @@ sm_singleton_member(const sm_t *map)
  * ------------------------------------------------------------------- */
 
 /*
- * The cardinality functions walk both maps in lockstep using
- * sm_next_member.  This is O(|a|+|b|) bit lookups, dominated by
- * the cost of skipping past whole chunks (sm_next_member is O(1)
- * per RLE chunk, O(vectors) per sparse chunk).  An optimized
- * chunk-pair-walk would be faster but more complex; if profiling
- * shows this matters in pg_tre's hot path, that's the next step.
+ * Maximal-run iterator.
+ *
+ * The set-algebra and hashing helpers below used to walk bit-by-bit via
+ * sm_next_member, making them O(cardinality): a single 24-byte RLE
+ * chunk declaring a 2^31-bit run turned sm_xor / sm_hash / the
+ * *_cardinality family / sm_jaccard_index / sm_extract_range into
+ * multi-second (or, for sm_split, non-terminating) loops on an
+ * attacker-sized input.
+ *
+ * This iterator instead yields half-open runs [lo, hi) of set bits, so
+ * its cost tracks the ENCODED size: an RLE chunk is one run no matter
+ * how long, and a sparse chunk yields at most a chunk's worth of runs
+ * (<= 2048 bits, physically present).
+ *
+ * Runs are decomposed per chunk and are NOT merged across chunk
+ * boundaries.  That is deliberate: chunk windows are fixed 2048-aligned
+ * spans, so any two maps that compare equal under sm_equals() occupy
+ * the same chunks and decompose into the identical run sequence --
+ * which is all the content hash and the interval sweeps below require.
+ * Merging across chunks would add state for no correctness gain.
  */
+typedef struct {
+	const sm_t *map;
+	size_t count;      /* total chunk count */
+	size_t idx;        /* next chunk ordinal to decode */
+	uint8_t *p;        /* cursor into the chunk stream */
+	/* Runs decoded from the current chunk, not yet yielded.  A sparse
+	 * chunk with an alternating bit pattern is the worst case:
+	 * SM_CHUNK_MAX_CAPACITY / 2 single-bit runs, so size for that plus
+	 * one. */
+	uint64_t run_lo[SM_CHUNK_MAX_CAPACITY / 2 + 1];
+	uint64_t run_hi[SM_CHUNK_MAX_CAPACITY / 2 + 1];
+	size_t nruns;
+	size_t next_run;
+} __sm_run_iter_t;
+
+static void
+__sm_run_iter_init(__sm_run_iter_t *it, const sm_t *map)
+{
+	memset(it, 0, sizeof(*it));
+	it->map = map;
+	if (map == NULL || sm_is_empty(map)) {
+		it->count = 0;
+		return;
+	}
+	it->count = __sm_get_chunk_count(map);
+	it->p = __sm_get_chunk_data(map, 0);
+}
+
+/*
+ * Decompose one chunk (the one at it->p) into its runs, absolute bit
+ * indices, into it->run_lo/run_hi.
+ */
+static void
+__sm_run_decode_chunk(__sm_run_iter_t *it, __sm_idx_t start)
+{
+	__sm_chunk_t chunk;
+	__sm_chunk_init(&chunk, it->p + SM_SIZEOF_OVERHEAD);
+	it->nruns = 0;
+	it->next_run = 0;
+
+	if (__sm_chunk_is_rle(&chunk)) {
+		const size_t len = __sm_chunk_rle_get_length(&chunk);
+		if (len > 0) {
+			it->run_lo[0] = start;
+			it->run_hi[0] = start + len;
+			it->nruns = 1;
+		}
+		return;
+	}
+
+	/* Sparse: walk the 32 flags, coalescing adjacent set bits.  ONES is
+	 * a full 64-bit run; MIXED decodes its payload word bit-by-bit
+	 * (bounded, 64 bits); ZEROS / NONE break any open run. */
+	const __sm_bitvec_t desc = chunk.m_data[0];
+	size_t pos = 1; /* payload-word cursor for MIXED slots */
+	bool open = false;
+	uint64_t cur_lo = 0, cur_hi = 0;
+	for (size_t v = 0; v < SM_FLAGS_PER_INDEX; v++) {
+		const size_t flags = SM_CHUNK_GET_FLAGS(desc, v);
+		const uint64_t base = start + (uint64_t)v * SM_BITS_PER_VECTOR;
+		if (flags == SM_PAYLOAD_ONES) {
+			if (open && cur_hi == base) {
+				cur_hi = base + SM_BITS_PER_VECTOR;
+			} else {
+				if (open) {
+					it->run_lo[it->nruns] = cur_lo;
+					it->run_hi[it->nruns++] = cur_hi;
+				}
+				cur_lo = base;
+				cur_hi = base + SM_BITS_PER_VECTOR;
+				open = true;
+			}
+		} else if (flags == SM_PAYLOAD_MIXED) {
+			__sm_bitvec_t w = chunk.m_data[pos++];
+			for (int b = 0; b < SM_BITS_PER_VECTOR; b++) {
+				if ((w >> b) & 1u) {
+					const uint64_t bit = base + (uint64_t)b;
+					if (open && cur_hi == bit) {
+						cur_hi = bit + 1;
+					} else {
+						if (open) {
+							it->run_lo[it->nruns] =
+							    cur_lo;
+							it->run_hi[it->nruns++] =
+							    cur_hi;
+						}
+						cur_lo = bit;
+						cur_hi = bit + 1;
+						open = true;
+					}
+				}
+			}
+		} else {
+			/* ZEROS / NONE: a gap ends any open run. */
+			if (open) {
+				it->run_lo[it->nruns] = cur_lo;
+				it->run_hi[it->nruns++] = cur_hi;
+				open = false;
+			}
+		}
+	}
+	if (open) {
+		it->run_lo[it->nruns] = cur_lo;
+		it->run_hi[it->nruns++] = cur_hi;
+	}
+}
+
+/*
+ * Yield the next run.  Returns false when exhausted.
+ */
+static bool
+__sm_run_next(__sm_run_iter_t *it, uint64_t *lo, uint64_t *hi)
+{
+	for (;;) {
+		/* Drain runs already decoded from the current chunk. */
+		if (it->next_run < it->nruns) {
+			*lo = it->run_lo[it->next_run];
+			*hi = it->run_hi[it->next_run];
+			it->next_run++;
+			return (true);
+		}
+		/* Current chunk exhausted; decode the next one. */
+		if (it->idx >= it->count) {
+			return (false);
+		}
+		const __sm_idx_t start = __sm_load_idx((const uint8_t *)it->p);
+		__sm_chunk_t chunk;
+		__sm_chunk_init(&chunk, it->p + SM_SIZEOF_OVERHEAD);
+		const size_t chunk_bytes =
+		    SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&chunk);
+		__sm_run_decode_chunk(it, start);
+		it->p += chunk_bytes;
+		it->idx++;
+		/* loop back to drain the freshly-decoded run list */
+	}
+}
+
+/*
+ * The cardinality / set-algebra / hashing helpers below walk maps
+ * run-by-run (see __sm_run_iter_t) rather than bit-by-bit, so their
+ * cost tracks the encoded size, not the popcount.  A 2^31-bit RLE run
+ * is a single run.
+ */
+
+/*
+ * Single lockstep pass over two maps' runs, accumulating the counts
+ * every set-algebra cardinality wants: |a|, |b|, |a & b|, |a | b|.
+ * Runs are maximal, ascending and non-overlapping within each map, so
+ * a classic interval sweep is exact and O(runs_a + runs_b).
+ */
+static void
+__sm_run_pair_counts(const sm_t *a, const sm_t *b, uint64_t *cnt_a,
+    uint64_t *cnt_b, uint64_t *inter, uint64_t *uni)
+{
+	__sm_run_iter_t ia, ib;
+	__sm_run_iter_init(&ia, a);
+	__sm_run_iter_init(&ib, b);
+	uint64_t alo = 0, ahi = 0, blo = 0, bhi = 0;
+	bool have_a = __sm_run_next(&ia, &alo, &ahi);
+	bool have_b = __sm_run_next(&ib, &blo, &bhi);
+	uint64_t ca = 0, cb = 0, ci = 0;
+	/* Intersection by interval sweep: at each step add the overlap of
+	 * the two active runs, then consume whichever ends first so the
+	 * other can still overlap the consumed side's later runs.  Runs
+	 * are ascending and disjoint within each map, so no overlap is
+	 * double-counted.  Union follows from inclusion-exclusion:
+	 * |a | b| = |a| + |b| - |a & b|.  Cardinalities are accumulated
+	 * once per run as it is consumed. */
+	while (have_a || have_b) {
+		if (have_a && have_b) {
+			const uint64_t ov_lo = alo > blo ? alo : blo;
+			const uint64_t ov_hi = ahi < bhi ? ahi : bhi;
+			if (ov_lo < ov_hi)
+				ci += ov_hi - ov_lo;
+		}
+		if (have_a && (!have_b || ahi <= bhi)) {
+			ca += ahi - alo;
+			have_a = __sm_run_next(&ia, &alo, &ahi);
+		} else {
+			cb += bhi - blo;
+			have_b = __sm_run_next(&ib, &blo, &bhi);
+		}
+	}
+	if (cnt_a)
+		*cnt_a = ca;
+	if (cnt_b)
+		*cnt_b = cb;
+	if (inter)
+		*inter = ci;
+	if (uni)
+		*uni = ca + cb - ci;
+}
 
 size_t
 sm_union_cardinality(const sm_t *a, const sm_t *b)
@@ -6266,24 +6472,9 @@ sm_union_cardinality(const sm_t *a, const sm_t *b)
 		return (b ? sm_cardinality((sm_t *)b) : 0);
 	if (sm_is_empty(b))
 		return (sm_cardinality((sm_t *)a));
-
-	size_t count = 0;
-	uint64_t ia = sm_next_member(a, SM_IDX_MAX, NULL);
-	uint64_t ib = sm_next_member(b, SM_IDX_MAX, NULL);
-	while (ia != SM_IDX_MAX || ib != SM_IDX_MAX) {
-		if (ia == ib) {
-			count++;
-			ia = sm_next_member(a, ia, NULL);
-			ib = sm_next_member(b, ib, NULL);
-		} else if (ia != SM_IDX_MAX && (ib == SM_IDX_MAX || ia < ib)) {
-			count++;
-			ia = sm_next_member(a, ia, NULL);
-		} else {
-			count++;
-			ib = sm_next_member(b, ib, NULL);
-		}
-	}
-	return (count);
+	uint64_t uni = 0;
+	__sm_run_pair_counts(a, b, NULL, NULL, NULL, &uni);
+	return ((size_t)uni);
 }
 
 size_t
@@ -6291,21 +6482,9 @@ sm_intersection_cardinality(const sm_t *a, const sm_t *b)
 {
 	if (sm_is_empty(a) || sm_is_empty(b))
 		return (0);
-	size_t count = 0;
-	uint64_t ia = sm_next_member(a, SM_IDX_MAX, NULL);
-	uint64_t ib = sm_next_member(b, SM_IDX_MAX, NULL);
-	while (ia != SM_IDX_MAX && ib != SM_IDX_MAX) {
-		if (ia == ib) {
-			count++;
-			ia = sm_next_member(a, ia, NULL);
-			ib = sm_next_member(b, ib, NULL);
-		} else if (ia < ib) {
-			ia = sm_next_member(a, ia, NULL);
-		} else {
-			ib = sm_next_member(b, ib, NULL);
-		}
-	}
-	return (count);
+	uint64_t inter = 0;
+	__sm_run_pair_counts(a, b, NULL, NULL, &inter, NULL);
+	return ((size_t)inter);
 }
 
 size_t
@@ -6315,24 +6494,9 @@ sm_difference_cardinality(const sm_t *a, const sm_t *b)
 		return (0);
 	if (sm_is_empty(b))
 		return (sm_cardinality((sm_t *)a));
-
-	size_t count = 0;
-	uint64_t ia = sm_next_member(a, SM_IDX_MAX, NULL);
-	uint64_t ib = sm_next_member(b, SM_IDX_MAX, NULL);
-	while (ia != SM_IDX_MAX) {
-		/* Advance b past anything < ia. */
-		while (ib != SM_IDX_MAX && ib < ia) {
-			ib = sm_next_member(b, ib, NULL);
-		}
-		if (ib == ia) {
-			/* In both, skip from a's count. */
-			ib = sm_next_member(b, ib, NULL);
-		} else {
-			count++;
-		}
-		ia = sm_next_member(a, ia, NULL);
-	}
-	return (count);
+	uint64_t ca = 0, inter = 0;
+	__sm_run_pair_counts(a, b, &ca, NULL, &inter, NULL);
+	return ((size_t)(ca - inter));
 }
 
 bool
@@ -6342,47 +6506,19 @@ sm_nonempty_difference(const sm_t *a, const sm_t *b)
 		return (false);
 	if (sm_is_empty(b))
 		return (true);
-
-	uint64_t ia = sm_next_member(a, SM_IDX_MAX, NULL);
-	uint64_t ib = sm_next_member(b, SM_IDX_MAX, NULL);
-	while (ia != SM_IDX_MAX) {
-		while (ib != SM_IDX_MAX && ib < ia) {
-			ib = sm_next_member(b, ib, NULL);
-		}
-		if (ib != ia) {
-			return (true);
-		}
-		ia = sm_next_member(a, ia, NULL);
-		ib = sm_next_member(b, ib, NULL);
-	}
-	return (false);
+	uint64_t ca = 0, inter = 0;
+	__sm_run_pair_counts(a, b, &ca, NULL, &inter, NULL);
+	return (ca > inter);
 }
 
 double
 sm_jaccard_index(const sm_t *a, const sm_t *b)
 {
-	/* Walk both lockstep, accumulating intersection and union counts
-	 * in a single pass. */
 	if (sm_is_empty(a) && sm_is_empty(b))
 		return (0.0);
-	size_t intersect = 0, union_ = 0;
-	uint64_t ia = sm_next_member(a, SM_IDX_MAX, NULL);
-	uint64_t ib = sm_next_member(b, SM_IDX_MAX, NULL);
-	while (ia != SM_IDX_MAX || ib != SM_IDX_MAX) {
-		if (ia == ib) {
-			intersect++;
-			union_++;
-			ia = sm_next_member(a, ia, NULL);
-			ib = sm_next_member(b, ib, NULL);
-		} else if (ia != SM_IDX_MAX && (ib == SM_IDX_MAX || ia < ib)) {
-			union_++;
-			ia = sm_next_member(a, ia, NULL);
-		} else {
-			union_++;
-			ib = sm_next_member(b, ib, NULL);
-		}
-	}
-	return (union_ == 0 ? 0.0 : (double)intersect / (double)union_);
+	uint64_t inter = 0, uni = 0;
+	__sm_run_pair_counts(a, b, NULL, NULL, &inter, &uni);
+	return (uni == 0 ? 0.0 : (double)inter / (double)uni);
 }
 
 /* Ascending uint64_t comparator for the bulk-insert sort below. */
@@ -6486,6 +6622,37 @@ sm_add_many_grow(sm_t **map, const uint64_t *arr, size_t n)
 	return (ok);
 }
 
+/*
+ * Set every bit in [lo, hi) on a result map, growing geometrically on
+ * ENOSPC.  Used by the run-based set-algebra helpers, whose runs are
+ * emitted in ascending, non-overlapping order.  A cursor keeps the
+ * per-bit sm_add O(1) across a contiguous run; the cost is O(hi-lo),
+ * i.e. the size of the produced output, never the operands' popcount.
+ */
+static bool
+__sm_add_run_grow(sm_t **map, uint64_t lo, uint64_t hi)
+{
+	sm_cursor_t cur = SM_CURSOR_INIT;
+	for (uint64_t i = lo; i < hi; i++) {
+		int retries = 0;
+		sm_t *before = *map;
+		while (__sm_add_c(*map, i, &cur) == SM_IDX_MAX) {
+			if (++retries > 16)
+				return (false);
+			size_t new_cap = sm_get_capacity(*map) * 2;
+			if (new_cap < 4096)
+				new_cap = 4096;
+			sm_t *grown = sm_set_data_size(*map, NULL, new_cap);
+			if (grown == NULL)
+				return (false);
+			*map = grown;
+		}
+		if (*map != before)
+			cur = (sm_cursor_t)SM_CURSOR_INIT;
+	}
+	return (true);
+}
+
 void
 sm_to_array(const sm_t *map, uint64_t *out, size_t *n_out)
 {
@@ -6556,27 +6723,57 @@ sm_xor(const sm_t *a, const sm_t *b)
 	if (r == NULL)
 		return (NULL);
 
-	/* Walk both lockstep, emit bits set in exactly one. */
-	uint64_t ia = sm_next_member(a, SM_IDX_MAX, NULL);
-	uint64_t ib = sm_next_member(b, SM_IDX_MAX, NULL);
-	while (ia != SM_IDX_MAX || ib != SM_IDX_MAX) {
-		if (ia == ib) {
-			/* In both: skip from XOR. */
-			ia = sm_next_member(a, ia, NULL);
-			ib = sm_next_member(b, ib, NULL);
-		} else if (ia != SM_IDX_MAX && (ib == SM_IDX_MAX || ia < ib)) {
-			if (sm_add(r, ia) == SM_IDX_MAX) {
-				sm_free(r);
-				return (NULL);
-			}
-			ia = sm_next_member(a, ia, NULL);
-		} else {
-			if (sm_add(r, ib) == SM_IDX_MAX) {
-				sm_free(r);
-				return (NULL);
-			}
-			ib = sm_next_member(b, ib, NULL);
+	/* Walk both maps run-by-run and emit the symmetric-difference
+	 * runs (bits set in exactly one map).  Cost tracks the encoded
+	 * size of the operands, not their popcount, so a 2^31-bit run is
+	 * one iteration rather than 2^31. */
+	__sm_run_iter_t ia, ib;
+	__sm_run_iter_init(&ia, a);
+	__sm_run_iter_init(&ib, b);
+	uint64_t alo = 0, ahi = 0, blo = 0, bhi = 0;
+	bool have_a = __sm_run_next(&ia, &alo, &ahi);
+	bool have_b = __sm_run_next(&ib, &blo, &bhi);
+	/* pos = left edge of the not-yet-emitted portion of the current
+	 * a/b runs; overlaps cancel, gaps in exactly one survive. */
+	uint64_t pos = 0;
+	bool have_pos = false;
+	while (have_a || have_b) {
+		/* The next boundary among the two active runs. */
+		uint64_t lo = have_a ? alo : blo;
+		if (have_b && blo < lo)
+			lo = blo;
+		if (!have_pos || pos < lo) {
+			pos = lo;
+			have_pos = true;
 		}
+		const bool in_a = have_a && pos >= alo && pos < ahi;
+		const bool in_b = have_b && pos >= blo && pos < bhi;
+		/* End of the current homogeneous segment. */
+		uint64_t next = UINT64_MAX;
+		if (have_a) {
+			if (pos < alo && alo < next)
+				next = alo;
+			if (pos >= alo && ahi < next)
+				next = ahi;
+		}
+		if (have_b) {
+			if (pos < blo && blo < next)
+				next = blo;
+			if (pos >= blo && bhi < next)
+				next = bhi;
+		}
+		if (in_a != in_b) {
+			/* Bits [pos, next) are in exactly one map. */
+			if (!__sm_add_run_grow(&r, pos, next)) {
+				sm_free(r);
+				return (NULL);
+			}
+		}
+		pos = next;
+		if (have_a && pos >= ahi)
+			have_a = __sm_run_next(&ia, &alo, &ahi);
+		if (have_b && pos >= bhi)
+			have_b = __sm_run_next(&ib, &blo, &bhi);
 	}
 	if (sm_is_empty(r)) {
 		sm_free(r);
@@ -6618,25 +6815,22 @@ sm_extract_range(const sm_t *map, uint64_t lo, uint64_t hi)
 	if (r == NULL)
 		return (NULL);
 
-	/* Walk set bits in [lo, hi) and add them to the result.
-	 * sm_next_member supports a lower-exclusive bound; pass lo - 1 if
-	 * lo > 0, else SM_IDX_MAX (start sentinel). */
-	uint64_t cursor = (lo == 0) ? SM_IDX_MAX : lo - 1;
-	while ((cursor = sm_next_member(map, cursor, NULL)) != SM_IDX_MAX &&
-	    cursor < hi) {
-		if (sm_add(r, cursor) == SM_IDX_MAX) {
-			/* Grow and retry once. */
-			sm_t *grown = sm_set_data_size(r, NULL,
-			    sm_get_capacity(r) * 2 + 256);
-			if (grown == NULL) {
-				sm_free(r);
-				return (NULL);
-			}
-			r = grown;
-			if (sm_add(r, cursor) == SM_IDX_MAX) {
-				sm_free(r);
-				return (NULL);
-			}
+	/* Walk set-bit runs and add each run's intersection with [lo, hi).
+	 * Run-based, so a 2^31-bit run outside the window costs one
+	 * iteration rather than 2^31 bit lookups. */
+	__sm_run_iter_t it;
+	__sm_run_iter_init(&it, map);
+	uint64_t rlo = 0, rhi = 0;
+	while (__sm_run_next(&it, &rlo, &rhi)) {
+		if (rhi <= lo)
+			continue;
+		if (rlo >= hi)
+			break; /* runs are ascending; nothing more overlaps */
+		const uint64_t clip_lo = rlo < lo ? lo : rlo;
+		const uint64_t clip_hi = rhi > hi ? hi : rhi;
+		if (!__sm_add_run_grow(&r, clip_lo, clip_hi)) {
+			sm_free(r);
+			return (NULL);
 		}
 	}
 
@@ -6656,23 +6850,9 @@ sm_xor_cardinality(const sm_t *a, const sm_t *b)
 		return (sm_cardinality((sm_t *)b));
 	if (sm_is_empty(b))
 		return (sm_cardinality((sm_t *)a));
-
-	size_t count = 0;
-	uint64_t ia = sm_next_member(a, SM_IDX_MAX, NULL);
-	uint64_t ib = sm_next_member(b, SM_IDX_MAX, NULL);
-	while (ia != SM_IDX_MAX || ib != SM_IDX_MAX) {
-		if (ia == ib) {
-			ia = sm_next_member(a, ia, NULL);
-			ib = sm_next_member(b, ib, NULL);
-		} else if (ia != SM_IDX_MAX && (ib == SM_IDX_MAX || ia < ib)) {
-			count++;
-			ia = sm_next_member(a, ia, NULL);
-		} else {
-			count++;
-			ib = sm_next_member(b, ib, NULL);
-		}
-	}
-	return (count);
+	uint64_t inter = 0, uni = 0;
+	__sm_run_pair_counts(a, b, NULL, NULL, &inter, &uni);
+	return ((size_t)(uni - inter));
 }
 
 sm_t *
@@ -6729,17 +6909,26 @@ sm_create_from_array(const uint64_t *arr, size_t n)
 uint64_t
 sm_hash(const sm_t *map)
 {
-	/* FNV-1a 64-bit over the sequence of set bits.  Content-based
-	 * (encoding-independent): two maps that compare equal under
-	 * sm_equals() hash to the same value. */
+	/* FNV-1a 64-bit over the sequence of maximal set-bit runs.
+	 * Content-based (encoding-independent): two maps that compare
+	 * equal under sm_equals() decompose into the identical run
+	 * sequence and so hash to the same value.  Hashing runs rather
+	 * than individual bits keeps this O(runs), so a 2^31-bit run costs
+	 * one iteration instead of 2^31. */
 	uint64_t h = 0xcbf29ce484222325ULL;
 	if (sm_is_empty(map))
 		return (h);
-	uint64_t i = SM_IDX_MAX;
-	while ((i = sm_next_member(map, i, NULL)) != SM_IDX_MAX) {
-		/* Mix all 8 bytes of the index. */
+	__sm_run_iter_t it;
+	__sm_run_iter_init(&it, map);
+	uint64_t lo = 0, hi = 0;
+	while (__sm_run_next(&it, &lo, &hi)) {
+		/* Mix both endpoints of the run (8 bytes each). */
 		for (int b = 0; b < 8; b++) {
-			h ^= (i >> (b * 8)) & 0xffULL;
+			h ^= (lo >> (b * 8)) & 0xffULL;
+			h *= 0x100000001b3ULL;
+		}
+		for (int b = 0; b < 8; b++) {
+			h ^= (hi >> (b * 8)) & 0xffULL;
 			h *= 0x100000001b3ULL;
 		}
 	}
