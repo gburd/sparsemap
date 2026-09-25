@@ -115,6 +115,27 @@ parsing path should be exercised against the fuzzer for at least
 See `SECURITY.md` for the process.  Don't open public issues for
 security problems.
 
+## Never commit build directories or core dumps
+
+A build directory is as sensitive as a core dump, and both can leak
+secrets:
+
+- Meson records `meson-logs/testlog.json` in every build directory,
+  and that file captures the **full environment of every test** --
+  including any token exported into your shell (e.g.
+  `CARGO_REGISTRY_TOKEN`).  Never `git add` a `builddir*/`, `build*/`,
+  `cov*/`, or coverage directory.  `.gitignore` covers the standard
+  names; if you use a different one, add it there first.
+- The kernel's `core_pattern` may drop `core.PID` files into the
+  working tree when a test binary crashes, and a core dump contains the
+  process's entire memory and environment.  Run tests with `ulimit -c
+  0` so crashes can't write cores, and never commit a `core`,
+  `core.*`, or `vgcore.*` file.  If one appears, delete it.
+
+If you ever discover a committed core dump or build directory, treat
+any secret that could have been in your environment as compromised and
+rotate it.
+
 ## Copyright
 
 The library is MIT-licensed.  By submitting a patch you affirm

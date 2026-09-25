@@ -24,6 +24,9 @@ build/
 build-*/
 cmake-build*/
 .cmake_dirty
+# Coverage / review build dirs (measure_coverage.sh, ad-hoc reviews).
+# The review found cov-review/ was not ignored.
+cov*/
 
 # ──────────────────────────────────────────────────────────────────
 # Documentation generated output
@@ -100,3 +103,29 @@ core
 core.*
 .hegel-c/
 .hegel/
+
+# ──────────────────────────────────────────────────────────────────
+# Secrets, credentials, profiling and fuzzer output that must never
+# be committed (see SECURITY.md / CONTRIBUTING.md).  A crashing binary
+# under an unlimited core ulimit can drop the live environment here.
+# ──────────────────────────────────────────────────────────────────
+# perf(1) profiling data
+perf.data
+perf.data.*
+# dotenv secrets (but NOT the tracked .envrc)
+.env
+.env.*
+.envrc.local
+# keys / certificates
+*.pem
+id_rsa
+id_rsa.*
+id_ed25519*
+# libFuzzer crash / hang artifacts
+crash-*
+timeout-*
+oom-*
+leak-*
+slow-unit-*
+# cargo package archives
+*.crate
