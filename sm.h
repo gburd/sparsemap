@@ -24,15 +24,14 @@
 
 /**
  * @file sparsemap.h
- * @brief A sparse, compressed bitmap (RLE-free variant).
+ * @brief A sparse, compressed bitmap (sparse-only variant).
  *
- * Sparsemap is a mutable, resizable, compressed bitmap.  This is the
- * **RLE-free** sibling of the library: it stores only sparse chunks (no
- * run-length-encoded chunks) and additionally supports a compact
+ * Sparsemap is a mutable, resizable, compressed bitmap.  This variant
+ * stores only sparse chunks and additionally supports a compact
  * **small-set** mode for sets whose indices all lie near zero.  It reads
- * and writes sparse-only maps and **rejects** any serialized stream that
- * carries an RLE-encoded chunk (see "RLE input rejection" below and
- * docs/NO-RLE.md).
+ * and writes sparse-only maps; every chunk in a serialized stream is
+ * read as a sparse chunk, and structural validation bounds every read
+ * (see "Decode safety" below and the design notes under docs/).
  *
  * ## Architecture
  *
@@ -56,12 +55,14 @@
  *
  *   A run of set bits longer than one 2048-bit chunk window is stored as
  *   a stretch of adjacent all-ONES sparse chunks (descriptor ~0, no
- *   payload words), never as a single RLE descriptor.
+ *   payload words).
  *
- *   The descriptor top-two-bits pattern `01` is the RLE flag of the
- *   sibling RLE variant.  This build never emits it and cannot represent
- *   such a chunk, so sm_validate() (and thus sm_open / sm_deserialize)
- *   rejects any map that contains one.
+ *   The encoder never leaves the highest vector slot (descriptor bits
+ *   63:62) as `01`; keeping it ZEROS/ONES/MIXED makes every emitted
+ *   descriptor byte-compatible with the sparse-only wire format.  A
+ *   deserialized stream whose descriptor top two bits are `01` is still
+ *   read as an ordinary sparse chunk (its highest vector is simply
+ *   unused) and accepted only if it is otherwise structurally valid.
  *
  * **Tier 2 (map):** The top-level sparsemap manages an ordered sequence of
  * chunks, each tagged with a 4-byte starting offset.  The map grows and
@@ -78,13 +79,13 @@
  * form would exceed chunk form) and **demotes** chunk->small when
  * removals bring every index back under the threshold; transitions are
  * transparent and lossless.  Every public `sm_*` function behaves
- * identically in both modes.  See docs/NO-RLE.md.
+ * identically in both modes.  See the design notes under docs/.
  *
  * ## Encoding transitions
  *
  * - A sparse chunk whose vectors are all ones (2048 consecutive set bits)
  *   extends into the next chunk as another all-ONES sparse chunk when the
- *   next adjacent bit is set; there is no RLE transition.
+ *   next adjacent bit is set.
  * - Clearing a bit inside such a run simply rewrites the affected sparse
  *   chunk in place.
  *
@@ -158,16 +159,20 @@
  * self-contained, growable, and disposable with sm_free() or libc
  * free().
  *
- * ## RLE input rejection
+ * ## Decode safety
  *
- * This variant reads and writes **sparse-only** maps.  The sibling RLE
- * variant marks a run-length-encoded chunk with the descriptor top-two-
- * bits pattern `01`.  This build cannot represent such a chunk, so
- * sm_validate() rejects any map that contains one; sm_open() and
- * sm_deserialize() therefore return `NULL` (or, per the S1 validation
- * contract, an empty map) for an RLE-encoded stream rather than crashing
- * or silently mis-decoding.  A same-endian sparse-only stream written by
- * either variant round-trips through the other.  See docs/NO-RLE.md.
+ * This variant reads and writes **sparse-only** maps.  There is no
+ * special chunk shape: every descriptor in a serialized stream is read
+ * as a sparse chunk.  sm_validate() bounds every read structurally --
+ * each chunk's size is bounded (a descriptor word plus at most 32
+ * payload words), chunk starts are chunk-aligned and strictly
+ * ascending, chunk spans do not overlap, and the stored chunk count
+ * must match the walk exactly.  A stream whose bytes do not satisfy
+ * these checks is rejected; sm_open() and sm_deserialize() then return
+ * `NULL` (or, per the S1 validation contract, an empty map) rather than
+ * crashing or mis-decoding.  A same-endian sparse-only stream written
+ * by a sibling variant that carries only sparse chunks round-trips
+ * through this one.  See the design notes under docs/.
  */
 #ifndef SPARSEMAP_H
 #define SPARSEMAP_H
@@ -1020,7 +1025,7 @@ uint64_t sm_select(sm_t *map, uint64_t n, bool value);
  *
  * @param[in] map    The sparsemap to search.
  * @param[in] start  0-based position to begin searching.
- * @param[in] len    Required run length.
+ * @param[in] len    Required span length.
  * @param[in] value  true to find set bits, false to find unset bits.
  * @returns 0-based index of the first bit in the run, or SM_IDX_MAX
  *          if no such run exists.
@@ -1633,12 +1638,12 @@ bool sm_validate(const sm_t *map);
  */
 typedef struct sm_stats {
 	size_t chunks_total;      /**< total chunks */
-	size_t chunks_rle;        /**< always 0 (kept for API compatibility) */
+	size_t chunks_reserved;   /**< always 0 (reserved, kept for API compatibility) */
 	size_t chunks_sparse;     /**< chunks using sparse encoding */
 	size_t bytes_used;        /**< sm_get_size(map) */
 	size_t bytes_capacity;    /**< sm_get_capacity(map) */
 	uint64_t bits_set;        /**< sm_cardinality(map) */
-	uint64_t bits_in_rle;     /**< always 0 (kept for API compatibility) */
+	uint64_t bits_reserved;   /**< always 0 (reserved, kept for API compatibility) */
 	uint64_t bits_in_sparse;  /**< bits set within sparse chunks */
 	double bytes_per_set_bit; /**< bytes_used / bits_set */
 } sm_stats_t;

@@ -132,10 +132,10 @@ demo_statistics(void)
 
     sm_stats_t s;
     sm_statistics(m, &s);
-    printf("chunks: total=%zu rle=%zu sparse=%zu\n",
-           s.chunks_total, s.chunks_rle, s.chunks_sparse);
-    printf("bits:   total=%lu in_rle=%lu in_sparse=%lu\n",
-           s.bits_set, s.bits_in_rle, s.bits_in_sparse);
+    printf("chunks: total=%zu reserved=%zu sparse=%zu\n",
+           s.chunks_total, s.chunks_reserved, s.chunks_sparse);
+    printf("bits:   total=%lu reserved=%lu in_sparse=%lu\n",
+           s.bits_set, s.bits_reserved, s.bits_in_sparse);
     printf("bytes:  used=%zu capacity=%zu / per_set_bit=%.4f\n",
            s.bytes_used, s.bytes_capacity, s.bytes_per_set_bit);
 

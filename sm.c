@@ -521,41 +521,6 @@ enum __SM_CHUNK_INFO {
 	        ((__sm_bitvec_t)(to) << ((at) * 2)))
 
 /*
- * RLE detection (this build only)
- *
- * This is the RLE-free variant of sparsemap: the encoder never emits a
- * run-length-encoded chunk, every chunk is sparse.  The one place RLE
- * still matters is the reader: an incoming (untrusted) chunk stream may
- * carry an RLE descriptor written by the RLE variant.  A chunk whose
- * top two bits are 01 is the RLE flag in the original format; this build
- * cannot represent such a chunk, so sm_validate rejects any map that
- * contains one (see the header note and docs/NO-RLE.md).  We keep only
- * this detector; all the RLE accessors (capacity/length get/set) are
- * gone with the encode path.
- *
- * Original RLE descriptor layout, for reference:
- *   Bits 63:62 = 01 (RLE flag)   Bits 61:31 = capacity   Bits 30:0 = length
- */
-#define SM_RLE_FLAGS      0x4000000000000000ULL /* Bits 63:62 = 01 */
-#define SM_RLE_FLAGS_MASK 0xC000000000000000ULL /* Mask for bits 63:62 */
-
-/**
- * @brief Checks if a chunk descriptor carries the (foreign) RLE flag.
- *
- * The RLE-free build never emits RLE chunks, but a deserialized stream
- * may contain one; sm_validate uses this to reject such a map.
- *
- * @param[in] chunk The chunk to check.
- * @return True if the descriptor is RLE-flagged, false otherwise.
- */
-SM_ALWAYS_INLINE bool
-__sm_chunk_is_rle(const __sm_chunk_t *chunk)
-{
-	const __sm_bitvec_t w = chunk->m_data[0];
-	return ((w & SM_RLE_FLAGS_MASK) == SM_RLE_FLAGS);
-}
-
-/*
  * struct sparsemap is defined in <sm.h> (visible here because this
  * file defines SM_INTERNAL before including it; consumers get it via
  * SM_EXPOSE_STRUCT).  Keeping the single definition in the header
@@ -797,8 +762,7 @@ __sm_desc_flag_byte(const __sm_bitvec_t desc, const size_t n)
  * @brief Retrieves the position within the chunk corresponding to the specified bit vector index.
  *
  * This function calculates the position in the chunk's data array that
- * corresponds to the given bit vector index. It handles both run-length
- * encoded (RLE) and non-RLE chunks.
+ * corresponds to the given bit vector index.
  *
  * @param[in] chunk The chunk from which to retrieve the position.
  * @param[in] bv The bit vector index within the chunk.
@@ -981,12 +945,11 @@ __sm_chunk_is_empty(const __sm_chunk_t *chunk)
 /**
  * @brief Retrieves the size of the specified chunk.
  *
- * Computes the byte size of the chunk.  A sparse chunk's size is the
- * descriptor word plus one payload word per MIXED vector (via a lookup
- * table).  A descriptor carrying the foreign RLE flag (only possible on
- * an untrusted, not-yet-rejected stream) is descriptor-only, 8 bytes;
- * returning that keeps the pre-validate stride walk from over-reading
- * before sm_validate rejects the map.
+ * Computes the byte size of the chunk.  A chunk's size is the descriptor
+ * word plus one payload word per MIXED vector (via a lookup table).  The
+ * result is bounded (at most 8 bytes of descriptor plus 32 payload
+ * words), so the pre-validate stride walk can never be driven to
+ * over-read by a crafted descriptor.
  *
  * @param[in] chunk The chunk whose size is to be determined.
  * @return The size of the chunk in bytes.
@@ -996,14 +959,12 @@ __sm_chunk_get_size(const __sm_chunk_t *chunk)
 {
 	/* At least one __sm_bitvec_t is required for the flags (m_data[0]) */
 	size_t size = sizeof(__sm_bitvec_t);
-	if (SM_LIKELY(!__sm_chunk_is_rle(chunk))) {
-		/* Use a lookup table for each byte of the flags */
-		const __sm_bitvec_t desc = *chunk->m_data;
-		for (size_t i = 0; i < sizeof(__sm_bitvec_t); i++) {
-			size += sizeof(__sm_bitvec_t) *
-			    __sm_chunk_calc_vector_size(
-			        __sm_desc_flag_byte(desc, i));
-		}
+	/* Use a lookup table for each byte of the flags */
+	const __sm_bitvec_t desc = *chunk->m_data;
+	for (size_t i = 0; i < sizeof(__sm_bitvec_t); i++) {
+		size += sizeof(__sm_bitvec_t) *
+		    __sm_chunk_calc_vector_size(
+		        __sm_desc_flag_byte(desc, i));
 	}
 	return (size);
 }
@@ -1143,7 +1104,6 @@ __sm_chunk_set_bit(const __sm_chunk_t *chunk, const uint64_t idx, size_t *pos)
 	/* Where in the descriptor does this idx fall, which flag should we examine? */
 	const size_t bv = idx / SM_BITS_PER_VECTOR;
 	__sm_assert(bv < SM_FLAGS_PER_INDEX);
-	__sm_assert(__sm_chunk_is_rle(chunk) == false);
 
 	switch (SM_CHUNK_GET_FLAGS(*chunk->m_data, bv)) {
 	case SM_PAYLOAD_ONES:
@@ -1303,8 +1263,7 @@ __sm_chunk_select(const __sm_chunk_t *chunk, ssize_t n, ssize_t *offset,
  *
  * This function computes the number of bits set to a particular state (true
  * or false) within a chunk of data, starting from a specified index and ending
- * at a specified index. The chunk can either be run-length encoded (RLE) or
- * sparsely encoded.
+ * at a specified index.
  *
  * Invoking this function with `from = 0` and `to = 0` (the range [0, 0]), will
  * compare 1 bit at the position 0 against value. The range [0, 9] will examine
@@ -2113,12 +2072,11 @@ __sm_coalesce_chunk(sm_t *map, __sm_chunk_t *chunk, size_t offset,
     size_t left_hint)
 {
 	/*
-	 * RLE-free build: coalescing existed only to merge adjacent all-ONES
-	 * runs into a single RLE descriptor.  With no RLE encoding, adjacent
-	 * all-ONES sparse chunks are already a valid, fully general
-	 * representation of a run, so there is nothing to coalesce -- this is
-	 * a deliberate no-op.  The signature is kept so the many call sites
-	 * (set/unset/merge/split) stay unchanged.
+	 * This build stores runs as a stretch of adjacent all-ONES sparse
+	 * chunks, which is already a valid, fully general representation --
+	 * there is nothing to merge, so this is a deliberate no-op.  The
+	 * signature is kept so the many call sites (set/unset/merge/split)
+	 * stay unchanged.
 	 */
 	(void)map;
 	(void)chunk;
@@ -2132,13 +2090,11 @@ __sm_coalesce_chunk(sm_t *map, __sm_chunk_t *chunk, size_t offset,
 }
 
 /**
- * @brief Coalesces adjacent chunks in a sparse map (RLE-free build: no-op).
+ * @brief Coalesces adjacent chunks in a sparse map (deliberate no-op).
  *
- * Coalescing existed only to merge adjacent all-ONES runs into a single
- * RLE descriptor.  With no RLE encoding there is nothing to merge:
- * adjacent all-ONES sparse chunks are already a valid, fully general
- * representation of a run.  Kept as a no-op so every call site is
- * unchanged.
+ * Adjacent all-ONES sparse chunks are already a valid, fully general
+ * representation of a run, so there is nothing to merge.  Kept as a
+ * no-op so every call site is unchanged.
  *
  * @param[in] map The sparse map to coalesce.
  * @return Always 0 (no bytes coalesced).
@@ -3004,8 +2960,8 @@ sm_contains(const sm_t *map, uint64_t idx, sm_cursor_t *cur)
  * @brief Unsets a bit at a specified index in the given sparse map.
  *
  * This function clears the bit at the given index in the sparse map. It handles
- * different scenarios, including chunks that do not exist for the specified index,
- * run-length encoded (RLE) chunks, and sparse chunks.
+ * different scenarios, including chunks that do not exist for the specified index
+ * and sparse chunks.
  *
  * The function also optionally performs chunk coalescing if the `coalesce` flag is set.
  *
@@ -3190,7 +3146,6 @@ __sparsemap_add(sm_t *map, const uint64_t idx, uint8_t *p, size_t offset,
 	const __sm_idx_t start = __sm_load_idx((const uint8_t *)p);
 
 	__sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
-	__sm_assert(__sm_chunk_is_rle(&chunk) == false);
 
 	switch (__sm_chunk_set_bit(&chunk, idx - start, &pos)) {
 	case SM_OK:
@@ -3346,17 +3301,15 @@ __sm_map_set(sm_t *map, uint64_t idx, const bool coalesce, sm_cursor_t *cur)
 		 * SM_PAYLOAD_NONE which reduces the carrying capacity of the chunk. In
 		 * this case we should remove those flags and try again.
 		 */
-		__sm_assert(__sm_chunk_is_rle(&chunk) == false);
 		__sm_chunk_increase_capacity(&chunk, SM_CHUNK_MAX_CAPACITY);
 		capacity = __sm_chunk_get_capacity(&chunk);
 	}
 
 	/*
-	 * RLE-free build: a run longer than one chunk's sparse capacity is
-	 * stored as several adjacent all-ONES sparse chunks, never a single
-	 * RLE chunk.  When this full chunk's next bit is set (idx - start ==
-	 * SM_CHUNK_MAX_CAPACITY == capacity) the generic "insert a new chunk
-	 * after this one" path below handles it.
+	 * A run longer than one chunk's sparse capacity is stored as several
+	 * adjacent all-ONES sparse chunks.  When this full chunk's next bit
+	 * is set (idx - start == SM_CHUNK_MAX_CAPACITY == capacity) the
+	 * generic "insert a new chunk after this one" path below handles it.
 	 */
 
 	if (idx - start >= capacity) {
@@ -3643,7 +3596,7 @@ sm_assign(sm_t *map, const uint64_t idx, const bool value)
  * This function determines the starting offset of a sparse map by analyzing
  * the chunks within the map. It iterates over the chunk data to find the first
  * payload of interest, either `ones` or `mixed`, and returns the corresponding
- * offset. If the chunk is run-length encoded (RLE), it shortcuts to this calculation.
+ * offset.
  *
  * @param[in] map Pointer to the sparse map to analyze.
  * @return The starting offset within the sparse map.
@@ -4014,9 +3967,12 @@ static bool
 __sm_encode_sparse_chunk(__sm_bitvec_t words[32], int cap_flags[32],
     __sm_bitvec_t *out_desc, __sm_bitvec_t out_vecs[32], int *out_nvecs)
 {
-	/* Slot 31 (the highest) must never be NONE, because NONE in bits 63:62
-     of the descriptor would be misidentified as the RLE flag.  Force it
-     to ZEROS (adding 64 bits of harmless zero capacity) when needed. */
+	/* Slot 31 (the highest) must never be NONE.  NONE in bits 63:62 of
+     the descriptor sets the top two bits to 01; keeping slot 31 as
+     ZEROS/ONES/MIXED instead guarantees this build's descriptors are
+     byte-compatible with the sparse-only wire format the sibling
+     variant also reads.  Force it to ZEROS (adding 64 bits of harmless
+     zero capacity) when needed. */
 	if (!cap_flags[SM_FLAGS_PER_INDEX - 1]) {
 		cap_flags[SM_FLAGS_PER_INDEX - 1] = 1;
 		words[SM_FLAGS_PER_INDEX - 1] = 0;
@@ -4247,7 +4203,7 @@ __sm_append_sparse_chunk(sm_t **resultp, __sm_idx_t start, __sm_bitvec_t desc,
 /**
  * @brief Append a run of all-ONES sparse chunks to the result map.
  *
- * A whole-chunk run of set bits is stored as one or more all-ONES
+ * A whole-chunk span of set bits is stored as one or more all-ONES
  * sparse chunks (descriptor ~0, no payload words).  Callers only ever
  * pass a chunk-aligned capacity equal to the length (whole 2048-bit
  * windows); any sub-chunk remainder is emitted through the words path
@@ -4255,8 +4211,8 @@ __sm_append_sparse_chunk(sm_t **resultp, __sm_idx_t start, __sm_bitvec_t desc,
  *
  * @param[in,out] resultp    Pointer to result map pointer (may grow).
  * @param[in]     start      The (chunk-aligned) start offset.
- * @param[in]     capacity   Run capacity in bits (== length, chunk-aligned).
- * @param[in]     length     Run length in bits (whole 2048-bit windows).
+ * @param[in]     capacity   Span capacity in bits (== length, chunk-aligned).
+ * @param[in]     length     Span length in bits (whole 2048-bit windows).
  * @return true on success, false on allocation failure.
  */
 static bool
@@ -4590,20 +4546,10 @@ sm_offset(const sm_t *map, ssize_t offset)
 		__sm_chunk_init(&chunk, p);
 		const size_t chunk_size = __sm_chunk_get_size(&chunk);
 
-		if (__sm_chunk_is_rle(&chunk)) {
-			/*
-			 * RLE-free build: a source map never contains an RLE
-			 * chunk (sm_add and the set ops only emit sparse, and
-			 * sm_deserialize/sm_open reject an RLE stream), so this
-			 * branch is unreachable.  The sparse path below shifts
-			 * every real source chunk.
-			 */
-			__sm_assert(false && "sm_offset: RLE source chunk in sparse-only build");
-			sm_free(result);
-			return (NULL);
-		} else {
-			/* Sparse chunk: expand to 32 words, compute final absolute positions,
-         place into correct output chunk(s). */
+		/* Every chunk is sparse in this build: expand to 32 words,
+		 * compute final absolute positions, place into the correct
+		 * output chunk(s). */
+		{
 			__sm_bitvec_t words[32];
 			int cf[32];
 			__sm_expand_sparse_chunk(&chunk, words, cf);
@@ -5527,7 +5473,8 @@ sm_add_many_grow(sm_t **map, const uint64_t *arr, size_t n)
  * Set every bit in [lo, hi) on a result map that is being built through
  * the ordered emitter (__sm_emitter_t).  Runs arrive ascending and
  * non-overlapping, so this is O(output chunks): whole chunks go out as
- * RLE and only the sub-chunk head/tail touch the words path.  This is
+ * all-ONES sparse chunks and only the sub-chunk head/tail touch the
+ * words path.  This is
  * where the S4 amplification lived -- the old body added one bit at a
  * time, so a single [0, 2^31) survivor cost 2^31 sm_add calls.
  */
@@ -6178,17 +6125,18 @@ sm_validate(const sm_t *map)
 		if (p + SM_SIZEOF_OVERHEAD + chunk_size > end) {
 			return (false);
 		}
-		/* (a) RLE reader decision: this is the RLE-free variant and it
-		 * cannot represent a run-length-encoded chunk.  A deserialized
-		 * stream that carries one (written by the RLE variant) is
-		 * rejected cleanly here -- sm_open / sm_deserialize then return
-		 * NULL or an empty map, never a crash (S1 contract).
-		 * __sm_chunk_get_size already returned the safe 8-byte RLE
-		 * stride above, so the walk did not over-read.  See the header
-		 * note and docs/NO-RLE.md. */
-		if (__sm_chunk_is_rle(&chunk)) {
-			return (false);
-		}
+		/* (a) No chunk shape is special-cased here: every descriptor is
+		 * read as a sparse chunk (this build has only one chunk kind).
+		 * __sm_chunk_get_size returned a bounded stride above (at most a
+		 * descriptor word plus 32 payload words), so the walk did not
+		 * over-read; the structural checks below (bounds, chunk-aligned
+		 * start, ascending start, non-overlap, exact count) bound every
+		 * read and reject any malformed stream.  A stream written by the
+		 * sibling variant that happens to set a descriptor's top two bits
+		 * to 01 simply denotes a sparse chunk with its highest vector
+		 * unused; it is accepted only if it is otherwise structurally
+		 * valid and round-trips as an ordinary sparse map.  See the
+		 * header note and the design notes under docs/. */
 		const size_t capacity = __sm_chunk_get_capacity(&chunk);
 		/* (c) [start, start + capacity) must not extend past the
 		 * addressable index space.  A chunk that ends exactly at 2^64
@@ -6252,8 +6200,9 @@ sm_statistics(const sm_t *map, sm_stats_t *stats)
 		__sm_chunk_t chunk;
 		__sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
 		const size_t chunk_size = __sm_chunk_get_size(&chunk);
-		/* Every chunk is sparse in this build; chunks_rle / bits_in_rle
-		 * remain 0 (kept in sm_stats_t for API compatibility). */
+		/* Every chunk is sparse in this build; chunks_reserved /
+		 * bits_reserved remain 0 (kept in sm_stats_t for API
+		 * compatibility). */
 		stats->chunks_sparse++;
 		const __sm_bitvec_t desc = chunk.m_data[0];
 		size_t pos = 1;
@@ -6269,7 +6218,7 @@ sm_statistics(const sm_t *map, sm_stats_t *stats)
 		}
 		p += SM_SIZEOF_OVERHEAD + chunk_size;
 	}
-	stats->bits_set = stats->bits_in_rle + stats->bits_in_sparse;
+	stats->bits_set = stats->bits_reserved + stats->bits_in_sparse;
 	stats->bytes_per_set_bit = stats->bits_set == 0 ?
 	    0.0 :
 	    (double)stats->bytes_used / (double)stats->bits_set;
@@ -6570,7 +6519,7 @@ sm_intersection(const sm_t *a, const sm_t *b)
  * @brief Emit set bits from a sparse chunk within [from, to) into result.
  *
  * Uses expand-mask-encode for bulk processing.  Every chunk is sparse in
- * this RLE-free build.
+ * this build.
  */
 static bool
 __sm_emit_chunk_bits(sm_t **resultp, const __sm_chunk_t *chunk,
@@ -7158,12 +7107,9 @@ sm_split(sm_t *map, uint64_t idx, sm_t *other)
 	/*
 	 * Here's how this is going to work, there are three phases.
 	 * 1) Skip over any chunks before the idx.
-	 * 2) If the idx falls within a chunk, ...
-	 *  2a) If that chunk is RLE, separate the RLE into two or three chunks
-	 *  2b) Recursively call sm_split() because now we have a sparse chunk
-	 * 3) Split the sparse chunk
-	 * 4) Keep half in the src and insert the other half into the dst
-	 * 5) Move any remaining chunks to dst.
+	 * 2) If the idx falls within a chunk, split that sparse chunk.
+	 * 3) Keep half in the src and insert the other half into the dst
+	 * 4) Move any remaining chunks to dst.
 	 */
 	uint8_t *src = __sm_get_chunk_data(map, 0);
 	uint8_t *dst = __sm_get_chunk_end(other);
@@ -7198,14 +7144,8 @@ sm_split(sm_t *map, uint64_t idx, sm_t *other)
 		__sm_chunk_init(&d_chunk, dst + SM_SIZEOF_OVERHEAD);
 		__sm_idx_t src_start = __sm_load_idx((const uint8_t *)src);
 
-		/* (2a) In the RLE variant a chunk could be run-length encoded
-		 * here; in this RLE-free build every chunk is sparse (a
-		 * deserialized RLE stream is rejected by sm_validate), so the
-		 * split always lands in the sparse path below. */
-		__sm_assert(!__sm_chunk_is_rle(&s_chunk));
-
 		/*
-		 * (3) We're in the middle of a sparse chunk, let's split it.
+		 * (2) We're in the middle of a sparse chunk, let's split it.
 		 */
 
 		/* The destination is caller-provided and may be too small for
@@ -7258,7 +7198,7 @@ sm_split(sm_t *map, uint64_t idx, sm_t *other)
 	size_t split_offset = src - map->m_data;
 	size_t chunks_to_move = count - i;
 	/* The chunk stream ends here; the move must never read past it.  On
-	 * a valid-but-adversarial map the RLE-separation and sparse-split
+	 * a valid-but-adversarial map the chunk-skip and sparse-split
 	 * phases above can leave `i` disagreeing with the bytes actually
 	 * present, so `count - i` may claim more chunks than remain -- a
 	 * source-side over-read in __sm_append_data (ASan heap-buffer-

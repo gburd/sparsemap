@@ -12,23 +12,47 @@ maintained together; the mainline stays the RLE version.
   2048-bit chunk window is stored as a stretch of adjacent *all-ONES
   sparse* chunks (descriptor `~0`, no payload words), not as a single
   RLE descriptor.  The maximal-run iterator, the set-algebra emitter,
-  `sm_offset`, and `sm_split` all produce sparse-only output.
-- **RLE input is rejected, cleanly.**  The RLE variant marks a
-  run-length-encoded chunk with the descriptor top-two-bits pattern
-  `01`.  This build cannot represent such a chunk, so `sm_validate()`
-  rejects any map that contains one; `sm_open()` and `sm_deserialize()`
-  therefore return `NULL` (or, per the S1 validation contract, an empty
-  map) for an RLE-encoded stream rather than crashing or mis-decoding.
-  The pre-validate size walk already returns the safe 8-byte stride for
-  an RLE-flagged descriptor, so the reader never over-reads before the
-  reject fires.  (We do **not** expand RLE-to-sparse on read: reject is
-  simpler and correct for a sibling variant.)
-- A same-endian, sparse-only stream written by either variant
-  round-trips through the other.
+  `sm_offset`, and `sm_split` all produce sparse-only output.  The
+  encoder additionally never leaves the highest vector slot NONE, so no
+  emitted descriptor ever has its top two bits set to `01`.
+- **There is no RLE concept in the reader.**  This build has a single
+  chunk kind: every descriptor in a deserialized stream is read as a
+  *sparse* chunk.  It no longer inspects the descriptor's top-two-bits
+  pattern.  Decode safety comes entirely from the structural checks in
+  `sm_validate()`:
+    - each chunk's size is bounded — a descriptor word plus at most 32
+      payload words (264 bytes), computed from the per-vector flag table
+      — so the pre-validate stride walk can never be driven to over-read;
+    - the running bound `p + SM_SIZEOF_OVERHEAD + chunk_size > end`
+      rejects any chunk that would read past the buffer *before* the
+      payload is touched (verified against a descriptor engineered to
+      demand the maximal 264-byte stride against a 24-byte buffer);
+    - chunk starts must be chunk-aligned and strictly ascending, spans
+      must not overlap, and the stored chunk count must match the walk
+      exactly.
+  A stream that fails any of these is rejected; `sm_open()` /
+  `sm_deserialize()` return `NULL` (or, per the S1 contract, an empty
+  map) rather than crashing or mis-decoding.
+- **A foreign `01`-top-bit descriptor is now read as an ordinary sparse
+  chunk.**  The sibling RLE variant marks a run-length chunk with the
+  descriptor top-two-bits pattern `01`.  Because this build has no RLE
+  concept, those same bytes simply denote a sparse chunk whose highest
+  vector is unused.  Such a stream is *accepted* when it is otherwise
+  structurally valid — it validates and round-trips as a perfectly
+  ordinary sparse map — and *rejected* only when it violates a
+  structural rule (for example a non-chunk-aligned start).  This is
+  correct for an RLE-agnostic reader: the byte pattern denotes a sparse
+  chunk now, and no over-read, crash, or malformed-map acceptance is
+  possible (proven under ASan + UBSan + valgrind; see
+  `tests/test_chunk_transitions.c`, `test_sparse_only_contract`).  A
+  same-endian, sparse-only stream that carries no RLE chunk still
+  round-trips between the two variants.
 
 Everything else — the sparse chunk codec, the 3-word `sm_t`, the wire
 header, the hardening contracts (S1–S5), the full `sm_*` surface — is
-identical to the RLE build's `sm.h` (minus the RLE-specific macros).
+identical to the RLE build's `sm.h` (minus the RLE-specific macros; note
+that `sm.c` and `sm.h` in this variant contain **no** reference to RLE
+at all).
 
 ## Small-set mode
 
