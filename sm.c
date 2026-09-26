@@ -6435,6 +6435,42 @@ __sm_emit_run(__sm_emitter_t *e, uint64_t lo, uint64_t hi)
 	return (__sm_emit_rle(e, (__sm_idx_t)body_lo, len, len));
 }
 
+/*
+ * Absolute shifted start of a chunk under sm_offset, computed without a
+ * signed-overflow intermediate.
+ *
+ * sm_offset shifts every bit at position i to i + offset.  A chunk that
+ * starts at src_start therefore lands at src_start + offset, which for a
+ * large |offset| overflows the ssize_t used by the old `(ssize_t)src_start
+ * + offset` expression even though the true value fits (the caller's
+ * ERANGE / drop guards already bound the surviving range to
+ * [0, SM_IDX_MAX]).  Return the shifted start as an unsigned magnitude
+ * plus a sign flag: *neg is true when the start falls below bit 0 (only
+ * possible for offset < 0), in which case *mag is how far below 0 it is.
+ * The whole computation stays in uint64_t / ssize_t with explicit range
+ * checks -- no __int128, no compiler builtins (MSVC-portable, two-file
+ * style).
+ */
+static inline uint64_t
+__sm_offset_abs_start(uint64_t src_start, ssize_t offset, bool *neg)
+{
+	if (offset >= 0) {
+		/* Non-negative shift.  The offset>0 ERANGE guard already
+		 * proved max + offset <= SM_IDX_MAX and src_start <= max, so
+		 * this uint64_t add cannot wrap. */
+		*neg = false;
+		return (src_start + (uint64_t)offset);
+	}
+	/* offset < 0: |offset| as an unsigned magnitude (SSIZE_MIN-safe). */
+	const uint64_t down = (uint64_t)(-(offset + 1)) + 1;
+	if (src_start >= down) {
+		*neg = false;
+		return (src_start - down);
+	}
+	*neg = true;
+	return (down - src_start);
+}
+
 sm_t *
 sm_offset(const sm_t *map, ssize_t offset)
 {
@@ -6475,7 +6511,11 @@ sm_offset(const sm_t *map, ssize_t offset)
 	/* Check if all bits would be shifted below 0 */
 	if (offset < 0) {
 		uint64_t max = sm_maximum(map);
-		if ((ssize_t)max + offset < 0) {
+		/* Compare in unsigned to avoid the (ssize_t)max cast UB when a
+		 * valid map holds a bit above 2^63: the whole map is dropped
+		 * iff every bit shifts below 0, i.e. max < |offset|. */
+		const uint64_t neg = (uint64_t)(-(offset + 1)) + 1; /* |offset| */
+		if (max < neg) {
 			return (NULL); /* all bits shifted away */
 		}
 	}
@@ -6519,19 +6559,27 @@ sm_offset(const sm_t *map, ssize_t offset)
 			    __sm_chunk_rle_get_length(&chunk);
 
 			/* RLE set bits occupy [src_start, src_start + rle_len).
-         After offset: [src_start + offset, src_start + offset + rle_len). */
-			ssize_t final_start = (ssize_t)src_start + offset;
-			ssize_t final_end = final_start + (ssize_t)rle_len;
-
-			/* Clip to >= 0 */
-			if (final_end <= 0) {
-				goto next_chunk;
+			 * After the shift they occupy [start, start + rle_len)
+			 * where start = src_start + offset.  Compute start as an
+			 * unsigned magnitude + sign so a large |offset| cannot
+			 * overflow a signed intermediate; clip the part that
+			 * falls below bit 0. */
+			bool neg;
+			const uint64_t mag =
+			    __sm_offset_abs_start(src_start, offset, &neg);
+			uint64_t clipped_start;
+			size_t new_len;
+			if (neg) {
+				/* Run starts mag bits below 0. */
+				if (rle_len <= (size_t)mag) {
+					goto next_chunk; /* wholly below 0 */
+				}
+				clipped_start = 0;
+				new_len = rle_len - (size_t)mag;
+			} else {
+				clipped_start = mag;
+				new_len = rle_len;
 			}
-			if (final_start < 0) {
-				final_start = 0;
-			}
-
-			size_t new_len = (size_t)(final_end - final_start);
 			if (new_len == 0) {
 				goto next_chunk;
 			}
@@ -6539,9 +6587,9 @@ sm_offset(const sm_t *map, ssize_t offset)
 			/* Align the start to chunk boundary */
 			__sm_idx_t aligned_start =
 			    (__sm_idx_t)__sm_get_chunk_aligned_offset(
-			        (size_t)final_start);
+			        (size_t)clipped_start);
 			size_t rle_offset_in_chunk =
-			    (size_t)final_start - aligned_start;
+			    (size_t)clipped_start - aligned_start;
 
 			if (rle_offset_in_chunk == 0) {
 				/* Starts on chunk boundary, emit as pure RLE */
@@ -6673,22 +6721,36 @@ sm_offset(const sm_t *map, ssize_t offset)
          If intra >= 0: right-shift within the 32-word array, overflow to carry.
          If intra < 0 (new start negative): left-shift, dropping low bits. */
 
-			ssize_t new_abs_start = (ssize_t)src_start + offset;
+			bool neg;
+			const uint64_t mag =
+			    __sm_offset_abs_start(src_start, offset, &neg);
 
-			/* Compute aligned output chunk start and intra-chunk shift */
-			ssize_t out_aligned;
+			/* Compute aligned output chunk start and intra-chunk shift.
+			 * All arithmetic is unsigned; intra_shift for the
+			 * non-negative case is a within-chunk remainder (0 ..
+			 * SM_CHUNK_MAX_CAPACITY-1), so it fits ssize_t with room to
+			 * spare.  A start below bit 0 (neg) becomes a left-shift by
+			 * `mag` bits, dropping the low bits. */
 			ssize_t intra_shift;
+			uint64_t out_aligned;
 
-			if (new_abs_start >= 0) {
-				out_aligned =
-				    (ssize_t)__sm_get_chunk_aligned_offset(
-				        (size_t)new_abs_start);
-				intra_shift = new_abs_start - out_aligned;
+			if (!neg) {
+				const uint64_t oa =
+				    __sm_get_chunk_aligned_offset((size_t)mag);
+				out_aligned = oa;
+				intra_shift = (ssize_t)(mag - oa);
 			} else {
-				/* new_abs_start < 0: bits below 0 get dropped, surviving bits start at 0 */
+				/* start < 0: surviving bits begin at 0, low `mag`
+				 * bits drop.  A drop of a whole source chunk
+				 * (mag >= SM_CHUNK_MAX_CAPACITY bits) leaves
+				 * nothing.  Otherwise represent it as a negative
+				 * intra_shift whose magnitude is the drop amount
+				 * (< 2048, so it fits ssize_t). */
 				out_aligned = 0;
-				intra_shift =
-				    new_abs_start; /* negative = left shift */
+				if (mag >= SM_CHUNK_MAX_CAPACITY) {
+					goto next_chunk;
+				}
+				intra_shift = -(ssize_t)mag;
 			}
 
 			/* Build the shifted 32-word arrays for main output chunk and overflow */

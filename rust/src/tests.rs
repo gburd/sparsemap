@@ -166,6 +166,42 @@ fn shift() {
 }
 
 #[test]
+fn shift_extreme_offsets_are_overflow_safe() {
+    // The C sm_offset had a signed-overflow bug for |offset| near
+    // SSIZE_MAX; the Rust shifted() uses checked u64 arithmetic per bit,
+    // so extreme offsets must never panic and must drop out-of-range
+    // bits individually.
+    let m: SparseMap = [0, 5, 100_000, u64::MAX - 10].into_iter().collect();
+
+    // +i64::MAX: only bits whose value + i64::MAX <= u64::MAX survive.
+    let up = m.shifted(i64::MAX);
+    for b in &m {
+        match b.checked_add(i64::MAX as u64) {
+            Some(s) => assert!(up.contains(s)),
+            None => {} // dropped
+        }
+    }
+    assert_eq!(up.cardinality(), [0u64, 5, 100_000].len() as u64);
+
+    // -i64::MAX and i64::MIN: bits below zero drop, no panic.
+    let _ = m.shifted(-i64::MAX);
+    let dn = m.shifted(i64::MIN);
+    // Only u64::MAX-10 survives i64::MIN if it is >= |i64::MIN|.
+    for b in &m {
+        match b.checked_sub(i64::MIN.unsigned_abs()) {
+            Some(s) => assert!(dn.contains(s)),
+            None => {}
+        }
+    }
+
+    // +2^62 on small bits: every bit shifts cleanly (no overflow).
+    let up2 = m.shifted(1i64 << 62);
+    assert_eq!(up2.cardinality(), 3); // u64::MAX-10 + 2^62 overflows -> dropped
+    assert!(up2.contains(1u64 << 62));
+    assert!(up2.contains((1u64 << 62) + 5));
+}
+
+#[test]
 fn insert_range_uses_runs() {
     let mut m = SparseMap::new();
     m.insert_range(0, 5 * CHUNK_BITS);
