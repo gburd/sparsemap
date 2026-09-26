@@ -2176,7 +2176,7 @@ __sm_get_size_impl(const sm_t *map)
 	if (valid_count != count) {
 		__sm_set_chunk_count((sm_t *)map, valid_count);
 	}
-	return (SM_SIZEOF_OVERHEAD + (p - start));
+	return (SM_SIZEOF_OVERHEAD + (size_t)(p - start));
 }
 
 /**
@@ -2508,10 +2508,11 @@ static void
 __sm_insert_data(sm_t *map, const size_t offset, const uint8_t *buffer,
     const size_t buffer_size)
 {
+	uint8_t *p;
 	__sm_assert(map->m_data_used + buffer_size <= __sm_cap(map));
 	__sm_assert(offset <= map->m_data_used);
 
-	uint8_t *p = __sm_get_chunk_data(map, offset);
+	p = __sm_get_chunk_data(map, offset);
 	memmove(p + buffer_size, p, map->m_data_used - offset);
 	memcpy(p, buffer, buffer_size);
 	map->m_data_used += buffer_size;
@@ -2530,8 +2531,9 @@ __sm_insert_data(sm_t *map, const size_t offset, const uint8_t *buffer,
 static void
 __sm_remove_data(sm_t *map, const size_t offset, const size_t gap_size)
 {
+	uint8_t *p;
 	__sm_assert(map->m_data_used >= gap_size);
-	uint8_t *p = __sm_get_chunk_data(map, offset);
+	p = __sm_get_chunk_data(map, offset);
 	memmove(p, p + gap_size, map->m_data_used - offset - gap_size);
 	map->m_data_used -= gap_size;
 }
@@ -2611,11 +2613,11 @@ __sm_coalesce_chunk(sm_t *map, __sm_chunk_t *chunk, size_t offset,
 				    __sm_get_chunk_data(map, adj_offset);
 				const __sm_idx_t adj_start =
 				    __sm_load_idx((const uint8_t *)adj_p);
+				size_t adj_length;
 				__sm_chunk_init(&adj,
 				    adj_p + SM_SIZEOF_OVERHEAD);
 				/* Is the adjacent chunk on the left RLE or a sparse chunk of all ones? */
-				const size_t adj_length =
-				    __sm_chunk_get_run_length(&adj);
+				adj_length = __sm_chunk_get_run_length(&adj);
 				if (adj_length > 0) {
 					/* Does it align with this chunk? */
 					if (adj_start + adj_length == start) {
@@ -2629,22 +2631,11 @@ __sm_coalesce_chunk(sm_t *map, __sm_chunk_t *chunk, size_t offset,
 							const bool adj_is_rle =
 							    __sm_chunk_is_rle(
 							        &adj);
-							bool can_coalesce =
-							    true;
-
-							if (adj_is_rle &&
-							    adj_length >
-							        adj_capacity) {
-								can_coalesce =
-								    false;
-							}
-
 							/* Calculate new length as span from adjacent start to end of current run */
-							size_t new_length =
+							const size_t new_length =
 							    (start +
 							        run_length) -
 							    adj_start;
-
 							/*
 							 * Derive capacity from VEC-aligned boundaries, looking past the
 							 * current chunk (being absorbed) to find the real next neighbor.
@@ -2653,6 +2644,8 @@ __sm_coalesce_chunk(sm_t *map, __sm_chunk_t *chunk, size_t offset,
 							    merge_data_end =
 							        adj_start +
 							    new_length;
+							bool can_coalesce =
+							    true;
 							size_t new_capacity =
 							    ((merge_data_end +
 							         SM_CHUNK_MAX_CAPACITY -
@@ -2666,6 +2659,14 @@ __sm_coalesce_chunk(sm_t *map, __sm_chunk_t *chunk, size_t offset,
 							    SM_SIZEOF_OVERHEAD +
 							    __sm_chunk_get_size(
 							        chunk);
+
+							if (adj_is_rle &&
+							    adj_length >
+							        adj_capacity) {
+								can_coalesce =
+								    false;
+							}
+
 							if (post_offset <
 							    map->m_data_used -
 							        (SM_SIZEOF_OVERHEAD +
@@ -2769,11 +2770,11 @@ __sm_coalesce_chunk(sm_t *map, __sm_chunk_t *chunk, size_t offset,
 				    __sm_get_chunk_data(map, adj_offset);
 				const __sm_idx_t adj_start =
 				    __sm_load_idx((const uint8_t *)adj_p);
+				size_t adj_length;
 				__sm_chunk_init(&adj,
 				    adj_p + SM_SIZEOF_OVERHEAD);
 				/* Is the adjacent right chunk RLE or a sparse with a run of ones? */
-				size_t adj_length =
-				    __sm_chunk_get_run_length(&adj);
+				adj_length = __sm_chunk_get_run_length(&adj);
 				/* If this is a SET operation and idx is valid and within the adjacent chunk,
 				 * use it to calculate accurate run length (prevents overestimation) */
 				if (is_set_op && idx != SM_IDX_MAX &&
@@ -2798,8 +2799,34 @@ __sm_coalesce_chunk(sm_t *map, __sm_chunk_t *chunk, size_t offset,
 							const bool adj_is_rle =
 							    __sm_chunk_is_rle(
 							        &adj);
+							/* Calculate new length as span from this start to end of adjacent run */
+							const size_t new_length =
+							    (adj_start +
+							        adj_length) -
+							    start;
+							/*
+							 * Derive capacity from VEC-aligned boundaries, looking past the
+							 * adjacent chunk (being absorbed) to find the real next neighbor.
+							 */
+							const size_t
+							    r_data_end = start +
+							    new_length;
+							const size_t r_adj_size =
+							    __sm_chunk_get_size(
+							        &adj);
+							const size_t r_post =
+							    adj_offset +
+							    SM_SIZEOF_OVERHEAD +
+							    r_adj_size;
 							bool can_coalesce =
 							    true;
+							size_t new_capacity =
+							    ((r_data_end +
+							         SM_CHUNK_MAX_CAPACITY -
+							         1) /
+							        SM_CHUNK_MAX_CAPACITY) *
+							        SM_CHUNK_MAX_CAPACITY -
+							    start;
 
 							if (adj_is_rle &&
 							    adj_length >
@@ -2808,33 +2835,6 @@ __sm_coalesce_chunk(sm_t *map, __sm_chunk_t *chunk, size_t offset,
 								    false;
 							}
 
-							/* Calculate new length as span from this start to end of adjacent run */
-							size_t new_length =
-							    (adj_start +
-							        adj_length) -
-							    start;
-
-							/*
-							 * Derive capacity from VEC-aligned boundaries, looking past the
-							 * adjacent chunk (being absorbed) to find the real next neighbor.
-							 */
-							const size_t
-							    r_data_end = start +
-							    new_length;
-							size_t new_capacity =
-							    ((r_data_end +
-							         SM_CHUNK_MAX_CAPACITY -
-							         1) /
-							        SM_CHUNK_MAX_CAPACITY) *
-							        SM_CHUNK_MAX_CAPACITY -
-							    start;
-							const size_t r_adj_size =
-							    __sm_chunk_get_size(
-							        &adj);
-							const size_t r_post =
-							    adj_offset +
-							    SM_SIZEOF_OVERHEAD +
-							    r_adj_size;
 							if (r_post <
 							    map->m_data_used -
 							        (SM_SIZEOF_OVERHEAD +
