@@ -6430,7 +6430,8 @@ __sm_emit_words(__sm_emitter_t *e, __sm_idx_t start,
     const __sm_bitvec_t words[32], const int cap[32])
 {
 	if (e->pending && e->start == start) {
-		for (int i = 0; i < (int)SM_FLAGS_PER_INDEX; i++) {
+		int i;
+		for (i = 0; i < (int)SM_FLAGS_PER_INDEX; i++) {
 			if (cap[i]) {
 				e->words[i] |= words[i];
 				e->cap[i] = 1;
@@ -10481,7 +10482,8 @@ sm_contains_many(const sm_t *map, const uint64_t *idxs, bool *results,
 		return;
 	}
 	if (map == NULL) {
-		for (size_t q = 0; q < n; q++) {
+		size_t q;
+		for (q = 0; q < n; q++) {
 			results[q] = false;
 		}
 		return;
@@ -10495,7 +10497,8 @@ sm_contains_many(const sm_t *map, const uint64_t *idxs, bool *results,
 #endif
 
 	if (__sm_is_small(map)) {
-		for (size_t q = 0; q < n; q++) {
+		size_t q;
+		for (q = 0; q < n; q++) {
 			results[q] = __sm_small_contains(map, idxs[q]);
 		}
 		return;
@@ -10503,7 +10506,8 @@ sm_contains_many(const sm_t *map, const uint64_t *idxs, bool *results,
 
 	const size_t count = __sm_get_chunk_count(map);
 	if (count == 0) {
-		for (size_t q = 0; q < n; q++) {
+		size_t q;
+		for (q = 0; q < n; q++) {
 			results[q] = false;
 		}
 		return;
