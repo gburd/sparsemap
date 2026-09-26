@@ -8759,38 +8759,46 @@ sm_statistics(const sm_t *map, sm_stats_t *stats)
 	stats->bytes_used = sm_get_size((sm_t *)map);
 	stats->bytes_capacity = sm_get_capacity(map);
 
-	const size_t count = __sm_get_chunk_count(map);
-	stats->chunks_total = count;
-	if (count == 0)
-		return;
+	{
+		const size_t count = __sm_get_chunk_count(map);
+		uint8_t *p;
+		size_t i;
+		stats->chunks_total = count;
+		if (count == 0)
+			return;
 
-	uint8_t *p = __sm_get_chunk_data(map, 0);
-	for (size_t i = 0; i < count; i++) {
-		__sm_chunk_t chunk;
-		__sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
-		const size_t chunk_size = __sm_chunk_get_size(&chunk);
-		if (__sm_chunk_is_rle(&chunk)) {
-			stats->chunks_rle++;
-			stats->bits_in_rle += __sm_chunk_rle_get_length(&chunk);
-		} else {
-			stats->chunks_sparse++;
-			const __sm_bitvec_t desc = chunk.m_data[0];
-			size_t pos = 1;
-			for (size_t v = 0; v < SM_FLAGS_PER_INDEX; v++) {
-				const size_t flags =
-				    SM_CHUNK_GET_FLAGS(desc, v);
-				if (flags == SM_PAYLOAD_ONES) {
-					stats->bits_in_sparse +=
-					    SM_BITS_PER_VECTOR;
-				} else if (flags == SM_PAYLOAD_MIXED) {
-					stats->bits_in_sparse +=
-					    (uint64_t)SM_POPCOUNT64(
-					        chunk.m_data[pos]);
-					pos++;
+		p = __sm_get_chunk_data(map, 0);
+		for (i = 0; i < count; i++) {
+			__sm_chunk_t chunk;
+			size_t chunk_size;
+			__sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
+			chunk_size = __sm_chunk_get_size(&chunk);
+			if (__sm_chunk_is_rle(&chunk)) {
+				stats->chunks_rle++;
+				stats->bits_in_rle +=
+				    __sm_chunk_rle_get_length(&chunk);
+			} else {
+				const __sm_bitvec_t desc = chunk.m_data[0];
+				size_t pos = 1;
+				size_t v;
+				stats->chunks_sparse++;
+				for (v = 0; v < SM_FLAGS_PER_INDEX; v++) {
+					const size_t flags =
+					    SM_CHUNK_GET_FLAGS(desc, v);
+					if (flags == SM_PAYLOAD_ONES) {
+						stats->bits_in_sparse +=
+						    SM_BITS_PER_VECTOR;
+					} else if (flags ==
+					    SM_PAYLOAD_MIXED) {
+						stats->bits_in_sparse +=
+						    (uint64_t)SM_POPCOUNT64(
+						        chunk.m_data[pos]);
+						pos++;
+					}
 				}
 			}
+			p += SM_SIZEOF_OVERHEAD + chunk_size;
 		}
-		p += SM_SIZEOF_OVERHEAD + chunk_size;
 	}
 	stats->bits_set = stats->bits_in_rle + stats->bits_in_sparse;
 	stats->bytes_per_set_bit = stats->bits_set == 0 ?
@@ -8801,12 +8809,13 @@ sm_statistics(const sm_t *map, sm_stats_t *stats)
 sm_t *
 sm_shrink_to_fit(sm_t *map)
 {
+	size_t target;
 	if (map == NULL)
 		return (NULL);
 	if (__sm_kind(map) == SM_WRAPPED)
 		return (map);
 
-	const size_t target =
+	target =
 	    map->m_data_used > 0 ? map->m_data_used : SM_SIZEOF_OVERHEAD;
 	if (target == __sm_cap(map))
 		return (map);
@@ -8844,19 +8853,21 @@ sm_serialized_size(const sm_t *map)
 size_t
 sm_serialize(const sm_t *map, uint8_t *out, size_t out_size)
 {
+	size_t needed;
+	uint64_t cardinality;
+	uint8_t flags;
+	uint32_t magic = SM_WIRE_MAGIC;
 	if (out == NULL)
 		return (0);
-	const size_t needed = sm_serialized_size(map);
+	needed = sm_serialized_size(map);
 	if (out_size < needed)
 		return (0);
 
-	const uint64_t cardinality =
+	cardinality =
 	    (map == NULL || sm_is_empty(map)) ? 0 : sm_cardinality((sm_t *)map);
-	const uint8_t flags =
-	    __sm_host_is_little_endian() ? SM_WIRE_FLAG_LE : 0;
+	flags = __sm_host_is_little_endian() ? SM_WIRE_FLAG_LE : 0;
 
 	/* Header: writes via memcpy so it works on strict-alignment cpus. */
-	const uint32_t magic = SM_WIRE_MAGIC;
 	memcpy(out + 0, &magic, 4);
 	out[4] = SM_WIRE_VERSION;
 	out[5] = flags;
@@ -8878,29 +8889,35 @@ sm_serialize(const sm_t *map, uint8_t *out, size_t out_size)
 sm_t *
 sm_deserialize(const uint8_t *in, size_t n)
 {
+	uint32_t magic;
+	uint8_t version;
+	uint8_t flags;
+	bool wire_is_le;
+	bool host_is_le;
+	size_t body_len;
+	sm_t *map;
 	if (in == NULL || n < SM_WIRE_HEADER_LEN + SM_SIZEOF_OVERHEAD) {
 		return (NULL);
 	}
-	uint32_t magic;
 	memcpy(&magic, in + 0, 4);
 	if (magic != SM_WIRE_MAGIC)
 		return (NULL);
 
-	const uint8_t version = in[4];
-	const uint8_t flags = in[5];
+	version = in[4];
+	flags = in[5];
 	if (version != SM_WIRE_VERSION)
 		return (NULL);
 
-	const bool wire_is_le = (flags & SM_WIRE_FLAG_LE) != 0;
-	const bool host_is_le = __sm_host_is_little_endian();
+	wire_is_le = (flags & SM_WIRE_FLAG_LE) != 0;
+	host_is_le = __sm_host_is_little_endian();
 	if (wire_is_le != host_is_le) {
 		/* Cross-endian read not yet supported. */
 		return (NULL);
 	}
 
 	/* Body: starts at offset SM_WIRE_HEADER_LEN. */
-	const size_t body_len = n - SM_WIRE_HEADER_LEN;
-	sm_t *map = sm_create(body_len + 64);
+	body_len = n - SM_WIRE_HEADER_LEN;
+	map = sm_create(body_len + 64);
 	if (map == NULL)
 		return (NULL);
 
@@ -8926,11 +8943,11 @@ sm_deserialize(const uint8_t *in, size_t n)
 static bool
 __sm_copy_chunk_to_result(sm_t **resultp, const uint8_t *chunk_ptr)
 {
-	const __sm_chunk_t chunk = { .m_data =
-		                         (__sm_bitvec_unaligned_t *)(chunk_ptr +
-		                             SM_SIZEOF_OVERHEAD) };
-	const size_t chunk_bytes =
-	    SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&chunk);
+	__sm_chunk_t chunk;
+	size_t chunk_bytes;
+	chunk.m_data =
+	    (__sm_bitvec_unaligned_t *)(chunk_ptr + SM_SIZEOF_OVERHEAD);
+	chunk_bytes = SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&chunk);
 	if (!__sm_ensure_capacity(resultp, chunk_bytes)) {
 		return (false);
 	}
