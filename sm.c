@@ -5018,6 +5018,9 @@ __sm_map_set(sm_t *map, uint64_t idx, const bool coalesce, sm_cursor_t *cur)
 	uint64_t ret_idx = idx;
 	__sm_idx_t start;
 	uint8_t *p;
+	size_t offset;
+	size_t left_hint;
+	size_t capacity;
 	__sm_assert(sm_get_size(map) >= SM_SIZEOF_OVERHEAD);
 
 	/*
@@ -5027,7 +5030,7 @@ __sm_map_set(sm_t *map, uint64_t idx, const bool coalesce, sm_cursor_t *cur)
 	SM_ENOUGH_SPACE(SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t));
 
 	/* Determine if there is a chunk that could contain this index. */
-	size_t offset = __sm_get_chunk_offset(map, idx, cur);
+	offset = (size_t)__sm_get_chunk_offset(map, idx, cur);
 
 	/* Free left-neighbor hint for the coalescing path: the forward walk
 	 * above already passed over the chunk immediately before the located
@@ -5036,7 +5039,7 @@ __sm_map_set(sm_t *map, uint64_t idx, const bool coalesce, sm_cursor_t *cur)
 	 * separates, or shifts chunk layout at/before `offset` resets it to
 	 * SIZE_MAX so a stale hint is never produced.  A SIZE_MAX hint just
 	 * makes __sm_coalesce_chunk fall back to a head-walk. */
-	size_t left_hint = (cur != NULL) ? cur->prev_offset : SIZE_MAX;
+	left_hint = (cur != NULL) ? cur->prev_offset : SIZE_MAX;
 
 	if ((ssize_t)offset == -1) {
 		/*
@@ -5045,6 +5048,7 @@ __sm_map_set(sm_t *map, uint64_t idx, const bool coalesce, sm_cursor_t *cur)
 		 */
 		const uint8_t buf[SM_SIZEOF_OVERHEAD +
 		    (sizeof(__sm_bitvec_t) * 2)] = { 0 };
+		const __sm_bitvec_unaligned_t *v;
 		/* Capacity was established by the SM_ENOUGH_SPACE() above; a
 		 * failure here would mean that check and this size disagree,
 		 * so propagate ENOSPC rather than corrupt the buffer. */
@@ -5056,8 +5060,7 @@ __sm_map_set(sm_t *map, uint64_t idx, const bool coalesce, sm_cursor_t *cur)
 		    __sm_get_chunk_aligned_offset(idx));
 		__sm_set_chunk_count(map, 1);
 
-		const __sm_bitvec_unaligned_t *v =
-		    (__sm_bitvec_unaligned_t *)((uintptr_t)p +
+		v = (__sm_bitvec_unaligned_t *)((uintptr_t)p +
 		        SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t));
 		ret_idx = __sparsemap_add(map, idx, p, 0, v);
 
@@ -5087,6 +5090,7 @@ __sm_map_set(sm_t *map, uint64_t idx, const bool coalesce, sm_cursor_t *cur)
 		 */
 		const uint8_t buf[SM_SIZEOF_OVERHEAD +
 		    (sizeof(__sm_bitvec_t) * 2)] = { 0 };
+		const __sm_bitvec_unaligned_t *v;
 		SM_ENOUGH_SPACE(sizeof(buf));
 		__sm_insert_data(map, offset, &buf[0], sizeof(buf));
 		__sm_set_chunk_count(map, __sm_get_chunk_count(map) + 1);
@@ -5096,8 +5100,7 @@ __sm_map_set(sm_t *map, uint64_t idx, const bool coalesce, sm_cursor_t *cur)
 		    __sm_get_chunk_aligned_offset(idx));
 		__sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
 
-		const __sm_bitvec_unaligned_t *v =
-		    (__sm_bitvec_unaligned_t *)((uintptr_t)p +
+		v = (__sm_bitvec_unaligned_t *)((uintptr_t)p +
 		        SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t));
 		ret_idx = __sparsemap_add(map, idx, p, offset, v);
 		left_hint = SIZE_MAX; /* inserted a chunk before this one */
@@ -5105,7 +5108,7 @@ __sm_map_set(sm_t *map, uint64_t idx, const bool coalesce, sm_cursor_t *cur)
 	}
 
 	__sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
-	size_t capacity = __sm_chunk_get_capacity(&chunk);
+	capacity = __sm_chunk_get_capacity(&chunk);
 
 	if (!__sm_chunk_is_rle(&chunk) &&
 	    capacity < SM_CHUNK_MAX_CAPACITY &&
@@ -5193,12 +5196,14 @@ __sm_map_set(sm_t *map, uint64_t idx, const bool coalesce, sm_cursor_t *cur)
 		 * "insert new chunk" path below.
 		 */
 		if (idx >= start && idx - start < capacity) {
-			__sm_chunk_sep_t sep = { .target = { .p = p,
-				                     .offset = offset,
-				                     .chunk = &chunk,
-				                     .start = start,
-				                     .length = length,
-				                     .capacity = capacity } };
+			__sm_chunk_sep_t sep;
+			memset(&sep, 0, sizeof(sep));
+			sep.target.p = p;
+			sep.target.offset = offset;
+			sep.target.chunk = &chunk;
+			sep.target.start = start;
+			sep.target.length = length;
+			sep.target.capacity = capacity;
 			if (__sm_separate_rle_chunk(map, &sep, idx, 1) != 0) {
 				/* Out of space (or invalid): the map was left
 				 * unmodified.  Propagate ENOSPC so sm_add_grow
@@ -5219,6 +5224,7 @@ __sm_map_set(sm_t *map, uint64_t idx, const bool coalesce, sm_cursor_t *cur)
 		const uint8_t buf[SM_SIZEOF_OVERHEAD +
 		    (sizeof(__sm_bitvec_t) * 2)] = { 0 };
 		const size_t size = __sm_chunk_get_size(&chunk);
+		const __sm_bitvec_unaligned_t *v;
 		SM_ENOUGH_SPACE(sizeof(buf));
 		offset += SM_SIZEOF_OVERHEAD + size;
 		p += SM_SIZEOF_OVERHEAD + size;
@@ -5229,8 +5235,7 @@ __sm_map_set(sm_t *map, uint64_t idx, const bool coalesce, sm_cursor_t *cur)
 		__sm_assert(start == __sm_get_chunk_aligned_offset(start));
 		__sm_set_chunk_count(map, __sm_get_chunk_count(map) + 1);
 
-		const __sm_bitvec_unaligned_t *v =
-		    (__sm_bitvec_unaligned_t *)((uintptr_t)p +
+		v = (__sm_bitvec_unaligned_t *)((uintptr_t)p +
 		        SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t));
 		ret_idx = __sparsemap_add(map, idx, p, offset, v);
 		__sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
@@ -5283,13 +5288,15 @@ __sm_small_add(sm_t *map, uint64_t idx)
 	if (w >= n) {
 		const size_t need = SM_SIZEOF_OVERHEAD +
 		    (w + 1) * sizeof(uint64_t);
+		uint64_t *words;
+		size_t i;
 		if (need > __sm_cap(map)) {
 			errno = ENOSPC;
 			return (SM_IDX_MAX);
 		}
 		/* Zero the newly-exposed words. */
-		uint64_t *words = __sm_small_words(map);
-		for (size_t i = n; i <= w; i++) {
+		words = __sm_small_words(map);
+		for (i = n; i <= w; i++) {
 			words[i] = 0;
 		}
 		n = w + 1;
