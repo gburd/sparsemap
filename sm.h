@@ -1246,7 +1246,7 @@ bool sm_overlap(const sm_t *a, const sm_t *b);
 typedef enum {
 	SM_EMPTY = 0,     /**< no bits set */
 	SM_SINGLETON = 1, /**< exactly one bit set */
-	SM_MULTIPLE = 2,  /**< two or more bits set */
+	SM_MULTIPLE = 2   /**< two or more bits set */
 } sm_membership_t;
 
 /** @brief Classify a sparsemap as empty, singleton, or multi-element.
@@ -1522,7 +1522,7 @@ typedef enum {
 	SM_REL_EQUAL = 0,     /**< a == b */
 	SM_REL_SUBSET_A = 1,  /**< a is a strict subset of b */
 	SM_REL_SUBSET_B = 2,  /**< b is a strict subset of a */
-	SM_REL_DIFFERENT = 3, /**< neither is a subset of the other */
+	SM_REL_DIFFERENT = 3 /**< neither is a subset of the other */
 } sm_subset_relation_t;
 
 /** @brief Classify the subset relationship between \a a and \a b.
