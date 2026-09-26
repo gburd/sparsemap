@@ -87,7 +87,7 @@
 
 #ifndef SM_POPCOUNT64
 #if defined(__GNUC__) || defined(__clang__)
-#define SM_POPCOUNT64(x) ((int)__builtin_popcountll((unsigned long long)(x)))
+#define SM_POPCOUNT64(x) ((int)__builtin_popcountll((uint64_t)(x)))
 #elif defined(_MSC_VER) && (defined(_M_X64) || defined(_M_ARM64))
 #include <intrin.h>
 #define SM_POPCOUNT64(x) ((int)__popcnt64((unsigned __int64)(x)))
@@ -99,10 +99,10 @@
 static inline int
 sm_swar_popcount64(uint64_t x)
 {
-	x = x - ((x >> 1) & 0x5555555555555555ULL);
-	x = (x & 0x3333333333333333ULL) + ((x >> 2) & 0x3333333333333333ULL);
-	x = (x + (x >> 4)) & 0x0F0F0F0F0F0F0F0FULL;
-	return ((int)((x * 0x0101010101010101ULL) >> 56));
+	x = x - ((x >> 1) & UINT64_C(0x5555555555555555));
+	x = (x & UINT64_C(0x3333333333333333)) + ((x >> 2) & UINT64_C(0x3333333333333333));
+	x = (x + (x >> 4)) & UINT64_C(0x0F0F0F0F0F0F0F0F);
+	return ((int)((x * UINT64_C(0x0101010101010101)) >> 56));
 }
 #define SM_POPCOUNT64(x) sm_swar_popcount64((uint64_t)(x))
 #endif
@@ -110,7 +110,7 @@ sm_swar_popcount64(uint64_t x)
 
 #ifndef SM_CTZ64
 #if defined(__GNUC__) || defined(__clang__)
-#define SM_CTZ64(x) __builtin_ctzll((unsigned long long)(x))
+#define SM_CTZ64(x) __builtin_ctzll((uint64_t)(x))
 #elif defined(_MSC_VER) && (defined(_M_X64) || defined(_M_ARM64))
 #include <intrin.h>
 static inline int
@@ -127,27 +127,27 @@ static inline int
 sm_swar_ctz64(uint64_t x)
 {
 	int n = 0;
-	if (!(x & 0xFFFFFFFFULL)) {
+	if (!(x & UINT64_C(0xFFFFFFFF))) {
 		n += 32;
 		x >>= 32;
 	}
-	if (!(x & 0xFFFFULL)) {
+	if (!(x & UINT64_C(0xFFFF))) {
 		n += 16;
 		x >>= 16;
 	}
-	if (!(x & 0xFFULL)) {
+	if (!(x & UINT64_C(0xFF))) {
 		n += 8;
 		x >>= 8;
 	}
-	if (!(x & 0xFULL)) {
+	if (!(x & UINT64_C(0xF))) {
 		n += 4;
 		x >>= 4;
 	}
-	if (!(x & 0x3ULL)) {
+	if (!(x & UINT64_C(0x3))) {
 		n += 2;
 		x >>= 2;
 	}
-	if (!(x & 0x1ULL)) {
+	if (!(x & UINT64_C(0x1))) {
 		n += 1;
 	}
 	return (n);
@@ -158,7 +158,7 @@ sm_swar_ctz64(uint64_t x)
 
 #ifndef SM_CLZ64
 #if defined(__GNUC__) || defined(__clang__)
-#define SM_CLZ64(x) __builtin_clzll((unsigned long long)(x))
+#define SM_CLZ64(x) __builtin_clzll((uint64_t)(x))
 #elif defined(_MSC_VER) && (defined(_M_X64) || defined(_M_ARM64))
 #include <intrin.h>
 static inline int
@@ -174,27 +174,27 @@ static inline int
 sm_swar_clz64(uint64_t x)
 {
 	int n = 0;
-	if (!(x & 0xFFFFFFFF00000000ULL)) {
+	if (!(x & UINT64_C(0xFFFFFFFF00000000))) {
 		n += 32;
 		x <<= 32;
 	}
-	if (!(x & 0xFFFF000000000000ULL)) {
+	if (!(x & UINT64_C(0xFFFF000000000000))) {
 		n += 16;
 		x <<= 16;
 	}
-	if (!(x & 0xFF00000000000000ULL)) {
+	if (!(x & UINT64_C(0xFF00000000000000))) {
 		n += 8;
 		x <<= 8;
 	}
-	if (!(x & 0xF000000000000000ULL)) {
+	if (!(x & UINT64_C(0xF000000000000000))) {
 		n += 4;
 		x <<= 4;
 	}
-	if (!(x & 0xC000000000000000ULL)) {
+	if (!(x & UINT64_C(0xC000000000000000))) {
 		n += 2;
 		x <<= 2;
 	}
-	if (!(x & 0x8000000000000000ULL)) {
+	if (!(x & UINT64_C(0x8000000000000000))) {
 		n += 1;
 	}
 	return (n);
@@ -276,7 +276,15 @@ void
 /* Defaults for any hook the consumer did not supply and that the
  * diagnostic build did not define above. */
 #ifndef __sm_diag
-#define __sm_diag(format, ...) ((void)0)
+static inline void
+#if defined(__GNUC__) || defined(__clang__)
+    __attribute__((format(printf, 1, 2)))
+#endif
+__sm_diag_noop(const char *format, ...)
+{
+	(void)format;
+}
+#define __sm_diag __sm_diag_noop
 #endif
 #ifndef __sm_assert
 #define __sm_assert(expr) ((void)0)
@@ -577,11 +585,11 @@ typedef struct {
  * RLE chunks are immutable by design - any modification that would create gaps or
  * partial runs causes the chunk to be converted to sparse encoding.
  */
-#define SM_RLE_FLAGS      0x4000000000000000ULL /* Bits 63:62 = 01 */
-#define SM_RLE_FLAGS_MASK 0xC000000000000000ULL /* Mask for bits 63:62 */
+#define SM_RLE_FLAGS      UINT64_C(0x4000000000000000) /* Bits 63:62 = 01 */
+#define SM_RLE_FLAGS_MASK UINT64_C(0xC000000000000000) /* Mask for bits 63:62 */
 #define SM_RLE_CAPACITY_MASK \
-	0x3FFFFFFF80000000ULL         /* Mask for bits 61:31 (capacity) */
-#define SM_RLE_LENGTH_MASK 0x7FFFFFFFULL /* Mask for bits 30:0 (length) */
+	UINT64_C(0x3FFFFFFF80000000) /* Mask for bits 61:31 (capacity) */
+#define SM_RLE_LENGTH_MASK UINT64_C(0x7FFFFFFF) /* Mask for bits 30:0 (length) */
 
 /**
  * @brief Checks if the given chunk is flagged as RLE encoded.
@@ -825,7 +833,7 @@ __sm_chunk_get_run_length(const __sm_chunk_t *chunk)
 enum sm_alloc_kind {
 	SM_OWNED_CONTIGUOUS = 0,
 	SM_WRAPPED = 1,
-	SM_OWNED_SPLIT = 2,
+	SM_OWNED_SPLIT = 2
 };
 
 /* -------------------------------------------------------------------
@@ -1038,6 +1046,9 @@ __sm_desc_flag_byte(const __sm_bitvec_t desc, const size_t n)
 SM_ALWAYS_INLINE size_t
 __sm_chunk_get_position(const __sm_chunk_t *chunk, size_t bv)
 {
+	/* Handle 4 indices (1 byte) at a time. */
+	size_t position = 0;
+
 	/* Defense-in-depth: callers compute `bv` as `idx / SM_BITS_PER_VECTOR`
 	 * after subtracting the chunk's start offset; on a corrupt buffer
 	 * (sm_open of attacker-controlled bytes) the start offset can be
@@ -1050,21 +1061,19 @@ __sm_chunk_get_position(const __sm_chunk_t *chunk, size_t bv)
 		return (0);
 	}
 
-	/* Handle 4 indices (1 byte) at a time. */
-	size_t position = 0;
-
 	/* Handle RLE by examining the first byte. */
 	if (!__sm_chunk_is_rle(chunk)) {
 		const __sm_bitvec_t desc = *chunk->m_data;
 		const size_t num_bytes =
 		    bv / ((size_t)SM_FLAGS_PER_INDEX_BYTE * SM_BITS_PER_VECTOR);
-		for (size_t i = 0; i < num_bytes; i++) {
+		size_t i;
+		for (i = 0; i < num_bytes; i++) {
 			position += __sm_chunk_calc_vector_size(
 			    __sm_desc_flag_byte(desc, i));
 		}
 
 		bv -= num_bytes * SM_FLAGS_PER_INDEX_BYTE;
-		for (size_t i = 0; i < bv; i++) {
+		for (i = 0; i < bv; i++) {
 			const size_t flags =
 			    SM_CHUNK_GET_FLAGS(*chunk->m_data, i);
 			if (flags == SM_PAYLOAD_MIXED) {
@@ -1113,13 +1122,15 @@ __sm_chunk_get_capacity(const __sm_chunk_t *chunk)
 
 	size_t capacity = SM_CHUNK_MAX_CAPACITY;
 	const __sm_bitvec_t desc = *chunk->m_data;
+	size_t i;
 
-	for (size_t i = 0; i < sizeof(__sm_bitvec_t); i++) {
+	for (i = 0; i < sizeof(__sm_bitvec_t); i++) {
 		const uint8_t b = __sm_desc_flag_byte(desc, i);
+		int j;
 		if (!b || b == 0xff) {
 			continue;
 		}
-		for (int j = 0; j < SM_FLAGS_PER_INDEX_BYTE; j++) {
+		for (j = 0; j < SM_FLAGS_PER_INDEX_BYTE; j++) {
 			const size_t flags = SM_CHUNK_GET_FLAGS(b, j);
 			if (flags == SM_PAYLOAD_NONE) {
 				capacity -= SM_BITS_PER_VECTOR;
@@ -1153,12 +1164,14 @@ __sm_chunk_increase_capacity(const __sm_chunk_t *chunk, const size_t capacity)
 	}
 
 	size_t increased = 0;
-	for (size_t i = 0; i < sizeof(__sm_bitvec_t); i++) {
+	size_t i;
+	for (i = 0; i < sizeof(__sm_bitvec_t); i++) {
 		const uint8_t b = __sm_desc_flag_byte(*chunk->m_data, i);
+		int j;
 		if (!b || b == 0xff) {
 			continue;
 		}
-		for (int j = 0; j < SM_FLAGS_PER_INDEX_BYTE; j++) {
+		for (j = 0; j < SM_FLAGS_PER_INDEX_BYTE; j++) {
 			const size_t flags = SM_CHUNK_GET_FLAGS(b, j);
 			if (flags == SM_PAYLOAD_NONE) {
 				/* Flag (i * 4 + j) of the descriptor word;
@@ -1198,10 +1211,12 @@ __sm_chunk_is_empty(const __sm_chunk_t *chunk)
 	if (chunk->m_data[0] != 0) {
 		/* A chunk is considered empty if all flags are SM_PAYLOAD_ZERO or _NONE. */
 		const __sm_bitvec_t desc = *chunk->m_data;
-		for (size_t i = 0; i < sizeof(__sm_bitvec_t); i++) {
+		size_t i;
+		for (i = 0; i < sizeof(__sm_bitvec_t); i++) {
 			const uint8_t b = __sm_desc_flag_byte(desc, i);
 			if (b) {
-				for (int j = 0; j < SM_FLAGS_PER_INDEX_BYTE;
+				int j;
+				for (j = 0; j < SM_FLAGS_PER_INDEX_BYTE;
 				     j++) {
 					const size_t flags =
 					    SM_CHUNK_GET_FLAGS(b, j);
@@ -1235,7 +1250,8 @@ __sm_chunk_get_size(const __sm_chunk_t *chunk)
 	if (SM_LIKELY(!__sm_chunk_is_rle(chunk))) {
 		/* Use a lookup table for each byte of the flags */
 		const __sm_bitvec_t desc = *chunk->m_data;
-		for (size_t i = 0; i < sizeof(__sm_bitvec_t); i++) {
+		size_t i;
+		for (i = 0; i < sizeof(__sm_bitvec_t); i++) {
 			size += sizeof(__sm_bitvec_t) *
 			    __sm_chunk_calc_vector_size(
 			        __sm_desc_flag_byte(desc, i));
@@ -1384,6 +1400,7 @@ __sm_chunk_set_bit(const __sm_chunk_t *chunk, const uint64_t idx, size_t *pos)
 {
 	/* Where in the descriptor does this idx fall, which flag should we examine? */
 	const size_t bv = idx / SM_BITS_PER_VECTOR;
+	__sm_bitvec_t w;
 	__sm_assert(bv < SM_FLAGS_PER_INDEX);
 	__sm_assert(__sm_chunk_is_rle(chunk) == false);
 
@@ -1403,7 +1420,7 @@ __sm_chunk_set_bit(const __sm_chunk_t *chunk, const uint64_t idx, size_t *pos)
 		/* FALLTHROUGH */
 	case SM_PAYLOAD_MIXED:
 		*pos = 1 + __sm_chunk_get_position(chunk, bv);
-		__sm_bitvec_t w = chunk->m_data[*pos];
+		w = chunk->m_data[*pos];
 		w |= (__sm_bitvec_t)1 << idx % SM_BITS_PER_VECTOR;
 		/* Did the vector transition from mixed to all ones? If so, remove it. */
 		if (w == ~(__sm_bitvec_t)0) {
@@ -1489,8 +1506,10 @@ __sm_chunk_select(const __sm_chunk_t *chunk, ssize_t n, ssize_t *offset,
 	 */
 	size_t ret = 0;
 	const __sm_bitvec_t sel_desc = *chunk->m_data;
-	for (size_t i = 0; i < sizeof(__sm_bitvec_t); i++) {
+	size_t i;
+	for (i = 0; i < sizeof(__sm_bitvec_t); i++) {
 		const uint8_t b = __sm_desc_flag_byte(sel_desc, i);
+		int j;
 		/* Quick skip: if flag byte is 0 (all NONE descriptors) and seeking 1s, skip 4 vectors */
 		if (b == 0 && value) {
 			ret += (size_t)SM_FLAGS_PER_INDEX_BYTE *
@@ -1498,7 +1517,7 @@ __sm_chunk_select(const __sm_chunk_t *chunk, ssize_t n, ssize_t *offset,
 			continue;
 		}
 
-		for (int j = 0; j < SM_FLAGS_PER_INDEX_BYTE; j++) {
+		for (j = 0; j < SM_FLAGS_PER_INDEX_BYTE; j++) {
 			const size_t flags = SM_CHUNK_GET_FLAGS(b, j);
 			if (flags == SM_PAYLOAD_NONE) {
 				/* No payload, but the slot still occupies its
@@ -1654,10 +1673,12 @@ __sm_chunk_rank(__sm_chunk_rank_t *rank, const bool value,
 		__sm_bitvec_t w, mw;
 		uint64_t mask;
 		size_t pc;
+		size_t i;
 
-		for (size_t i = 0; i < sizeof(__sm_bitvec_t); i++) {
+		for (i = 0; i < sizeof(__sm_bitvec_t); i++) {
 			const uint8_t vb = __sm_desc_flag_byte(rank_desc, i);
-			for (int j = 0; j < SM_FLAGS_PER_INDEX_BYTE; j++) {
+			int j;
+			for (j = 0; j < SM_FLAGS_PER_INDEX_BYTE; j++) {
 				const size_t flags =
 				    SM_CHUNK_GET_FLAGS(vb, j);
 
@@ -1745,7 +1766,7 @@ __sm_chunk_rank(__sm_chunk_rank_t *rank, const bool value,
 						                    64 :
 						                    from)));
 						mw = (value ? w : ~w) & mask;
-						pc = SM_POPCOUNT64(mw);
+						pc = (size_t)SM_POPCOUNT64(mw);
 						amt += pc;
 						from =
 						    from > SM_BITS_PER_VECTOR ?
@@ -1769,7 +1790,7 @@ __sm_chunk_rank(__sm_chunk_rank_t *rank, const bool value,
 						/* Create a mask for the range [from, to] and use popcount. */
 						mask = to_mask & from_mask;
 						mw = (value ? w : ~w) & mask;
-						pc = SM_POPCOUNT64(mw);
+						pc = (size_t)SM_POPCOUNT64(mw);
 						amt += pc;
 						rank->rem = mw >>
 						    (from > 63 ? 63 : from);
@@ -1819,15 +1840,17 @@ __sm_chunk_scan(const __sm_chunk_t *chunk, const __sm_idx_t start,
 
 		/* Process in batches using same buffer size as sparse code */
 		uint64_t buffer[SM_BITS_PER_VECTOR];
+		size_t i;
 
-		for (size_t i = scan_start; i < length;) {
+		for (i = scan_start; i < length;) {
 			size_t batch_size = SM_BITS_PER_VECTOR;
+			size_t j;
 			if (i + batch_size > length) {
 				batch_size = length - i;
 			}
 
 			/* Fill buffer with consecutive indices */
-			for (size_t j = 0; j < batch_size; j++) {
+			for (j = 0; j < batch_size; j++) {
 				buffer[j] = start + i + j;
 			}
 
@@ -1846,15 +1869,17 @@ __sm_chunk_scan(const __sm_chunk_t *chunk, const __sm_idx_t start,
 	size_t skipped = 0;
 	uint64_t buffer[SM_BITS_PER_VECTOR];
 	const __sm_bitvec_t scan_desc = *chunk->m_data;
-	for (size_t i = 0; i < sizeof(__sm_bitvec_t); i++) {
+	size_t i;
+	for (i = 0; i < sizeof(__sm_bitvec_t); i++) {
 		const uint8_t b = __sm_desc_flag_byte(scan_desc, i);
+		int j;
 		if (b == 0) {
 			/* All 4 flag slots in this byte are ZEROS -- no set bits, advance position. */
 			pos += SM_FLAGS_PER_INDEX_BYTE * SM_BITS_PER_VECTOR;
 			continue;
 		}
 
-		for (int j = 0; j < SM_FLAGS_PER_INDEX_BYTE; j++) {
+		for (j = 0; j < SM_FLAGS_PER_INDEX_BYTE; j++) {
 			const size_t flags = SM_CHUNK_GET_FLAGS(b, j);
 			if (flags == SM_PAYLOAD_NONE) {
 				/* No capacity in this slot, do not advance position. */
@@ -1868,18 +1893,20 @@ __sm_chunk_scan(const __sm_chunk_t *chunk, const __sm_idx_t start,
 					pos += SM_BITS_PER_VECTOR;
 				} else if (skip > 0) {
 					size_t n = 0;
-					for (size_t b = skip;
-					     b < SM_BITS_PER_VECTOR; b++) {
-						buffer[n++] = start + pos + b;
+					size_t bb;
+					for (bb = skip;
+					     bb < SM_BITS_PER_VECTOR; bb++) {
+						buffer[n++] = start + pos + bb;
 					}
 					skipped += skip;
 					skip = 0;
 					scanner(&buffer[0], n, aux);
 					pos += SM_BITS_PER_VECTOR;
 				} else {
-					for (size_t b = 0;
-					     b < SM_BITS_PER_VECTOR; b++) {
-						buffer[b] = start + pos + b;
+					size_t bb;
+					for (bb = 0;
+					     bb < SM_BITS_PER_VECTOR; bb++) {
+						buffer[bb] = start + pos + bb;
 					}
 					scanner(&buffer[0], SM_BITS_PER_VECTOR,
 					    aux);
@@ -1891,12 +1918,13 @@ __sm_chunk_scan(const __sm_chunk_t *chunk, const __sm_idx_t start,
 				        (i * SM_FLAGS_PER_INDEX_BYTE) + j)];
 				size_t n = 0;
 				while (remaining) {
-					int b = SM_CTZ64(remaining);
+					int bb = SM_CTZ64(remaining);
 					if (skip > 0) {
 						skip--;
 						skipped++;
 					} else {
-						buffer[n++] = start + pos + b;
+						buffer[n++] = start + pos +
+						    (size_t)bb;
 					}
 					remaining &= remaining -
 					    1; /* clear lowest set bit */
@@ -2032,11 +2060,13 @@ __sm_get_chunk_end(const sm_t *map)
 {
 	uint8_t *p = __sm_get_chunk_data(map, 0);
 	const size_t count = __sm_get_chunk_count(map);
-	for (size_t i = 0; i < count; i++) {
-		p += SM_SIZEOF_OVERHEAD;
+	size_t i;
+	for (i = 0; i < count; i++) {
 		__sm_chunk_t chunk;
+		size_t chunk_size;
+		p += SM_SIZEOF_OVERHEAD;
 		__sm_chunk_init(&chunk, p);
-		const size_t chunk_size = __sm_chunk_get_size(&chunk);
+		chunk_size = __sm_chunk_get_size(&chunk);
 		if (i + 1 < count) {
 			SM_PREFETCH(p + chunk_size + SM_SIZEOF_OVERHEAD);
 		}
@@ -2094,7 +2124,10 @@ __sm_get_size_impl(const sm_t *map)
 
 	const size_t count = __sm_get_chunk_count(map);
 	size_t valid_count = 0;
-	for (size_t i = 0; i < count; i++) {
+	size_t i;
+	for (i = 0; i < count; i++) {
+		__sm_chunk_t chunk;
+		size_t chunk_size;
 		/* Each chunk needs at least SM_SIZEOF_OVERHEAD bytes for its
 		 * aligned-offset prefix plus sizeof(__sm_bitvec_t) bytes for the
 		 * mandatory chunk header word.  If less remains, the on-disk
@@ -2104,9 +2137,8 @@ __sm_get_size_impl(const sm_t *map)
 			break;
 		}
 		p += SM_SIZEOF_OVERHEAD;
-		__sm_chunk_t chunk;
 		__sm_chunk_init(&chunk, p);
-		const size_t chunk_size = __sm_chunk_get_size(&chunk);
+		chunk_size = __sm_chunk_get_size(&chunk);
 		/* __sm_chunk_get_size returns at minimum sizeof(__sm_bitvec_t).
 		 * A chunk that claims to extend past `end` indicates corrupt
 		 * flags; stop walking. */
@@ -4724,12 +4756,14 @@ __sm_map_unset(sm_t *map, uint64_t idx, const bool coalesce)
 		 * starting offset, so let's first find what we'll call the "pivot" chunk
 		 * wherein we'll find the index we need to clear. That chunk will be sparse.
 		 */
-		__sm_chunk_sep_t sep = { .target = { .p = p,
-			                     .offset = offset,
-			                     .chunk = &chunk,
-			                     .start = start,
-			                     .length = length,
-			                     .capacity = capacity } };
+		__sm_chunk_sep_t sep;
+		memset(&sep, 0, sizeof(sep));
+		sep.target.p = p;
+		sep.target.offset = offset;
+		sep.target.chunk = &chunk;
+		sep.target.start = start;
+		sep.target.length = length;
+		sep.target.capacity = capacity;
 		if (__sm_separate_rle_chunk(map, &sep, idx, 0) != 0) {
 			/* Out of space (or invalid): the map was left
 			 * unmodified.  Propagate ENOSPC so sm_add_grow /
@@ -8055,21 +8089,22 @@ sm_hash(const sm_t *map)
 	 * sequence and so hash to the same value.  Hashing runs rather
 	 * than individual bits keeps this O(runs), so a 2^31-bit run costs
 	 * one iteration instead of 2^31. */
-	uint64_t h = 0xcbf29ce484222325ULL;
+	uint64_t h = UINT64_C(0xcbf29ce484222325);
+	__sm_run_iter_t it;
+	uint64_t lo = 0, hi = 0;
+	int b;
 	if (sm_is_empty(map))
 		return (h);
-	__sm_run_iter_t it;
 	__sm_run_iter_init(&it, map);
-	uint64_t lo = 0, hi = 0;
 	while (__sm_run_next(&it, &lo, &hi)) {
 		/* Mix both endpoints of the run (8 bytes each). */
-		for (int b = 0; b < 8; b++) {
-			h ^= (lo >> (b * 8)) & 0xffULL;
-			h *= 0x100000001b3ULL;
+		for (b = 0; b < 8; b++) {
+			h ^= (lo >> (b * 8)) & UINT64_C(0xff);
+			h *= UINT64_C(0x100000001b3);
 		}
-		for (int b = 0; b < 8; b++) {
-			h ^= (hi >> (b * 8)) & 0xffULL;
-			h *= 0x100000001b3ULL;
+		for (b = 0; b < 8; b++) {
+			h ^= (hi >> (b * 8)) & UINT64_C(0xff);
+			h *= UINT64_C(0x100000001b3);
 		}
 	}
 	return (h);
