@@ -8354,6 +8354,9 @@ sm_equals(const sm_t *a, const sm_t *b)
 {
 	const bool a_empty = (a == NULL) || sm_is_empty(a);
 	const bool b_empty = (b == NULL) || sm_is_empty(b);
+	__sm_run_iter_t ia, ib;
+	uint64_t alo = 0, ahi = 0, blo = 0, bhi = 0;
+	bool have_a, have_b;
 	if (a_empty && b_empty)
 		return (true);
 	if (a_empty != b_empty)
@@ -8363,12 +8366,10 @@ sm_equals(const sm_t *a, const sm_t *b)
 	 * identical interval sequence.  Walk both run streams in lockstep
 	 * (see __sm_run_iter_t), so a 2^31-bit run is one comparison rather
 	 * than 2^31 bit lookups. */
-	__sm_run_iter_t ia, ib;
 	__sm_run_iter_init(&ia, a);
 	__sm_run_iter_init(&ib, b);
-	uint64_t alo = 0, ahi = 0, blo = 0, bhi = 0;
-	bool have_a = __sm_run_next(&ia, &alo, &ahi);
-	bool have_b = __sm_run_next(&ib, &blo, &bhi);
+	have_a = __sm_run_next(&ia, &alo, &ahi);
+	have_b = __sm_run_next(&ib, &blo, &bhi);
 	while (have_a && have_b) {
 		if (alo != blo || ahi != bhi)
 			return (false);
@@ -8389,13 +8390,16 @@ sm_compare(const sm_t *a, const sm_t *b)
 	 * advancing over shared prefixes a whole run at a time, so a
 	 * 2^31-bit run costs O(chunks) rather than O(cardinality). */
 	__sm_run_iter_t ia, ib;
+	uint64_t alo = 0, ahi = 0, blo = 0, bhi = 0;
+	bool have_a, have_b;
+	uint64_t pa, pb;
 	__sm_run_iter_init(&ia, a);
 	__sm_run_iter_init(&ib, b);
-	uint64_t alo = 0, ahi = 0, blo = 0, bhi = 0;
-	bool have_a = __sm_run_next(&ia, &alo, &ahi);
-	bool have_b = __sm_run_next(&ib, &blo, &bhi);
+	have_a = __sm_run_next(&ia, &alo, &ahi);
+	have_b = __sm_run_next(&ib, &blo, &bhi);
 	/* pa/pb are the next unconsumed member of the current a/b run. */
-	uint64_t pa = alo, pb = blo;
+	pa = alo;
+	pb = blo;
 	while (have_a && have_b) {
 		if (pa < pb)
 			return (-1);
@@ -8427,21 +8431,22 @@ sm_subset_compare(const sm_t *a, const sm_t *b)
 {
 	bool a_subset_b = true; /* every bit in a is in b */
 	bool b_subset_a = true; /* every bit in b is in a */
+	__sm_run_iter_t ia, ib;
+	uint64_t alo = 0, ahi = 0, blo = 0, bhi = 0;
+	bool have_a, have_b;
+	/* pos = left edge of the not-yet-classified region. */
+	uint64_t pos = 0;
+	bool have_pos = false;
 
 	/* Interval sweep over the two run streams (see __sm_run_iter_t): a
 	 * span present in exactly one map witnesses that map is not a
 	 * subset of the other.  Once both witnesses fire the answer is
 	 * DIFFERENT.  Run-based, so a 2^31-bit run costs O(chunks) rather
 	 * than O(cardinality). */
-	__sm_run_iter_t ia, ib;
 	__sm_run_iter_init(&ia, a);
 	__sm_run_iter_init(&ib, b);
-	uint64_t alo = 0, ahi = 0, blo = 0, bhi = 0;
-	bool have_a = __sm_run_next(&ia, &alo, &ahi);
-	bool have_b = __sm_run_next(&ib, &blo, &bhi);
-	/* pos = left edge of the not-yet-classified region. */
-	uint64_t pos = 0;
-	bool have_pos = false;
+	have_a = __sm_run_next(&ia, &alo, &ahi);
+	have_b = __sm_run_next(&ib, &blo, &bhi);
 	while (have_a || have_b) {
 		uint64_t lo = have_a ? alo : blo;
 		if (have_b && blo < lo)
@@ -8488,9 +8493,10 @@ sm_subset_compare(const sm_t *a, const sm_t *b)
 uint64_t
 sm_pop_first(sm_t *map)
 {
+	uint64_t lowest;
 	if (sm_is_empty(map))
 		return (SM_IDX_MAX);
-	const uint64_t lowest = sm_next_member(map, SM_IDX_MAX, NULL);
+	lowest = sm_next_member(map, SM_IDX_MAX, NULL);
 	if (lowest == SM_IDX_MAX)
 		return (SM_IDX_MAX);
 	if (sm_remove(map, lowest) == SM_IDX_MAX) {
@@ -8504,9 +8510,10 @@ sm_pop_first(sm_t *map)
 uint64_t
 sm_pop_last(sm_t *map)
 {
+	uint64_t highest;
 	if (sm_is_empty(map))
 		return (SM_IDX_MAX);
-	const uint64_t highest = sm_prev_member(map, SM_IDX_MAX, NULL);
+	highest = sm_prev_member(map, SM_IDX_MAX, NULL);
 	if (highest == SM_IDX_MAX)
 		return (SM_IDX_MAX);
 	if (sm_remove(map, highest) == SM_IDX_MAX)
