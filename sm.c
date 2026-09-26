@@ -8539,12 +8539,13 @@ sm_pop_last(sm_t *map)
 static sm_t *
 __sm_replace_buffer(sm_t *dst, sm_t *result)
 {
+	size_t result_size;
 	if (result == NULL) {
 		/* Empty result -- clear dst. */
 		sm_clear(dst);
 		return (dst);
 	}
-	const size_t result_size = result->m_data_used;
+	result_size = result->m_data_used;
 	if (__sm_cap(dst) < result_size) {
 		sm_t *grown = sm_set_data_size(dst, NULL, result_size + 64);
 		if (grown == NULL) {
@@ -8622,9 +8623,10 @@ sm_xor_inplace(sm_t *dst, const sm_t *src)
 bool
 sm_flip_range(sm_t *map, uint64_t lo, uint64_t hi)
 {
+	uint64_t i;
 	if (map == NULL || lo >= hi)
 		return (lo >= hi);
-	for (uint64_t i = lo; i < hi; i++) {
+	for (i = lo; i < hi; i++) {
 		const bool was_set = sm_contains(map, i, NULL);
 		if (sm_assign(map, i, !was_set) == SM_IDX_MAX) {
 			return (false);
@@ -8666,20 +8668,27 @@ sm_validate(const sm_t *map)
 	}
 
 	const size_t count = __sm_get_chunk_count(map);
+	uint8_t *p;
+	uint8_t *end;
+	__sm_idx_t prev_start = 0;
+	uint64_t prev_end = 0; /* start + capacity of the previous chunk */
+	bool first = true;
+	size_t i;
 	if (count == 0) {
 		return (map->m_data_used == SM_SIZEOF_OVERHEAD);
 	}
 
-	uint8_t *p = __sm_get_chunk_data(map, 0);
-	uint8_t *end = map->m_data + map->m_data_used;
-	__sm_idx_t prev_start = 0;
-	uint64_t prev_end = 0; /* start + capacity of the previous chunk */
-	bool first = true;
-	for (size_t i = 0; i < count; i++) {
+	p = __sm_get_chunk_data(map, 0);
+	end = map->m_data + map->m_data_used;
+	for (i = 0; i < count; i++) {
+		const __sm_idx_t start = __sm_load_idx((const uint8_t *)p);
+		__sm_chunk_t chunk;
+		size_t chunk_size;
+		size_t capacity;
+		uint64_t chunk_end;
 		if (p + SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) > end) {
 			return (false);
 		}
-		const __sm_idx_t start = __sm_load_idx((const uint8_t *)p);
 		if (!first && start <= prev_start) {
 			return (false);
 		}
@@ -8687,13 +8696,12 @@ sm_validate(const sm_t *map)
 		if (start % SM_CHUNK_MAX_CAPACITY != 0) {
 			return (false);
 		}
-		__sm_chunk_t chunk;
 		__sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
-		const size_t chunk_size = __sm_chunk_get_size(&chunk);
+		chunk_size = __sm_chunk_get_size(&chunk);
 		if (p + SM_SIZEOF_OVERHEAD + chunk_size > end) {
 			return (false);
 		}
-		const size_t capacity = __sm_chunk_get_capacity(&chunk);
+		capacity = __sm_chunk_get_capacity(&chunk);
 		/* (a) an RLE chunk's run length cannot exceed its capacity. */
 		if (__sm_chunk_is_rle(&chunk) &&
 		    __sm_chunk_rle_get_length(&chunk) > capacity) {
@@ -8704,7 +8712,7 @@ sm_validate(const sm_t *map)
 		 * (start + capacity wraps to 0) is legal -- it holds the top
 		 * bits [2^64 - capacity, 2^64).  Only a wrap to a nonzero end
 		 * is an overflow. */
-		const uint64_t chunk_end = start + capacity;
+		chunk_end = start + capacity;
 		if (chunk_end != 0 && chunk_end < start) {
 			return (false);
 		}
