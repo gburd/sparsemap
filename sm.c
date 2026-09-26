@@ -5930,6 +5930,8 @@ __sm_encode_sparse_chunk(__sm_bitvec_t words[32], int cap_flags[32],
 	bool has_bits = false;
 	unsigned flags[SM_FLAGS_PER_INDEX];
 	int i;
+	int nvecs = 0;
+	int mi;
 
 	/* Slot 31 (the highest) must never be NONE, because NONE in bits 63:62
      of the descriptor would be misidentified as the RLE flag.  Force it
@@ -5958,8 +5960,6 @@ __sm_encode_sparse_chunk(__sm_bitvec_t words[32], int cap_flags[32],
 	}
 
 	/* Pass 2: compact MIXED vectors (serial but only touches MIXED slots). */
-	int nvecs = 0;
-	int mi;
 	for (mi = 0; mi < (int)SM_FLAGS_PER_INDEX; mi++) {
 		if (flags[mi] == SM_PAYLOAD_MIXED) {
 			out_vecs[nvecs++] = words[mi];
@@ -6664,6 +6664,7 @@ __sm_emit_run(__sm_emitter_t *e, uint64_t lo, uint64_t hi)
 static inline uint64_t
 __sm_offset_abs_start(uint64_t src_start, ssize_t offset, bool *neg)
 {
+	uint64_t down;
 	if (offset >= 0) {
 		/* Non-negative shift.  The offset>0 ERANGE guard already
 		 * proved max + offset <= SM_IDX_MAX and src_start <= max, so
@@ -6672,7 +6673,7 @@ __sm_offset_abs_start(uint64_t src_start, ssize_t offset, bool *neg)
 		return (src_start + (uint64_t)offset);
 	}
 	/* offset < 0: |offset| as an unsigned magnitude (SSIZE_MIN-safe). */
-	const uint64_t down = (uint64_t)(-(offset + 1)) + 1;
+	down = (uint64_t)(-(offset + 1)) + 1;
 	if (src_start >= down) {
 		*neg = false;
 		return (src_start - down);
@@ -6698,9 +6699,10 @@ sm_offset(const sm_t *map, ssize_t offset)
 	}
 	if (__sm_is_small(map)) {
 		sm_t *m = __sm_materialize(map);
+		sm_t *r;
 		if (m == NULL)
 			return (NULL);
-		sm_t *r = sm_offset(m, offset);
+		r = sm_offset(m, offset);
 		sm_free(m);
 		if (r != NULL)
 			__sm_try_demote(r);
@@ -7153,13 +7155,16 @@ static __sm_idx_t
 __sm_chunk_next_set(const __sm_chunk_t *chunk, uint64_t start,
     uint64_t lower_excl)
 {
+	size_t v;
 	if (__sm_chunk_is_rle(chunk)) {
 		const size_t length = __sm_chunk_rle_get_length(chunk);
+		uint64_t run_lo;
+		uint64_t run_hi;
 		if (length == 0) {
 			return (SM_IDX_MAX);
 		}
-		const uint64_t run_lo = start;
-		const uint64_t run_hi = start + length - 1;
+		run_lo = start;
+		run_hi = start + length - 1;
 		if (lower_excl != UINT64_MAX && lower_excl >= run_hi) {
 			return (SM_IDX_MAX);
 		}
@@ -7169,7 +7174,7 @@ __sm_chunk_next_set(const __sm_chunk_t *chunk, uint64_t start,
 		return (lower_excl + 1);
 	}
 
-	for (size_t v = 0; v < SM_FLAGS_PER_INDEX; v++) {
+	for (v = 0; v < SM_FLAGS_PER_INDEX; v++) {
 		const uint64_t vec_lo = start + v * SM_BITS_PER_VECTOR;
 		const uint64_t vec_hi = vec_lo + SM_BITS_PER_VECTOR - 1;
 		const size_t flags =
@@ -7213,16 +7218,18 @@ static __sm_idx_t
 __sm_chunk_prev_set(const __sm_chunk_t *chunk, uint64_t start,
     uint64_t upper_excl)
 {
+	ssize_t v;
 	if (__sm_chunk_is_rle(chunk)) {
 		const size_t length = __sm_chunk_rle_get_length(chunk);
+		uint64_t run_hi;
 		if (length == 0 || upper_excl <= start) {
 			return (SM_IDX_MAX);
 		}
-		const uint64_t run_hi = start + length - 1;
+		run_hi = start + length - 1;
 		return (upper_excl - 1 < run_hi ? upper_excl - 1 : run_hi);
 	}
 
-	for (ssize_t v = SM_FLAGS_PER_INDEX - 1; v >= 0; v--) {
+	for (v = SM_FLAGS_PER_INDEX - 1; v >= 0; v--) {
 		const uint64_t vec_lo =
 		    start + (uint64_t)v * SM_BITS_PER_VECTOR;
 		const size_t flags =
@@ -7444,13 +7451,14 @@ sm_prev_member(const sm_t *map, uint64_t prev_idx, sm_cursor_t *cur)
 bool
 sm_is_subset(const sm_t *a, const sm_t *b)
 {
+	uint64_t ia, ib;
 	if (a == NULL || sm_is_empty(a))
 		return (true);
 	if (b == NULL || sm_is_empty(b))
 		return (false);
 
-	uint64_t ia = sm_next_member(a, SM_IDX_MAX, NULL);
-	uint64_t ib = sm_next_member(b, SM_IDX_MAX, NULL);
+	ia = sm_next_member(a, SM_IDX_MAX, NULL);
+	ib = sm_next_member(b, SM_IDX_MAX, NULL);
 	while (ia != SM_IDX_MAX) {
 		while (ib != SM_IDX_MAX && ib < ia) {
 			ib = sm_next_member(b, ib, NULL);
@@ -7471,13 +7479,14 @@ sm_is_superset(const sm_t *a, const sm_t *b)
 bool
 sm_overlap(const sm_t *a, const sm_t *b)
 {
+	uint64_t ia, ib;
 	if (a == NULL || b == NULL)
 		return (false);
 	if (sm_is_empty(a) || sm_is_empty(b))
 		return (false);
 
-	uint64_t ia = sm_next_member(a, SM_IDX_MAX, NULL);
-	uint64_t ib = sm_next_member(b, SM_IDX_MAX, NULL);
+	ia = sm_next_member(a, SM_IDX_MAX, NULL);
+	ib = sm_next_member(b, SM_IDX_MAX, NULL);
 	while (ia != SM_IDX_MAX && ib != SM_IDX_MAX) {
 		if (ia == ib)
 			return (true);
@@ -7492,24 +7501,26 @@ sm_overlap(const sm_t *a, const sm_t *b)
 sm_membership_t
 sm_membership(const sm_t *map)
 {
+	uint64_t first, second;
 	if (map == NULL || sm_is_empty(map))
 		return (SM_EMPTY);
-	const uint64_t first = sm_next_member(map, SM_IDX_MAX, NULL);
+	first = sm_next_member(map, SM_IDX_MAX, NULL);
 	if (first == SM_IDX_MAX)
 		return (SM_EMPTY);
-	const uint64_t second = sm_next_member(map, first, NULL);
+	second = sm_next_member(map, first, NULL);
 	return ((second == SM_IDX_MAX) ? SM_SINGLETON : SM_MULTIPLE);
 }
 
 uint64_t
 sm_singleton_member(const sm_t *map)
 {
+	uint64_t first, second;
 	if (map == NULL || sm_is_empty(map))
 		return (SM_IDX_MAX);
-	const uint64_t first = sm_next_member(map, SM_IDX_MAX, NULL);
+	first = sm_next_member(map, SM_IDX_MAX, NULL);
 	if (first == SM_IDX_MAX)
 		return (SM_IDX_MAX);
-	const uint64_t second = sm_next_member(map, first, NULL);
+	second = sm_next_member(map, first, NULL);
 	return ((second == SM_IDX_MAX) ? first : SM_IDX_MAX);
 }
 
