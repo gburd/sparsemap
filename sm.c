@@ -9756,6 +9756,7 @@ sm_union(const sm_t *a, const sm_t *b)
 		}
 
 		/* ---- Chunks overlap.  Compute overlap bounds. ---- */
+		{
 		const size_t ov_start =
 		    a_cursor > b_cursor ? a_cursor : b_cursor;
 		const size_t ov_end = a_end < b_end ? a_end : b_end;
@@ -9767,6 +9768,12 @@ sm_union(const sm_t *a, const sm_t *b)
 			__sm_bitvec_t aw[SM_FLAGS_PER_INDEX],
 			    bw[SM_FLAGS_PER_INDEX];
 			int ac[SM_FLAGS_PER_INDEX], bc[SM_FLAGS_PER_INDEX];
+			__sm_bitvec_t rw[SM_FLAGS_PER_INDEX];
+			int rc[SM_FLAGS_PER_INDEX];
+			__sm_bitvec_t desc;
+			__sm_bitvec_t vecs[SM_FLAGS_PER_INDEX];
+			int nvecs;
+			int i;
 			__sm_expand_sparse_chunk(&a_chunk, aw, ac);
 			__sm_expand_sparse_chunk(&b_chunk, bw, bc);
 
@@ -9774,13 +9781,13 @@ sm_union(const sm_t *a, const sm_t *b)
 			if (a_cursor > (size_t)a_start) {
 				const size_t rel = a_cursor - (size_t)a_start;
 				const int sw = (int)(rel / SM_BITS_PER_VECTOR);
-				for (int i = 0;
+				const size_t sb = rel % SM_BITS_PER_VECTOR;
+				for (i = 0;
 				     i < sw && i < (int)SM_FLAGS_PER_INDEX;
 				     i++) {
 					aw[i] = 0;
 					ac[i] = 0;
 				}
-				const size_t sb = rel % SM_BITS_PER_VECTOR;
 				if (sb > 0 && sw < (int)SM_FLAGS_PER_INDEX) {
 					aw[sw] &= ~((__sm_bitvec_t)0) << sb;
 				}
@@ -9790,28 +9797,23 @@ sm_union(const sm_t *a, const sm_t *b)
 			if (b_cursor > (size_t)b_start) {
 				const size_t rel = b_cursor - (size_t)b_start;
 				const int sw = (int)(rel / SM_BITS_PER_VECTOR);
-				for (int i = 0;
+				const size_t sb = rel % SM_BITS_PER_VECTOR;
+				for (i = 0;
 				     i < sw && i < (int)SM_FLAGS_PER_INDEX;
 				     i++) {
 					bw[i] = 0;
 					bc[i] = 0;
 				}
-				const size_t sb = rel % SM_BITS_PER_VECTOR;
 				if (sb > 0 && sw < (int)SM_FLAGS_PER_INDEX) {
 					bw[sw] &= ~((__sm_bitvec_t)0) << sb;
 				}
 			}
 
-			__sm_bitvec_t rw[SM_FLAGS_PER_INDEX];
-			int rc[SM_FLAGS_PER_INDEX];
 			__sm_words_or(rw, aw, bw);
-			for (int i = 0; i < (int)SM_FLAGS_PER_INDEX; i++) {
+			for (i = 0; i < (int)SM_FLAGS_PER_INDEX; i++) {
 				rc[i] = (ac[i] || bc[i]) ? 1 : 0;
 			}
 
-			__sm_bitvec_t desc;
-			__sm_bitvec_t vecs[SM_FLAGS_PER_INDEX];
-			int nvecs;
 			if (__sm_encode_sparse_chunk(rw, rc, &desc, vecs,
 			        &nvecs)) {
 				if (!__sm_append_sparse_chunk(&result, a_start,
@@ -9941,6 +9943,12 @@ sm_union(const sm_t *a, const sm_t *b)
 				int ac2[SM_FLAGS_PER_INDEX],
 				    bc2[SM_FLAGS_PER_INDEX];
 				__sm_idx_t result_start;
+				__sm_bitvec_t rw2[SM_FLAGS_PER_INDEX];
+				int rc2[SM_FLAGS_PER_INDEX];
+				__sm_bitvec_t desc2;
+				__sm_bitvec_t vecs2[SM_FLAGS_PER_INDEX];
+				int nvecs2;
+				int i;
 
 				if (a_rle && !b_rle) {
 					__sm_expand_sparse_chunk(&b_chunk, bw2,
@@ -9963,24 +9971,19 @@ sm_union(const sm_t *a, const sm_t *b)
 				} else {
 					/* Both RLE: handled above, should not reach here */
 					result_start = a_start;
-					for (int i = 0;
+					for (i = 0;
 					     i < (int)SM_FLAGS_PER_INDEX; i++) {
 						aw2[i] = bw2[i] = 0;
 						ac2[i] = bc2[i] = 0;
 					}
 				}
 
-				__sm_bitvec_t rw2[SM_FLAGS_PER_INDEX];
-				int rc2[SM_FLAGS_PER_INDEX];
 				__sm_words_or(rw2, aw2, bw2);
-				for (int i = 0; i < (int)SM_FLAGS_PER_INDEX;
+				for (i = 0; i < (int)SM_FLAGS_PER_INDEX;
 				     i++) {
 					rc2[i] = (ac2[i] || bc2[i]) ? 1 : 0;
 				}
 
-				__sm_bitvec_t desc2;
-				__sm_bitvec_t vecs2[SM_FLAGS_PER_INDEX];
-				int nvecs2;
 				if (__sm_encode_sparse_chunk(rw2, rc2, &desc2,
 				        vecs2, &nvecs2)) {
 					if (!__sm_append_sparse_chunk(&result,
@@ -10002,6 +10005,7 @@ sm_union(const sm_t *a, const sm_t *b)
 					b_cursor = 0;
 				}
 			}
+		}
 		}
 	}
 
