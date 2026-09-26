@@ -3061,6 +3061,7 @@ __sm_separate_rle_chunk(sm_t *map, __sm_chunk_sep_t *sep, const uint64_t idx,
 	__sm_chunk_t pivot_chunk;
 	__sm_chunk_t lrc;
 	uint64_t aligned_idx;
+	int i;
 
 	__sm_assert(state == 0 || state == 1 || state == -1);
 	__sm_assert(SM_IS_CHUNK_RLE(sep->target.chunk));
@@ -3296,15 +3297,17 @@ __sm_separate_rle_chunk(sm_t *map, __sm_chunk_sep_t *sep, const uint64_t idx,
 					pivot_chunk.m_data[pos] |=
 					    (__sm_bitvec_t)1 << bit_pos;
 				} else {
+					size_t pos;
+					size_t vecs_after;
 					/* Different vector -- add a new MIXED flag and payload vector. */
 					SM_CHUNK_SET_FLAGS(
 					    pivot_chunk.m_data[0], vec_idx,
 					    SM_PAYLOAD_MIXED);
-					const size_t pos = 1 +
+					pos = 1 +
 					    __sm_chunk_get_position(
 					        &pivot_chunk, vec_idx);
 					/* Shift existing vectors after this position to make room. */
-					const size_t vecs_after =
+					vecs_after =
 					    existing_mixed - (pos - 1);
 					if (vecs_after > 0) {
 						memmove(&pivot_chunk
@@ -3446,7 +3449,7 @@ __sm_separate_rle_chunk(sm_t *map, __sm_chunk_sep_t *sep, const uint64_t idx,
 		__sm_assert(sep->ex[1].start < sep->ex[1].end);
 	} while (0);
 
-	for (int i = 0; i < 2; i++) {
+	for (i = 0; i < 2; i++) {
 		if (sep->ex[i].p) {
 			/* First assign the starting offset ... */
 			__sm_store_idx((uint8_t *)sep->ex[i].p,
@@ -3458,6 +3461,9 @@ __sm_separate_rle_chunk(sm_t *map, __sm_chunk_sep_t *sep, const uint64_t idx,
 			if (sep->ex[i].end - sep->ex[i].start + 1 >
 			    SM_CHUNK_MAX_CAPACITY) {
 				/* ... we need a run-length encoding (RLE), chunk ... */
+				/* Capacity is set before length to satisfy the invariant */
+				const size_t rle_length =
+				    sep->ex[i].end - sep->ex[i].start + 1;
 				__sm_chunk_set_rle(&lrc);
 				/* ... a few things differ left to right ... */
 				if (i == 0) {
@@ -3508,9 +3514,6 @@ __sm_separate_rle_chunk(sm_t *map, __sm_chunk_sep_t *sep, const uint64_t idx,
 					__sm_chunk_rle_set_capacity(&lrc,
 					    right_cap);
 				}
-				/* Capacity is set before length to satisfy the invariant */
-				const size_t rle_length =
-				    sep->ex[i].end - sep->ex[i].start + 1;
 				__sm_chunk_rle_set_length(&lrc, rle_length);
 				/* ... and record our chunk size. */
 				sep->ex[i].size =
