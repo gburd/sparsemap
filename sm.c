@@ -10640,49 +10640,56 @@ __sm_rank_vec(sm_t *map, uint64_t begin, uint64_t end, bool value,
 size_t
 sm_rank(sm_t *map, uint64_t begin, uint64_t end, bool value)
 {
+	__sm_bitvec_t vec;
 	if (map == NULL)
 		return (0);
 	if (__sm_is_small(map)) {
 		sm_t *m = __sm_materialize(map);
 		if (m == NULL)
 			return (0);
-		const size_t r = sm_rank(m, begin, end, value);
-		sm_free(m);
-		return (r);
+		{
+			const size_t r = sm_rank(m, begin, end, value);
+			sm_free(m);
+			return (r);
+		}
 	}
 	__sm_check_invariants(map);
-	__sm_bitvec_t vec;
 	return (__sm_rank_vec(map, begin, end, value, &vec));
 }
 
 uint64_t
 sm_span(sm_t *map, uint64_t idx, size_t len, bool value)
 {
+	__sm_bitvec_t vec = 0;
+	size_t nth;
+	uint64_t offset;
 	if (map == NULL)
 		return (SM_IDX_MAX);
 	if (__sm_is_small(map)) {
 		sm_t *m = __sm_materialize(map);
 		if (m == NULL)
 			return (SM_IDX_MAX);
-		const uint64_t r = sm_span(m, idx, len, value);
-		sm_free(m);
-		return (r);
+		{
+			const uint64_t r = sm_span(m, idx, len, value);
+			sm_free(m);
+			return (r);
+		}
 	}
 	__sm_check_invariants(map);
-	__sm_bitvec_t vec = 0;
 
 	/* When skipping forward to `idx` offset in the map we can determine how
 	 * many selects we can avoid by taking the rank of the range and starting
 	 * at that bit. */
-	size_t nth = (idx == 0) ? 0 : sm_rank(map, 0, idx - 1, value);
+	nth = (idx == 0) ? 0 : sm_rank(map, 0, idx - 1, value);
 	/* Find the first bit that matches value, then... */
-	uint64_t offset = sm_select(map, nth, value);
+	offset = sm_select(map, nth, value);
 	do {
 		/* See if the rank of the bits in the range starting at offset is equal
 		 * to the desired amount. */
 		size_t rank = (len == 1) ?
 		    1 :
 		    __sm_rank_vec(map, offset, offset + len - 1, value, &vec);
+		int amt = 1;
 		if (rank >= len) {
 			/* We've found what we're looking for, return the index of the first
 			 * bit in the range. */
@@ -10691,7 +10698,6 @@ sm_span(sm_t *map, uint64_t idx, size_t len, bool value)
 		/* Now we try to jump forward as much as possible before we look for a
 		 * new match. We do this by counting the remaining bits in the returned
 		 * vec from the call to rank_vec(). */
-		int amt = 1;
 		if (vec > 0) {
 			/* The returned vec had some set bits, let's move forward in the map as
 			 * much as possible (max: 64 bit positions). */
@@ -10702,7 +10708,7 @@ sm_span(sm_t *map, uint64_t idx, size_t len, bool value)
 				amt++;
 			}
 		}
-		nth += amt;
+		nth += (size_t)amt;
 		offset = sm_select(map, nth, value);
 	} while (SM_FOUND(offset));
 
