@@ -4690,6 +4690,25 @@ __sm_map_unset(sm_t *map, uint64_t idx, const bool coalesce)
 
 		/* Is the 0-based index referencing the last bit in the run? */
 		if (idx - start + 1 == length) {
+			/* Removing the sole bit of a length-1 run empties the
+			 * chunk.  Setting the RLE length to 0 would leave a
+			 * length-0 RLE descriptor behind, which every RLE reader
+			 * (rank/select/scan) decodes as a FULL-CAPACITY run
+			 * (2048 bits) -- so sm_remove of the last bit would report
+			 * a cardinality of 2048 instead of 0.  Length-1 runs are
+			 * produced legitimately (a shrinking run passes through
+			 * length 1) as well as by crafted wire input, so remove
+			 * the chunk outright, matching the sparse SM_NEEDS_TO_SHRINK
+			 * arm below.  An RLE chunk is exactly overhead + one
+			 * descriptor word. */
+			if (length == 1) {
+				__sm_remove_data(map, offset,
+				    SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t));
+				__sm_set_chunk_count(map,
+				    __sm_get_chunk_count(map) - 1);
+				offset = SM_UNSET_NO_COALESCE; /* chunk gone */
+				goto done;
+			}
 			/* Should the run-length chunk transition into a sparse chunk? */
 			if (length - 1 == SM_CHUNK_MAX_CAPACITY) {
 				chunk.m_data[0] = ~(__sm_bitvec_t)0;
@@ -7278,12 +7297,21 @@ sm_singleton_member(const sm_t *map)
  * how long, and a sparse chunk yields at most a chunk's worth of runs
  * (<= 2048 bits, physically present).
  *
- * Runs are decomposed per chunk and are NOT merged across chunk
- * boundaries.  That is deliberate: chunk windows are fixed 2048-aligned
- * spans, so any two maps that compare equal under sm_equals() occupy
- * the same chunks and decompose into the identical run sequence --
- * which is all the content hash and the interval sweeps below require.
- * Merging across chunks would add state for no correctness gain.
+ * Runs are MAXIMAL and CANONICAL: __sm_run_next coalesces any two
+ * adjacent runs whose spans touch (this run's hi == the next run's
+ * lo), including across the per-chunk run-list seam and across chunk
+ * boundaries.  This is required for correctness, not just tidiness:
+ * the SAME logical set can be stored with a contiguous range
+ * straddling a 2048-aligned chunk boundary (e.g. sm_union stitching
+ * two split halves back together, or an RLE run abutting the next
+ * chunk) OR entirely within a single chunk.  Without seam-coalescing
+ * those two encodings decompose into DIFFERENT run sequences
+ * ([.,2048)+[2048,.) vs one run), which made sm_equals / sm_hash /
+ * sm_compare -- all of which require the decomposition to be canonical
+ * -- disagree for logically-equal maps.  Coalescing stays O(chunks):
+ * __sm_run_next_raw yields each physically-present run exactly once
+ * and __sm_run_next only extends across a seam when the runs actually
+ * abut, so a 2^31-bit RLE run is still a single yielded run.
  */
 typedef struct {
 	const sm_t *map;
@@ -7298,6 +7326,12 @@ typedef struct {
 	uint64_t run_hi[SM_CHUNK_MAX_CAPACITY / 2 + 1];
 	size_t nruns;
 	size_t next_run;
+	/* One-run lookahead for seam-coalescing in __sm_run_next: the first
+	 * raw run that did NOT abut the run just yielded, held for the next
+	 * call so no run is dropped. */
+	bool have_peek;
+	uint64_t peek_lo;
+	uint64_t peek_hi;
 } __sm_run_iter_t;
 
 static void
@@ -7434,10 +7468,12 @@ __sm_run_decode_chunk(__sm_run_iter_t *it, __sm_idx_t start)
 }
 
 /*
- * Yield the next run.  Returns false when exhausted.
+ * Yield the next physically-present run, exactly as decoded (per-chunk,
+ * NOT coalesced across seams).  Returns false when exhausted.  This is
+ * the raw producer; __sm_run_next layers seam-coalescing on top.
  */
 static bool
-__sm_run_next(__sm_run_iter_t *it, uint64_t *lo, uint64_t *hi)
+__sm_run_next_raw(__sm_run_iter_t *it, uint64_t *lo, uint64_t *hi)
 {
 	for (;;) {
 		/* Drain runs already decoded from the current chunk. */
@@ -7461,6 +7497,51 @@ __sm_run_next(__sm_run_iter_t *it, uint64_t *lo, uint64_t *hi)
 		it->idx++;
 		/* loop back to drain the freshly-decoded run list */
 	}
+}
+
+/*
+ * Yield the next MAXIMAL run.  Returns false when exhausted.
+ *
+ * Coalesces adjacent raw runs: once the current run [lo, hi) is in
+ * hand, keep pulling the next raw run and, while it begins exactly
+ * where the accumulated run ends (raw_lo == hi), absorb it by advancing
+ * hi.  The first raw run that does NOT abut is stashed in the iterator
+ * (it->have_peek) and returned on the next call, so nothing is dropped
+ * and each raw run is examined once.  Raw runs are ascending and
+ * disjoint within a map (per-chunk decode is ordered; chunks are
+ * ordered), so a peeked run with raw_lo > hi genuinely starts a new
+ * maximal run.  Cost stays O(raw runs) = O(chunks + physical sparse
+ * runs); a giant RLE run is one raw run and one yielded run.
+ */
+static bool
+__sm_run_next(__sm_run_iter_t *it, uint64_t *lo, uint64_t *hi)
+{
+	uint64_t cur_lo, cur_hi;
+	if (it->have_peek) {
+		cur_lo = it->peek_lo;
+		cur_hi = it->peek_hi;
+		it->have_peek = false;
+	} else if (!__sm_run_next_raw(it, &cur_lo, &cur_hi)) {
+		return (false);
+	}
+	for (;;) {
+		uint64_t nlo, nhi;
+		if (!__sm_run_next_raw(it, &nlo, &nhi)) {
+			break; /* no more raw runs; current run is final */
+		}
+		if (nlo == cur_hi) {
+			cur_hi = nhi; /* abuts: absorb and keep extending */
+			continue;
+		}
+		/* Does not abut: stash for the next call and stop. */
+		it->peek_lo = nlo;
+		it->peek_hi = nhi;
+		it->have_peek = true;
+		break;
+	}
+	*lo = cur_lo;
+	*hi = cur_hi;
+	return (true);
 }
 
 /*
@@ -9699,7 +9780,6 @@ sm_split(sm_t *map, uint64_t idx, sm_t *other)
 	uint8_t *dst = __sm_get_chunk_end(other);
 
 	/* (1): skip over chunks that are entirely to the left. */
-	uint8_t *prev = src;
 	for (i = 0; i < count; i++) {
 		const __sm_idx_t start = __sm_load_idx((const uint8_t *)src);
 		if (start == idx) {
@@ -9712,12 +9792,19 @@ sm_split(sm_t *map, uint64_t idx, sm_t *other)
 			break;
 		}
 		if (start > idx) {
-			src = prev;
-			i--;
+			/* This chunk begins past idx, and the loop already
+			 * advanced `src` to it after the previous (below-idx)
+			 * chunk, so `src`/`i` correctly mark where the moved
+			 * region starts.  Pre-fix this rolled back to `prev`
+			 * (src = prev; i--), which pulled the last chunk that is
+			 * ENTIRELY below idx into the moved half: when idx fell in
+			 * a gap between two chunks, the whole run just below idx
+			 * ended up in `other` instead of staying in `map`,
+			 * violating the documented [start, idx) / [idx, end]
+			 * partition.  Just stop here. */
 			break;
 		}
 
-		prev = src;
 		src += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&chunk);
 	}
 
@@ -9791,8 +9878,24 @@ sm_split(sm_t *map, uint64_t idx, sm_t *other)
 			SM_ENOUGH_SPACE(sep.expand_by);
 			/* Save src offset before insert, as insert will invalidate the pointer */
 			size_t src_offset = src - map->m_data;
+			/* __sm_insert_data / __sm_get_chunk_data take a
+			 * DATA-region-relative offset (they add SM_SIZEOF_OVERHEAD
+			 * for the chunk-count header themselves).  `src_offset`
+			 * above is m_data-relative -- it already includes the
+			 * header -- so the RLE chunk's data-relative offset is
+			 * `src_offset - SM_SIZEOF_OVERHEAD`.  Pre-fix the header was
+			 * counted twice (src_offset + SM_SIZEOF_OVERHEAD + ...),
+			 * inserting the expansion one word too far right: the
+			 * following chunk's start index got half-overwritten by the
+			 * subsequent memcpy, producing a chunk with a garbage,
+			 * unaligned start (sm_validate == 0) even though
+			 * cardinality was correct.  This is the same data-vs-
+			 * m_data offset convention __sm_separate_rle_chunk's own
+			 * internal insert uses (target.offset is data-relative). */
+			const size_t rle_data_off =
+			    src_offset - SM_SIZEOF_OVERHEAD;
 			__sm_insert_data(map,
-			    src_offset + SM_SIZEOF_OVERHEAD +
+			    rle_data_off + SM_SIZEOF_OVERHEAD +
 			        sizeof(__sm_bitvec_t),
 			    sep.buf + SM_SIZEOF_OVERHEAD +
 			        sizeof(__sm_bitvec_t),
@@ -9843,7 +9946,20 @@ sm_split(sm_t *map, uint64_t idx, sm_t *other)
 			    SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t);
 		}
 
-		/* Copy the bits in the sparse chunk, at most SM_CHUNK_MAX_CAPACITY. */
+		/* Copy the bits in the sparse chunk, at most SM_CHUNK_MAX_CAPACITY.
+		 * The unset loop below mutates `map`: it removes bits [idx, ...)
+		 * from the middle chunk, which SHRINKS that chunk (changing its
+		 * byte size) and, if the chunk ends up empty, REMOVES it and
+		 * decrements the chunk count -- shifting every later chunk and
+		 * potentially reallocating m_data.  So `src`, the middle chunk's
+		 * size, and the chunk count must all be re-derived AFTER the loop
+		 * from the current bytes; using the pre-mutation values left the
+		 * move loop starting at the wrong offset (a whole run above idx
+		 * stranded in `map`, or the retained map left non-canonical /
+		 * invalid when the middle chunk vanished).  Chunks BEFORE the
+		 * middle one are untouched, so its m_data offset `mid_off` is
+		 * stable across the mutation. */
+		const size_t mid_off = (size_t)(src - map->m_data);
 		__sm_store_idx((uint8_t *)dst, src_start);
 		for (size_t j = idx; j < src_start + SM_CHUNK_MAX_CAPACITY;
 		     j++) {
@@ -9852,15 +9968,34 @@ sm_split(sm_t *map, uint64_t idx, sm_t *other)
 				__sm_map_unset(map, j, false);
 			}
 		}
-		src += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&s_chunk);
 		dst += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&d_chunk);
 		i++;
+
+		/* Re-derive where the moved region begins.  If a chunk still
+		 * lives at mid_off and it is the middle chunk (start ==
+		 * src_start), it kept bits [src_start, idx) and the move starts
+		 * just past it; otherwise the middle chunk was removed and the
+		 * move starts at mid_off. */
+		src = map->m_data + mid_off;
+		if (mid_off + SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) <=
+		        map->m_data_used &&
+		    __sm_load_idx((const uint8_t *)src) == src_start) {
+			__sm_chunk_t mid;
+			__sm_chunk_init(&mid, src + SM_SIZEOF_OVERHEAD);
+			src += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&mid);
+		}
 	}
 
 	/* Now continue with all remaining chunks. */
 	/* Save the offset where moved chunks start, so we can truncate map later */
 	size_t split_offset = src - map->m_data;
-	size_t chunks_to_move = count - i;
+	/* Upper bound on chunks to move: the mutation in the in_middle phase
+	 * can have removed the middle chunk (dropping the count) or left `i`
+	 * out of step, so `count - i` is unreliable.  The probe below
+	 * re-derives the exact movable count by byte-walking from `src` to
+	 * the current data end; seed the bound with the current chunk count,
+	 * which can never undercount. */
+	size_t chunks_to_move = __sm_get_chunk_count(map);
 	/* The chunk stream ends here; the move must never read past it.  On
 	 * a valid-but-adversarial map the RLE-separation and sparse-split
 	 * phases above can leave `i` disagreeing with the bytes actually
