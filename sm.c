@@ -10734,6 +10734,12 @@ void
 sm_contains_many(const sm_t *map, const uint64_t *idxs, bool *results,
     size_t n)
 {
+	size_t count;
+	uint8_t *base;
+	uint8_t *p;
+	size_t stream_end;
+	size_t q = 0;
+	size_t i;
 	if (n == 0) {
 		return;
 	}
@@ -10742,7 +10748,6 @@ sm_contains_many(const sm_t *map, const uint64_t *idxs, bool *results,
 		return;
 	}
 	if (map == NULL) {
-		size_t q;
 		for (q = 0; q < n; q++) {
 			results[q] = false;
 		}
@@ -10751,33 +10756,31 @@ sm_contains_many(const sm_t *map, const uint64_t *idxs, bool *results,
 
 #ifdef SPARSEMAP_DIAGNOSTIC
 	/* Contract: idxs MUST be sorted ascending. */
-	for (size_t q = 1; q < n; q++) {
+	for (q = 1; q < n; q++) {
 		__sm_assert(idxs[q] >= idxs[q - 1]);
 	}
 #endif
 
 	if (__sm_is_small(map)) {
-		size_t q;
 		for (q = 0; q < n; q++) {
 			results[q] = __sm_small_contains(map, idxs[q]);
 		}
 		return;
 	}
 
-	const size_t count = __sm_get_chunk_count(map);
+	count = __sm_get_chunk_count(map);
 	if (count == 0) {
-		size_t q;
 		for (q = 0; q < n; q++) {
 			results[q] = false;
 		}
 		return;
 	}
 
-	uint8_t *base = __sm_get_chunk_data(map, 0);
-	uint8_t *p = base;
-	const size_t stream_end =
+	base = __sm_get_chunk_data(map, 0);
+	p = base;
+	stream_end =
 	    (size_t)map->m_data_used - SM_SIZEOF_OVERHEAD;
-	size_t q = 0;
+	q = 0;
 
 	/*
 	 * One left-to-right sweep.  Walk chunks in order while draining the
@@ -10787,12 +10790,15 @@ sm_contains_many(const sm_t *map, const uint64_t *idxs, bool *results,
 	 * above start+cap belong to a later chunk, so advance the chunk.
 	 * O(chunks + n).
 	 */
-	for (size_t i = 0; i < count && q < n; i++) {
+	for (i = 0; i < count && q < n; i++) {
 		const __sm_idx_t s = __sm_load_idx((const uint8_t *)p);
 		__sm_chunk_t chunk;
+		size_t cap;
+		uint64_t hi;
+		size_t next_off;
 		__sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
-		const size_t cap = __sm_chunk_get_capacity(&chunk);
-		const uint64_t hi = (uint64_t)s + cap; /* exclusive top */
+		cap = __sm_chunk_get_capacity(&chunk);
+		hi = (uint64_t)s + cap; /* exclusive top */
 
 		/* Drain queries that fall before this chunk (gap -> false). */
 		while (q < n && idxs[q] < (uint64_t)s) {
@@ -10807,7 +10813,7 @@ sm_contains_many(const sm_t *map, const uint64_t *idxs, bool *results,
 		}
 
 		/* Advance to the next chunk. */
-		const size_t next_off = (size_t)(p - base) +
+		next_off = (size_t)(p - base) +
 		    SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&chunk);
 		if (next_off >= stream_end) {
 			break;
@@ -10830,10 +10836,10 @@ sm_contains_many(const sm_t *map, const uint64_t *idxs, bool *results,
 static size_t
 __sm_isqrt(size_t x)
 {
+	size_t r = 0;
 	if (x == 0) {
 		return (0);
 	}
-	size_t r = 0;
 	while ((r + 1) * (r + 1) <= x) {
 		r++;
 	}
@@ -10896,22 +10902,37 @@ sm_locator_build(const sm_t *map)
 		loc->map = map; /* n_sb == 0 => __sm_locator_is_stale => fallback */
 		return (loc);
 	}
+	{
 	const size_t count = __sm_get_chunk_count(map);
+	sm_locator_t *loc;
+	size_t stride;
+	size_t n_sb;
+	uint64_t *sb_start;
+	size_t *sb_offset;
+	size_t *sb_prefix;
+	uint8_t *base;
+	uint8_t *p;
+	size_t stream_end;
+	size_t running = 0; /* set bits in chunks strictly before p */
+	size_t sb = 0;
+	size_t last_offset = 0;
+	__sm_idx_t last_start = 0;
+	size_t i;
 	if (count == 0) {
 		return (NULL);
 	}
 
-	sm_locator_t *loc = (sm_locator_t *)__sm_alloc(sizeof(*loc));
+	loc = (sm_locator_t *)__sm_alloc(sizeof(*loc));
 	if (loc == NULL) {
 		return (NULL);
 	}
 
-	const size_t stride = __sm_isqrt(count) > 0 ? __sm_isqrt(count) : 1;
-	const size_t n_sb = (count + stride - 1) / stride;
+	stride = __sm_isqrt(count) > 0 ? __sm_isqrt(count) : 1;
+	n_sb = (count + stride - 1) / stride;
 
-	uint64_t *sb_start = (uint64_t *)__sm_alloc(n_sb * sizeof(uint64_t));
-	size_t *sb_offset = (size_t *)__sm_alloc(n_sb * sizeof(size_t));
-	size_t *sb_prefix = (size_t *)__sm_alloc(n_sb * sizeof(size_t));
+	sb_start = (uint64_t *)__sm_alloc(n_sb * sizeof(uint64_t));
+	sb_offset = (size_t *)__sm_alloc(n_sb * sizeof(size_t));
+	sb_prefix = (size_t *)__sm_alloc(n_sb * sizeof(size_t));
 	if (sb_start == NULL || sb_offset == NULL || sb_prefix == NULL) {
 		__sm_free(sb_start);
 		__sm_free(sb_offset);
@@ -10922,19 +10943,19 @@ sm_locator_build(const sm_t *map)
 
 	/* One O(count) walk: sample every stride-th chunk into the
 	 * superblock arrays and carry the running set-bit total. */
-	uint8_t *base = __sm_get_chunk_data(map, 0);
-	uint8_t *p = base;
-	const size_t stream_end =
+	base = __sm_get_chunk_data(map, 0);
+	p = base;
+	stream_end =
 	    (size_t)map->m_data_used - SM_SIZEOF_OVERHEAD;
-	size_t running = 0; /* set bits in chunks strictly before p */
-	size_t sb = 0;
-	size_t last_offset = 0;
-	__sm_idx_t last_start = 0;
-	for (size_t i = 0; i < count; i++) {
+	for (i = 0; i < count; i++) {
 		const __sm_idx_t s = __sm_load_idx((const uint8_t *)p);
 		__sm_chunk_t chunk;
+		size_t off;
+		size_t cap;
+		__sm_chunk_rank_t rank;
+		size_t next_off;
 		__sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
-		const size_t off = (size_t)(p - base);
+		off = (size_t)(p - base);
 		last_offset = off;
 		last_start = s;
 		if (i % stride == 0) {
@@ -10946,11 +10967,10 @@ sm_locator_build(const sm_t *map)
 		}
 		/* Accumulate this chunk's set-bit count into the running total
 		 * so the NEXT superblock's prefix is correct. */
-		const size_t cap = __sm_chunk_get_capacity(&chunk);
-		__sm_chunk_rank_t rank;
+		cap = __sm_chunk_get_capacity(&chunk);
 		running += __sm_chunk_rank(&rank, true, &chunk, 0, cap - 1);
 
-		const size_t next_off =
+		next_off =
 		    off + SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&chunk);
 		if (next_off >= stream_end) {
 			break;
@@ -10969,6 +10989,7 @@ sm_locator_build(const sm_t *map)
 	loc->sb_offset = sb_offset;
 	loc->sb_prefix = sb_prefix;
 	return (loc);
+	}
 }
 
 void
