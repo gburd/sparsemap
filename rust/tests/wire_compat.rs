@@ -72,6 +72,87 @@ const OFFSET_RUN: &[u8] = &[
     0, 88, 19, 0, 0, 0, 12, 0, 64,
 ];
 
+// --- small-mode streams (header byte out[6] set, body top bit set) ---
+
+/// C `sm_serialize` output for the SMALL_ZERO set (1 bits, 32 bytes, small-mode).
+const SMALL_ZERO: &[u8] = &[
+    115, 109, 49, 48, 2, 1, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 128, 1, 0, 0, 0, 0,
+    0, 0, 0,
+];
+/// C `sm_serialize` output for the SMALL_WORD0 set (4 bits, 32 bytes, small-mode).
+const SMALL_WORD0: &[u8] = &[
+    115, 109, 49, 48, 2, 1, 1, 0, 4, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 128, 35, 0, 0, 0, 0,
+    0, 0, 128,
+];
+/// C `sm_serialize` output for the SMALL_FULLWORD set (64 bits, 32 bytes, small-mode).
+const SMALL_FULLWORD: &[u8] = &[
+    115, 109, 49, 48, 2, 1, 1, 0, 64, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 128, 255, 255, 255,
+    255, 255, 255, 255, 255,
+];
+/// C `sm_serialize` output for the SMALL_TWOWORDS set (2 bits, 40 bytes, small-mode).
+const SMALL_TWOWORDS: &[u8] = &[
+    115, 109, 49, 48, 2, 1, 1, 0, 2, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 128, 32, 0, 0, 0, 0,
+    0, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0,
+];
+/// C `sm_serialize` output for {3,17,88,200,511,900,1023} (7 bits, 88 bytes).
+/// A sparse scatter under 1024: C keeps this in CHUNK mode (the small
+/// form's word count would hit its cap), so this exercises the sparse
+/// chunk decode for a set whose bits span the small/chunk boundary.
+const SMALL_SCATTER: &[u8] = &[
+    115, 109, 49, 48, 2, 1, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 138, 128, 0, 160, 0, 0, 0, 0, 8, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 128, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 128,
+];
+/// C `sm_serialize` output for {0} built empty-then-single (1 bit, 32 bytes,
+/// small-mode).  Byte-identical to SMALL_ZERO -- proves that a map churned
+/// through insert/remove back to a single low bit serializes canonically.
+const SMALL_EMPTYTHENSINGLE: &[u8] = &[
+    115, 109, 49, 48, 2, 1, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 128, 1, 0, 0, 0, 0,
+    0, 0, 0,
+];
+
+// --- RLE-chunk streams (single RLE descriptor per <=2^31-bit span) ---
+
+/// C `sm_serialize` output for {0..=1000} (1001 bits, 40 bytes, one RLE chunk).
+const RLE_RUN_0_1000: &[u8] = &[
+    115, 109, 49, 48, 2, 1, 0, 0, 233, 3, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 233, 3, 0, 0, 0, 4, 0, 64,
+];
+/// C `sm_serialize` output for {0..=1023} (1024 bits, 40 bytes, one RLE chunk).
+const RLE_RUN_0_1023: &[u8] = &[
+    115, 109, 49, 48, 2, 1, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 4, 0, 0, 0, 4, 0, 64,
+];
+/// C `sm_serialize` output for {0..=5000} (5001 bits, 40 bytes, spanning chunks).
+const RLE_RUN_0_5000: &[u8] = &[
+    115, 109, 49, 48, 2, 1, 0, 0, 137, 19, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 137, 19, 0, 0, 0, 12, 0, 64,
+];
+/// C `sm_serialize` output for {2048..=4095} (2048 bits, 40 bytes, RLE chunk
+/// NOT starting at 0 -- proves a non-zero run start decodes at the right base).
+const RLE_RUN_2048_4095: &[u8] = &[
+    115, 109, 49, 48, 2, 1, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0, 0,
+    0, 0, 255, 255, 255, 255, 255, 255, 255, 255,
+];
+
+// --- mixed streams (RLE + sparse chunks in one map) ---
+
+/// C `sm_serialize` output for {0..=1200} + {50000,50003,123456}
+/// (1204 bits, 88 bytes): a dense low run promoted to a chunk plus a
+/// high sparse chunk in the same map.
+const MIXED_LOWRUN_HIGHSPARSE: &[u8] = &[
+    115, 109, 49, 48, 2, 1, 0, 0, 180, 4, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 177, 4, 0, 0, 0, 4, 0, 64, 0, 192, 0, 0, 0, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 9,
+    0, 0, 0, 0, 0, 0, 224, 1, 0, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0,
+];
+/// C `sm_serialize` output for {0,1,1023,1024,1025,2050} (6 bits, 88 bytes):
+/// a set straddling the 1024 small/chunk boundary, kept in chunk mode.
+const MIXED_STRADDLE_1024: &[u8] = &[
+    115, 109, 49, 48, 2, 1, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 2, 0, 0, 128, 2, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 128, 3, 0, 0, 0,
+    0, 0, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0,
+];
+
 #[test]
 fn c_empty() {
     let m = SparseMap::from_bytes(EMPTY).expect("empty deserializes");
@@ -106,4 +187,78 @@ fn c_two_clusters() {
 #[test]
 fn c_offset_run() {
     check(OFFSET_RUN, &set(1000..7000));
+}
+
+// --- small-mode ---
+
+#[test]
+fn c_small_zero() {
+    check(SMALL_ZERO, &set([0]));
+}
+
+#[test]
+fn c_small_word0() {
+    check(SMALL_WORD0, &set([0, 1, 5, 63]));
+}
+
+#[test]
+fn c_small_fullword() {
+    check(SMALL_FULLWORD, &set(0..64));
+}
+
+#[test]
+fn c_small_twowords() {
+    check(SMALL_TWOWORDS, &set([5, 70]));
+}
+
+#[test]
+fn c_small_scatter() {
+    check(SMALL_SCATTER, &set([3, 17, 88, 200, 511, 900, 1023]));
+}
+
+#[test]
+fn c_small_empty_then_single() {
+    check(SMALL_EMPTYTHENSINGLE, &set([0]));
+    // Same logical set built the two ways C can reach it decodes equal.
+    assert_eq!(
+        SparseMap::from_bytes(SMALL_EMPTYTHENSINGLE).unwrap(),
+        SparseMap::from_bytes(SMALL_ZERO).unwrap()
+    );
+}
+
+// --- RLE chunks ---
+
+#[test]
+fn c_rle_run_0_1000() {
+    check(RLE_RUN_0_1000, &set(0..=1000));
+}
+
+#[test]
+fn c_rle_run_0_1023() {
+    check(RLE_RUN_0_1023, &set(0..=1023));
+}
+
+#[test]
+fn c_rle_run_0_5000() {
+    check(RLE_RUN_0_5000, &set(0..=5000));
+}
+
+#[test]
+fn c_rle_run_2048_4095() {
+    check(RLE_RUN_2048_4095, &set(2048..=4095));
+}
+
+// --- mixed ---
+
+#[test]
+fn c_mixed_lowrun_highsparse() {
+    check(
+        MIXED_LOWRUN_HIGHSPARSE,
+        &set((0..=1200).chain([50000, 50003, 123456])),
+    );
+}
+
+#[test]
+fn c_mixed_straddle_1024() {
+    check(MIXED_STRADDLE_1024, &set([0, 1, 1023, 1024, 1025, 2050]));
 }

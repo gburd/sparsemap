@@ -16,6 +16,20 @@ fn build(name: &str) -> SparseMap {
         "run4w" => (0..8192).collect(),
         "clusters" => (0..100).chain(10_000..10_050).collect(),
         "offset" => (1000..7000).collect(),
+        // New shapes mirroring the C small-mode / RLE-chunk fixtures.
+        // Rust always emits chunk mode (it is representation-agnostic);
+        // this checks C reads those bytes back to the same set.
+        "smallzero" => [0].into_iter().collect(),
+        "smallword0" => [0, 1, 5, 63].into_iter().collect(),
+        "smallfullword" => (0..64).collect(),
+        "smalltwowords" => [5, 70].into_iter().collect(),
+        "smallscatter" => [3, 17, 88, 200, 511, 900, 1023].into_iter().collect(),
+        "rle1000" => (0..=1000).collect(),
+        "rle1023" => (0..=1023).collect(),
+        "rle5000" => (0..=5000).collect(),
+        "rle2048" => (2048..=4095).collect(),
+        "mixedhi" => (0..=1200).chain([50000, 50003, 123456]).collect(),
+        "straddle" => [0, 1, 1023, 1024, 1025, 2050].into_iter().collect(),
         other => panic!("unknown set {other}"),
     }
 }

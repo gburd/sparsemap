@@ -6,9 +6,13 @@
 # run in CI where a C toolchain and the C source are present.
 set -eu
 cd "$(dirname "$0")/.."          # rust/
+[ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+export CARGO_REGISTRY_TOKEN=
 cc -O2 -I.. ../sm.c ci/c_read.c -o /tmp/sm_c_read
 fail=0
-for set in single scattered run5000 run4w clusters offset; do
+for set in single scattered run5000 run4w clusters offset \
+	smallzero smallword0 smallfullword smalltwowords smallscatter \
+	rle1000 rle1023 rle5000 rle2048 mixedhi straddle; do
 	cargo run -q --example wire_emit -- emit "$set" | /tmp/sm_c_read > /tmp/c_view.txt
 	cargo run -q --example wire_emit -- describe "$set"            > /tmp/rust_view.txt
 	if diff -q /tmp/rust_view.txt /tmp/c_view.txt >/dev/null; then
