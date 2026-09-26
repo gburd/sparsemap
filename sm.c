@@ -7564,15 +7564,17 @@ __sm_run_iter_init(__sm_run_iter_t *it, const sm_t *map)
 		 * run_hi is exclusive here, matching __sm_run_decode_chunk. */
 		const uint64_t *w = __sm_small_words(map);
 		const size_t n = __sm_small_nwords(map);
+		bool open = false;
+		uint64_t cur_lo = 0, cur_hi = 0;
+		size_t i;
 		it->count = 0;
 		it->nruns = 0;
 		it->next_run = 0;
-		bool open = false;
-		uint64_t cur_lo = 0, cur_hi = 0;
-		for (size_t i = 0; i < n; i++) {
+		for (i = 0; i < n; i++) {
 			const uint64_t base = (uint64_t)i * 64;
 			uint64_t word = w[i];
-			for (int b = 0; b < 64; b++) {
+			int b;
+			for (b = 0; b < 64; b++) {
 				if ((word >> b) & 1u) {
 					const uint64_t bit = base + (uint64_t)b;
 					if (open && cur_hi == bit) {
@@ -7609,6 +7611,11 @@ static void
 __sm_run_decode_chunk(__sm_run_iter_t *it, __sm_idx_t start)
 {
 	__sm_chunk_t chunk;
+	__sm_bitvec_t desc;
+	size_t pos = 1; /* payload-word cursor for MIXED slots */
+	bool open = false;
+	uint64_t cur_lo = 0, cur_hi = 0;
+	size_t v;
 	__sm_chunk_init(&chunk, it->p + SM_SIZEOF_OVERHEAD);
 	it->nruns = 0;
 	it->next_run = 0;
@@ -7626,11 +7633,8 @@ __sm_run_decode_chunk(__sm_run_iter_t *it, __sm_idx_t start)
 	/* Sparse: walk the 32 flags, coalescing adjacent set bits.  ONES is
 	 * a full 64-bit run; MIXED decodes its payload word bit-by-bit
 	 * (bounded, 64 bits); ZEROS / NONE break any open run. */
-	const __sm_bitvec_t desc = chunk.m_data[0];
-	size_t pos = 1; /* payload-word cursor for MIXED slots */
-	bool open = false;
-	uint64_t cur_lo = 0, cur_hi = 0;
-	for (size_t v = 0; v < SM_FLAGS_PER_INDEX; v++) {
+	desc = chunk.m_data[0];
+	for (v = 0; v < SM_FLAGS_PER_INDEX; v++) {
 		const size_t flags = SM_CHUNK_GET_FLAGS(desc, v);
 		const uint64_t base = start + (uint64_t)v * SM_BITS_PER_VECTOR;
 		if (flags == SM_PAYLOAD_ONES) {
@@ -7647,7 +7651,8 @@ __sm_run_decode_chunk(__sm_run_iter_t *it, __sm_idx_t start)
 			}
 		} else if (flags == SM_PAYLOAD_MIXED) {
 			__sm_bitvec_t w = chunk.m_data[pos++];
-			for (int b = 0; b < SM_BITS_PER_VECTOR; b++) {
+			int b;
+			for (b = 0; b < SM_BITS_PER_VECTOR; b++) {
 				if ((w >> b) & 1u) {
 					const uint64_t bit = base + (uint64_t)b;
 					if (open && cur_hi == bit) {
