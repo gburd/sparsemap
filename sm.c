@@ -2298,6 +2298,17 @@ __sm_set_chunk_count(const sm_t *map, const size_t new_count)
 	__sm_store_u64((uint8_t *)&map->m_data[0], (uint64_t)new_count);
 }
 
+/* Reset a caller-owned cursor to its invalid/initial state.  Field-wise
+ * so it works as a plain assignment in C90 (a `(sm_cursor_t)SM_CURSOR_INIT`
+ * compound literal is C99). */
+static inline void
+__sm_cursor_reset(sm_cursor_t *c)
+{
+	c->offset = (size_t)-1;
+	c->start_idx = 0;
+	c->prev_offset = (size_t)-1;
+}
+
 /* -------------------------------------------------------------------
  * Small-set mode
  *
@@ -5354,7 +5365,7 @@ __sm_add_dispatch(sm_t *map, uint64_t idx, sm_cursor_t *cur)
 			return (SM_IDX_MAX); /* ENOSPC: caller may grow */
 		}
 		if (cur != NULL) {
-			*cur = (sm_cursor_t)SM_CURSOR_INIT;
+			__sm_cursor_reset(cur);
 		}
 		/* Keep the smaller of the two forms.  Promote only when the
 		 * chunk form is strictly smaller (it then always fits). */
@@ -5372,7 +5383,7 @@ __sm_add_dispatch(sm_t *map, uint64_t idx, sm_cursor_t *cur)
 			return (SM_IDX_MAX); /* ENOSPC: caller may grow */
 		}
 		if (cur != NULL) {
-			*cur = (sm_cursor_t)SM_CURSOR_INIT;
+			__sm_cursor_reset(cur);
 		}
 	}
 	{
@@ -5380,7 +5391,7 @@ __sm_add_dispatch(sm_t *map, uint64_t idx, sm_cursor_t *cur)
 		if (rc != SM_IDX_MAX) {
 			__sm_try_demote(map);
 			if (cur != NULL && __sm_is_small(map)) {
-				*cur = (sm_cursor_t)SM_CURSOR_INIT;
+				__sm_cursor_reset(cur);
 			}
 		}
 		return (rc);
@@ -5482,7 +5493,7 @@ sm_add_grow_cursor(sm_t **mapp, uint64_t idx, sm_cursor_t *cur)
 	*mapp = grown;
 	/* The grow relocated the buffer; the cursor's byte offset is stale. */
 	if (cur != NULL)
-		*cur = (sm_cursor_t)SM_CURSOR_INIT;
+		__sm_cursor_reset(cur);
 	return (__sm_add_c(grown, idx, cur));
 }
 
@@ -8015,7 +8026,7 @@ sm_add_many_grow(sm_t **map, const uint64_t *arr, size_t n)
 			/* A grow may have relocated the buffer; the cursor's byte
 			 * offset is then meaningless.  Reset it when *map moved. */
 			if (*map != before)
-				cur = (sm_cursor_t)SM_CURSOR_INIT;
+				__sm_cursor_reset(&cur);
 		}
 	}
 	__sm_free(sorted);
@@ -11052,23 +11063,29 @@ __sm_locator_rank_upto(const sm_locator_t *loc, uint64_t x)
 	uint8_t *p = base + loc->sb_offset[sb];
 	for (;;) {
 		const __sm_idx_t s = __sm_load_idx((const uint8_t *)p);
+		__sm_chunk_t chunk;
+		size_t cap;
+		uint64_t chunk_lo;
+		uint64_t span;
+		uint64_t chunk_hi_incl;
+		uint64_t ov_hi_incl;
+		size_t to;
+		__sm_chunk_rank_t rank;
+		size_t next_off;
 		if ((uint64_t)s > x) {
 			break; /* chunk starts past x: nothing more to count */
 		}
-		__sm_chunk_t chunk;
 		__sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
-		const size_t cap = __sm_chunk_get_capacity(&chunk);
-		const uint64_t chunk_lo = (uint64_t)s;
-		const uint64_t span = (uint64_t)cap - 1;
-		const uint64_t chunk_hi_incl =
+		cap = __sm_chunk_get_capacity(&chunk);
+		chunk_lo = (uint64_t)s;
+		span = (uint64_t)cap - 1;
+		chunk_hi_incl =
 		    (chunk_lo > UINT64_MAX - span) ? UINT64_MAX
 		                                  : chunk_lo + span;
-		const uint64_t ov_hi_incl =
-		    (x < chunk_hi_incl) ? x : chunk_hi_incl;
-		const size_t to = (size_t)(ov_hi_incl - chunk_lo);
-		__sm_chunk_rank_t rank;
+		ov_hi_incl = (x < chunk_hi_incl) ? x : chunk_hi_incl;
+		to = (size_t)(ov_hi_incl - chunk_lo);
 		set += __sm_chunk_rank(&rank, true, &chunk, 0, to);
-		const size_t next_off = (size_t)(p - base) +
+		next_off = (size_t)(p - base) +
 		    SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&chunk);
 		if (next_off >= stream_end) {
 			break;
@@ -11081,18 +11098,23 @@ __sm_locator_rank_upto(const sm_locator_t *loc, uint64_t x)
 bool
 sm_locator_contains(const sm_locator_t *loc, uint64_t idx)
 {
+	const sm_t *map;
+	uint8_t *base;
+	size_t stream_end;
+	size_t sb;
+	uint8_t *p;
 	if (__sm_locator_is_stale(loc)) {
 		__sm_assert(false);
 		return (sm_contains(loc ? loc->map : NULL, idx, NULL));
 	}
 
-	const sm_t *map = loc->map;
-	uint8_t *base = __sm_get_chunk_data(map, 0);
-	const size_t stream_end =
+	map = loc->map;
+	base = __sm_get_chunk_data(map, 0);
+	stream_end =
 	    (size_t)map->m_data_used - SM_SIZEOF_OVERHEAD;
 
-	size_t sb = __sm_locator_find_sb(loc, idx);
-	uint8_t *p = base + loc->sb_offset[sb];
+	sb = __sm_locator_find_sb(loc, idx);
+	p = base + loc->sb_offset[sb];
 
 	/* Fine-walk at most `stride` chunks from the superblock's first
 	 * chunk to the chunk covering idx (same shape as
@@ -11100,15 +11122,17 @@ sm_locator_contains(const sm_locator_t *loc, uint64_t idx)
 	for (;;) {
 		const __sm_idx_t s = __sm_load_idx((const uint8_t *)p);
 		__sm_chunk_t chunk;
+		size_t cap;
+		size_t next_off;
 		__sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
-		const size_t cap = __sm_chunk_get_capacity(&chunk);
+		cap = __sm_chunk_get_capacity(&chunk);
 		if (idx < (uint64_t)s) {
 			return (false); /* gap before this chunk */
 		}
 		if (idx < (uint64_t)s + cap) {
 			return (__sm_chunk_is_set(&chunk, idx - (uint64_t)s));
 		}
-		const size_t next_off = (size_t)(p - base) +
+		next_off = (size_t)(p - base) +
 		    SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&chunk);
 		if (next_off >= stream_end) {
 			return (false); /* past the last chunk */
@@ -11120,6 +11144,8 @@ sm_locator_contains(const sm_locator_t *loc, uint64_t idx)
 size_t
 sm_locator_rank(const sm_locator_t *loc, uint64_t lo, uint64_t hi, bool value)
 {
+	size_t hi_cnt;
+	size_t lo_cnt;
 	/* value=false and staleness both fall back to the plain path: the
 	 * unset count needs the range width (which the sqrt index does not
 	 * carry), and a stale index must never return a wrong answer. */
@@ -11147,8 +11173,8 @@ sm_locator_rank(const sm_locator_t *loc, uint64_t lo, uint64_t hi, bool value)
 	 * at most `stride` chunks from there.  That is the O(sqrt n) path;
 	 * seeding from chunk 0 as the previous version did made this an
 	 * O(chunks) no-op identical to plain sm_rank. */
-	const size_t hi_cnt = __sm_locator_rank_upto(loc, hi);
-	const size_t lo_cnt =
+	hi_cnt = __sm_locator_rank_upto(loc, hi);
+	lo_cnt =
 	    (lo == 0) ? 0 : __sm_locator_rank_upto(loc, lo - 1);
 	return (hi_cnt - lo_cnt);
 }
@@ -11156,6 +11182,12 @@ sm_locator_rank(const sm_locator_t *loc, uint64_t lo, uint64_t hi, bool value)
 uint64_t
 sm_locator_select(const sm_locator_t *loc, uint64_t n, bool value)
 {
+	const sm_t *map;
+	uint8_t *base;
+	size_t stream_end;
+	size_t sb = 0;
+	ssize_t rem;
+	uint8_t *p;
 	/* value=false and staleness fall back to sm_select: unset select
 	 * needs the leading-zeros / cross-chunk gap accounting the sqrt
 	 * prefix does not carry, and a stale index must stay correct. */
@@ -11172,15 +11204,14 @@ sm_locator_select(const sm_locator_t *loc, uint64_t n, bool value)
 		return (sm_select((sm_t *)loc->map, n, value));
 	}
 
-	const sm_t *map = loc->map;
-	uint8_t *base = __sm_get_chunk_data(map, 0);
-	const size_t stream_end =
+	map = loc->map;
+	base = __sm_get_chunk_data(map, 0);
+	stream_end =
 	    (size_t)map->m_data_used - SM_SIZEOF_OVERHEAD;
 
 	/* Find the last superblock whose cumulative set-bit prefix is <= n,
 	 * subtract that prefix, and fine-walk from its first chunk.  The
 	 * per-chunk select semantics mirror sm_select exactly. */
-	size_t sb = 0;
 	{
 		size_t l = 0, r = loc->n_sb; /* largest sb with prefix<=n */
 		while (l < r) {
@@ -11194,20 +11225,22 @@ sm_locator_select(const sm_locator_t *loc, uint64_t n, bool value)
 		sb = (l == 0) ? 0 : l - 1;
 	}
 
-	ssize_t rem = (ssize_t)(n - (uint64_t)loc->sb_prefix[sb]);
-	uint8_t *p = base + loc->sb_offset[sb];
+	rem = (ssize_t)(n - (uint64_t)loc->sb_prefix[sb]);
+	p = base + loc->sb_offset[sb];
 	for (;;) {
 		const __sm_idx_t s = __sm_load_idx((const uint8_t *)p);
 		__sm_chunk_t chunk;
+		ssize_t new_n;
+		size_t index;
+		size_t next_off;
 		__sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
-		ssize_t new_n = rem;
-		const size_t index =
-		    __sm_chunk_select(&chunk, rem, &new_n, value);
+		new_n = rem;
+		index = __sm_chunk_select(&chunk, rem, &new_n, value);
 		if (new_n == -1) {
 			return ((uint64_t)s + index);
 		}
 		rem = new_n;
-		const size_t next_off = (size_t)(p - base) +
+		next_off = (size_t)(p - base) +
 		    SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&chunk);
 		if (next_off >= stream_end) {
 			return (SM_IDX_MAX);
@@ -11223,6 +11256,13 @@ sm_locator_select(const sm_locator_t *loc, uint64_t n, bool value)
 bool
 sm_contains_cached(const sm_t *map, uint64_t idx, sm_cursor_cached_t *cache)
 {
+	uint8_t w;
+	ssize_t offset;
+	uint8_t *p;
+	__sm_idx_t start;
+	__sm_chunk_t chunk;
+	size_t cap;
+	uint8_t slot;
 	if (map == NULL) {
 		return (false);
 	}
@@ -11231,33 +11271,32 @@ sm_contains_cached(const sm_t *map, uint64_t idx, sm_cursor_cached_t *cache)
 	}
 
 	/* 1. Probe the <=8 valid ways for a covering chunk (a hit). */
-	for (uint8_t w = 0; w < SM_CACHE_WAYS; w++) {
+	for (w = 0; w < SM_CACHE_WAYS; w++) {
 		if ((cache->valid & (uint8_t)(1u << w)) == 0) {
 			continue;
 		}
 		if (idx >= cache->start_idx[w] && idx < cache->end_idx[w]) {
-			uint8_t *p =
+			uint8_t *hp =
 			    __sm_get_chunk_data(map, cache->offset[w]);
-			__sm_chunk_t chunk;
-			__sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
-			return (__sm_chunk_is_set(&chunk,
+			__sm_chunk_t hc;
+			__sm_chunk_init(&hc, hp + SM_SIZEOF_OVERHEAD);
+			return (__sm_chunk_is_set(&hc,
 			    idx - cache->start_idx[w]));
 		}
 	}
 
 	/* 2. Miss: walk from the head, then insert the located chunk. */
-	const ssize_t offset = __sm_get_chunk_offset(map, idx, NULL);
+	offset = __sm_get_chunk_offset(map, idx, NULL);
 	if (offset == -1) {
 		return (false);
 	}
-	uint8_t *p = __sm_get_chunk_data(map, (size_t)offset);
-	const __sm_idx_t start = __sm_load_idx((const uint8_t *)p);
-	__sm_chunk_t chunk;
+	p = __sm_get_chunk_data(map, (size_t)offset);
+	start = __sm_load_idx((const uint8_t *)p);
 	__sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
-	const size_t cap = __sm_chunk_get_capacity(&chunk);
+	cap = __sm_chunk_get_capacity(&chunk);
 
 	/* 3. Insert (start, start+cap, offset) at the round-robin slot. */
-	const uint8_t slot = cache->mru;
+	slot = cache->mru;
 	cache->start_idx[slot] = (uint64_t)start;
 	cache->end_idx[slot] = (uint64_t)start + cap;
 	cache->offset[slot] = (size_t)offset;
