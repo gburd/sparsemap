@@ -2254,6 +2254,149 @@ __sm_set_chunk_count(const sm_t *map, const size_t new_count)
 	__sm_store_u64((uint8_t *)&map->m_data[0], (uint64_t)new_count);
 }
 
+/* -------------------------------------------------------------------
+ * Small-set mode
+ *
+ * When every set index is below SM_SMALL_MAX_BITS, the map stores a bare
+ * uint64 bitmapword[] from bit 0 (bit i in word i/64) -- exactly like
+ * PostgreSQL's Bitmapset -- behind an 8-byte header that ties
+ * Bitmapset's 8-byte header, so the footprint matches or beats it for
+ * near-zero sets.  Chunk mode keeps winning once indices spread.
+ *
+ * The mode is self-describing in the m_data byte stream: the same
+ * 8-byte header word that holds the chunk count in chunk mode has its
+ * top bit (SM_SMALL_FLAG) set in small mode, with the bitmapword count
+ * in the low 32 bits.  A chunk count never approaches 2^63, so the top
+ * bit is free.  This map-level header word is distinct from every
+ * per-chunk descriptor (which lives after the 8-byte chunk start), so
+ * SM_SMALL_FLAG can never collide with an RLE descriptor (bits 63:62 =
+ * 01, SM_RLE_FLAGS) or a real chunk count.  __sm_get_chunk_count / the
+ * chunk walkers must never run on a small map; callers gate on
+ * __sm_is_small() first.
+ *
+ * Layout (m_data):  [ SM_SMALL_FLAG | nwords : 8 bytes ][ word[0..nwords) ]
+ * m_data_used = SM_SIZEOF_OVERHEAD + nwords * 8.
+ * ------------------------------------------------------------------- */
+
+#define SM_SMALL_FLAG   ((uint64_t)1 << 63)
+#define SM_SMALL_WMASK  (((uint64_t)1 << 32) - 1)
+/* Hard span cap: at 16 words the small form is at most 8 + 16*8 = 136
+ * bytes.  It is preferred over the chunk form whenever it is not larger
+ * and fits in place; in a tightly-sized buffer a growth-to-shrink is
+ * skipped, so the small form can occasionally sit up to one word larger
+ * than the chunk equivalent -- never larger than a Bitmapset.  Above
+ * this cap the map is always in chunk mode. */
+#define SM_SMALL_MAX_WORDS 16u
+#define SM_SMALL_MAX_BITS  (SM_SMALL_MAX_WORDS * 64u)
+
+static inline bool
+__sm_is_small(const sm_t *map)
+{
+	if (map == NULL || map->m_data == NULL ||
+	    map->m_data_used < SM_SIZEOF_OVERHEAD) {
+		return (false);
+	}
+	return ((__sm_load_u64(&map->m_data[0]) & SM_SMALL_FLAG) != 0);
+}
+
+static inline size_t
+__sm_small_nwords(const sm_t *map)
+{
+	return ((size_t)(__sm_load_u64(&map->m_data[0]) & SM_SMALL_WMASK));
+}
+
+static inline uint64_t *
+__sm_small_words(const sm_t *map)
+{
+	return ((uint64_t *)&map->m_data[SM_SIZEOF_OVERHEAD]);
+}
+
+static inline void
+__sm_small_set_header(sm_t *map, size_t nwords)
+{
+	__sm_store_u64((uint8_t *)&map->m_data[0],
+	    SM_SMALL_FLAG | (uint64_t)nwords);
+}
+
+/* Byte footprint of the small form holding indices up to maxbit. */
+static inline size_t
+__sm_small_bytes_for(uint64_t maxbit)
+{
+	return (SM_SIZEOF_OVERHEAD + (size_t)(maxbit / 64 + 1) * sizeof(uint64_t));
+}
+
+/* True if idx is set in a small-mode map. */
+static bool
+__sm_small_contains(const sm_t *map, uint64_t idx)
+{
+	const size_t w = (size_t)(idx / 64);
+	if (w >= __sm_small_nwords(map)) {
+		return (false);
+	}
+	return ((__sm_small_words(map)[w] >> (idx % 64)) & 1u);
+}
+
+/* Population count of a small-mode map. */
+static uint64_t
+__sm_small_cardinality(const sm_t *map)
+{
+	const uint64_t *w = __sm_small_words(map);
+	const size_t n = __sm_small_nwords(map);
+	uint64_t c = 0;
+	for (size_t i = 0; i < n; i++) {
+		c += (uint64_t)SM_POPCOUNT64(w[i]);
+	}
+	return (c);
+}
+
+static bool
+__sm_small_is_empty(const sm_t *map)
+{
+	const uint64_t *w = __sm_small_words(map);
+	const size_t n = __sm_small_nwords(map);
+	for (size_t i = 0; i < n; i++) {
+		if (w[i] != 0) {
+			return (false);
+		}
+	}
+	return (true);
+}
+
+static uint64_t
+__sm_small_minimum(const sm_t *map)
+{
+	const uint64_t *w = __sm_small_words(map);
+	const size_t n = __sm_small_nwords(map);
+	for (size_t i = 0; i < n; i++) {
+		if (w[i] != 0) {
+			return ((uint64_t)i * 64 + (uint64_t)SM_CTZ64(w[i]));
+		}
+	}
+	return (0);
+}
+
+static uint64_t
+__sm_small_maximum(const sm_t *map)
+{
+	const uint64_t *w = __sm_small_words(map);
+	const size_t n = __sm_small_nwords(map);
+	for (size_t i = n; i-- > 0;) {
+		if (w[i] != 0) {
+			return ((uint64_t)i * 64 + (63 -
+			    (uint64_t)SM_CLZ64(w[i])));
+		}
+	}
+	return (0);
+}
+
+/* Materialize a small-mode map into a freshly allocated chunk-mode map
+ * (adding each set bit).  Returns NULL on allocation failure.  The
+ * caller owns the result and disposes it with sm_free().  Used to give
+ * the chunk-walking read/algebra paths a uniform view of a small map
+ * without mutating the (const) input. */
+static sm_t *__sm_materialize(const sm_t *small);
+
+
 /**
  * @brief Appends data to the sparsemap's internal buffer.
  *
@@ -3699,6 +3842,18 @@ sm_open(sm_t *map, uint8_t *data, const size_t size)
 	 */
 	__sm_set_cap_kind(map, size, SM_WRAPPED);
 	map->m_data_used = __sm_cap(map);
+	/* Small-set body: the header word's top bit is set.  Its size is
+	 * fixed by the word count; don't run the chunk walk on it. */
+	if (size >= SM_SIZEOF_OVERHEAD && __sm_is_small(map)) {
+		const size_t nwords = __sm_small_nwords(map);
+		map->m_data_used =
+		    SM_SIZEOF_OVERHEAD + nwords * sizeof(uint64_t);
+		if (map->m_data_used > __sm_cap(map) || !sm_validate(map)) {
+			__sm_store_u64(&map->m_data[0], 0);
+			map->m_data_used = SM_SIZEOF_OVERHEAD;
+		}
+		return;
+	}
 	/* The stored count as the buffer claims it, before __sm_get_size_impl
 	 * silently truncates it to the valid prefix.  A mismatch is an S1(e)
 	 * violation (stored count disagrees with the walk). */
@@ -3731,6 +3886,18 @@ sm_open_copy(const uint8_t *data, size_t n, size_t slack)
 		return (NULL);
 	if (n > 0) {
 		memcpy(sm_get_data(m), data, n);
+		/* Small-set body: fixed size, no chunk walk. */
+		if (n >= SM_SIZEOF_OVERHEAD && __sm_is_small(m)) {
+			const size_t nwords = __sm_small_nwords(m);
+			m->m_data_used =
+			    SM_SIZEOF_OVERHEAD + nwords * sizeof(uint64_t);
+			if (m->m_data_used > n || !sm_validate(m)) {
+				sm_free(m);
+				return (NULL);
+			}
+			__sm_set_kind(m, SM_OWNED_CONTIGUOUS);
+			return (m);
+		}
 		/* sm_open re-derives m_data_used from the chunk count + walk;
 		 * temporarily set m_data_used = capacity so the empty-map guard
 		 * in __sm_get_chunk_count doesn't short-circuit during the walk. */
@@ -3926,6 +4093,407 @@ sm_set_data_size(sm_t *map, uint8_t *data, const size_t size)
 	return (NULL);
 }
 
+/* -------------------------------------------------------------------
+ * Small-set <-> chunk transitions
+ * ------------------------------------------------------------------- */
+
+static __sm_idx_t __sm_map_set(sm_t *map, uint64_t idx, bool coalesce,
+    sm_cursor_t *cur);
+static void __sm_expand_sparse_chunk(const __sm_chunk_t *chunk,
+    __sm_bitvec_t words[32], int cap_flags[32]);
+
+/*
+ * True when the bits of a small-mode map form one contiguous run from
+ * bit 0, i.e. the set is exactly {0, 1, ..., maxbit}.  Such a run is the
+ * one case the RLE build can encode as a single descriptor-only RLE
+ * chunk (start 0, length maxbit+1) -- see __sm_small_chunk_bytes and
+ * __sm_promote.  A run that does not start at bit 0 (or has any gap)
+ * cannot be an RLE chunk and must use the sparse form.
+ */
+static bool
+__sm_small_is_run_from_zero(const sm_t *map, uint64_t *run_len_out)
+{
+	const uint64_t *w = __sm_small_words(map);
+	const size_t n = __sm_small_nwords(map);
+	uint64_t len = 0;
+	bool ended = false;
+	for (size_t i = 0; i < n; i++) {
+		if (ended) {
+			if (w[i] != 0) {
+				return (false); /* bits after the run: a gap */
+			}
+			continue;
+		}
+		if (w[i] == ~(uint64_t)0) {
+			len += 64;
+			continue;
+		}
+		if (w[i] == 0) {
+			ended = true; /* run ends on a whole-word boundary */
+			continue;
+		}
+		/* Partial word: must be a low-contiguous mask (1<<r)-1. */
+		const uint64_t lo = w[i];
+		if ((lo & (lo + 1)) != 0) {
+			return (false); /* not a low-contiguous prefix */
+		}
+		len += (uint64_t)SM_POPCOUNT64(lo);
+		ended = true;
+	}
+	if (run_len_out != NULL) {
+		*run_len_out = len;
+	}
+	return (len > 0);
+}
+
+/*
+ * Byte footprint the single low chunk would occupy for the bits
+ * currently held in a small-mode map.  The RLE build has THREE candidate
+ * chunk-mode encodings for a set whose max index is below one chunk's
+ * 2048-bit window; this returns the cheapest:
+ *
+ *   sparse chunk  = 8 (count) + 8 (start) + 8 (descriptor)
+ *                 + 8 per 64-bit word that is neither all-zero (a ZEROS
+ *                   slot, not stored) nor all-one (a ONES slot, not
+ *                   stored) -- i.e. one payload word per MIXED word;
+ *   RLE chunk     = 8 (count) + 8 (start) + 8 (descriptor) = 24, with no
+ *                   payload, but ONLY when the bits form a single run
+ *                   from bit 0 (an RLE chunk encodes [start, start+len)).
+ *
+ * A dense-but-not-word-aligned run such as {0..1000} is 32 bytes sparse
+ * (word 15 is MIXED, so its payload word is stored) but 24 bytes as an
+ * RLE chunk; the RLE-aware minimum makes __sm_promote pick the 24-byte
+ * form.  A word-aligned all-ones run such as {0..1023} is already 24
+ * bytes sparse (every word is a ONES slot), so RLE ties and either form
+ * is chosen.  A sparse scatter such as {0,5,70} has no run to compress,
+ * so only the sparse cost applies and the flat small form usually wins.
+ */
+static size_t
+__sm_small_chunk_bytes(const sm_t *map)
+{
+	const uint64_t *w = __sm_small_words(map);
+	const size_t n = __sm_small_nwords(map);
+	size_t mixed = 0;
+	for (size_t i = 0; i < n; i++) {
+		if (w[i] != 0 && w[i] != ~(uint64_t)0) {
+			mixed++;
+		}
+	}
+	const size_t sparse = SM_SIZEOF_OVERHEAD + SM_SIZEOF_OVERHEAD +
+	    sizeof(__sm_bitvec_t) + mixed * sizeof(__sm_bitvec_t);
+	uint64_t run_len = 0;
+	if (__sm_small_is_run_from_zero(map, &run_len) &&
+	    run_len <= (uint64_t)SM_CHUNK_RLE_MAX_LENGTH) {
+		const size_t rle = SM_SIZEOF_OVERHEAD + SM_SIZEOF_OVERHEAD +
+		    sizeof(__sm_bitvec_t);
+		return (rle < sparse ? rle : sparse);
+	}
+	return (sparse);
+}
+
+/* Byte footprint of a small map's own stored form. */
+static size_t
+__sm_small_bytes(const sm_t *map)
+{
+	return (SM_SIZEOF_OVERHEAD + __sm_small_nwords(map) * sizeof(uint64_t));
+}
+
+/*
+ * Should a set whose maximum index is `maxbit` and whose single low
+ * chunk would occupy `chunk_bytes` be stored in small-set mode?  Yes
+ * when the index span fits the small cap AND the small form is no
+ * larger than the chunk form.  (chunk_bytes == 0 means "not computed";
+ * fall back to the span test alone, used when there are no bits yet.)
+ */
+static inline bool
+__sm_small_is_better(uint64_t maxbit, size_t small_bytes, size_t chunk_bytes)
+{
+	if (maxbit >= SM_SMALL_MAX_BITS) {
+		return (false);
+	}
+	return (chunk_bytes == 0 || small_bytes <= chunk_bytes);
+}
+
+/*
+ * Emit the single contiguous run {0..run_len-1} of a small-mode map as
+ * one descriptor-only RLE chunk (start 0), replacing the small body in
+ * place within the existing capacity.  Returns true on success; false
+ * (leaving the map unchanged) if the caller must fall back to the
+ * bit-by-bit sparse promote.  Caller guarantees the bits are a run from
+ * bit 0 and run_len <= SM_CHUNK_RLE_MAX_LENGTH.
+ */
+static bool
+__sm_promote_run_as_rle(sm_t *map, uint64_t run_len)
+{
+	/* 8 (count) + 8 (start) + 8 (RLE descriptor). */
+	const size_t need = SM_SIZEOF_OVERHEAD + SM_SIZEOF_OVERHEAD +
+	    sizeof(__sm_bitvec_t);
+	if (need > __sm_cap(map)) {
+		return (false);
+	}
+	/* Capacity is the enclosing 2048-bit chunk window; run_len <=
+	 * SM_SMALL_MAX_BITS (1024) < SM_CHUNK_MAX_CAPACITY (2048). */
+	const size_t capacity = SM_CHUNK_MAX_CAPACITY;
+	__sm_set_chunk_count(map, 1);
+	__sm_store_idx(&map->m_data[SM_SIZEOF_OVERHEAD], 0); /* start = 0 */
+	__sm_chunk_t chunk;
+	__sm_chunk_init(&chunk,
+	    &map->m_data[SM_SIZEOF_OVERHEAD + SM_SIZEOF_OVERHEAD]);
+	chunk.m_data[0] = 0;
+	__sm_chunk_set_rle(&chunk);
+	__sm_chunk_rle_set_capacity(&chunk, capacity);
+	__sm_chunk_rle_set_length(&chunk, (size_t)run_len);
+	map->m_data_used = need;
+	return (true);
+}
+
+/*
+ * Convert a small-mode map to chunk mode in place, within the existing
+ * buffer capacity.  Returns true on success; false (ENOSPC) if the
+ * chunk form would not fit -- the caller (sm_add) then reports ENOSPC
+ * and the sm_add_grow wrapper grows and retries.  The map is left
+ * unchanged on failure.
+ *
+ * When the bits form a single run from bit 0 and the RLE form is the
+ * cheapest chunk encoding, emit one descriptor-only RLE chunk directly
+ * (matching the RLE-aware cost in __sm_small_chunk_bytes); otherwise
+ * re-add every set bit into an empty chunk-mode map.
+ */
+static bool
+__sm_promote(sm_t *map)
+{
+	__sm_assert(__sm_is_small(map));
+	/* Snapshot the bits; the buffer is reused for the chunk form. */
+	const size_t n = __sm_small_nwords(map);
+	uint64_t words[SM_SMALL_MAX_WORDS];
+	__sm_assert(n <= SM_SMALL_MAX_WORDS);
+	memcpy(words, __sm_small_words(map), n * sizeof(uint64_t));
+
+	/* RLE-cheapest single run from bit 0: emit one RLE chunk directly,
+	 * matching the RLE-aware minimum in __sm_small_chunk_bytes.  Only
+	 * when the RLE form is no larger than the sparse form (a
+	 * word-aligned all-ones run is 24 bytes either way; a partial-tail
+	 * run is 24 RLE vs 32+ sparse). */
+	uint64_t run_len = 0;
+	if (__sm_small_is_run_from_zero(map, &run_len) &&
+	    run_len <= (uint64_t)SM_CHUNK_RLE_MAX_LENGTH) {
+		/* Sparse cost of this run: one payload word only if the run
+		 * ends mid-word (a MIXED tail); all whole words are ONES. */
+		const size_t sparse = SM_SIZEOF_OVERHEAD + SM_SIZEOF_OVERHEAD +
+		    sizeof(__sm_bitvec_t) +
+		    ((run_len % 64) != 0 ? sizeof(__sm_bitvec_t) : 0);
+		const size_t rle = SM_SIZEOF_OVERHEAD + SM_SIZEOF_OVERHEAD +
+		    sizeof(__sm_bitvec_t);
+		if (rle < sparse) {
+			if (__sm_promote_run_as_rle(map, run_len)) {
+				return (true);
+			}
+			/* Restore small header before the fallback path
+			 * rebuilds from `words`. */
+			__sm_small_set_header(map, n);
+			map->m_data_used =
+			    SM_SIZEOF_OVERHEAD + n * sizeof(uint64_t);
+		}
+	}
+
+	/* Reset to an empty chunk-mode map and re-add every set bit.  Each
+	 * add stays within [0, SM_SMALL_MAX_BITS) == one chunk, so the peak
+	 * footprint is one chunk; if that exceeds capacity, add returns
+	 * ENOSPC and we restore the small header. */
+	map->m_data_used = SM_SIZEOF_OVERHEAD;
+	__sm_set_chunk_count(map, 0);
+	for (size_t i = 0; i < n; i++) {
+		uint64_t bits = words[i];
+		while (bits != 0) {
+			const int b = SM_CTZ64(bits);
+			bits &= bits - 1;
+			const uint64_t idx = (uint64_t)i * 64 + (uint64_t)b;
+			if (__sm_map_set(map, idx, true, NULL) == SM_IDX_MAX) {
+				/* Out of space: restore the small form. */
+				map->m_data_used =
+				    SM_SIZEOF_OVERHEAD + n * sizeof(uint64_t);
+				__sm_small_set_header(map, n);
+				memcpy(__sm_small_words(map), words,
+				    n * sizeof(uint64_t));
+				return (false);
+			}
+		}
+	}
+	return (true);
+}
+
+/*
+ * If a chunk-mode map now holds only indices below SM_SMALL_MAX_BITS and
+ * the small form would be no larger, convert it to small mode in place.
+ * Always fits (small form is smaller than the chunk form it replaces).
+ * A no-op for maps that should stay in chunk mode.
+ */
+static void
+__sm_try_demote(sm_t *map)
+{
+	if (map == NULL || __sm_is_small(map) || map->m_data == NULL) {
+		return;
+	}
+	if (map->m_data_used < SM_SIZEOF_OVERHEAD) {
+		return;
+	}
+	const size_t count = __sm_get_chunk_count(map);
+	if (count == 0) {
+		/* Empty: leave as an empty chunk-mode map (size == overhead,
+		 * same as small with zero words). */
+		return;
+	}
+	if (count > 1) {
+		return; /* spans >1 chunk => max index >= 2048 > threshold */
+	}
+	/* Single chunk: it must start at 0 for the small form (from bit 0)
+	 * to represent it, and every index must be < SM_SMALL_MAX_BITS. */
+	uint8_t *p = __sm_get_chunk_data(map, 0);
+	const __sm_idx_t start = __sm_load_idx((const uint8_t *)p);
+	if (start != 0) {
+		return;
+	}
+	__sm_chunk_t chunk;
+	__sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
+	__sm_bitvec_t w32[SM_FLAGS_PER_INDEX];
+	int cap[SM_FLAGS_PER_INDEX];
+	/* An RLE chunk cannot be word-expanded by __sm_expand_sparse_chunk;
+	 * decode it as the run {0..length-1} it encodes.  A demote target
+	 * only exists when the whole set is below the small cap, so an RLE
+	 * chunk here holds a run shorter than one chunk. */
+	if (__sm_chunk_is_rle(&chunk)) {
+		const size_t length = __sm_chunk_rle_get_length(&chunk);
+		if (length == 0 || length > SM_SMALL_MAX_BITS) {
+			return;
+		}
+		const uint64_t maxbit = (uint64_t)length - 1;
+		const size_t nwords = (size_t)(maxbit / 64) + 1;
+		const size_t small_bytes = SM_SIZEOF_OVERHEAD +
+		    nwords * sizeof(uint64_t);
+		if (small_bytes > map->m_data_used) {
+			return; /* chunk (RLE) form is smaller; keep it */
+		}
+		uint64_t out[SM_SMALL_MAX_WORDS];
+		memset(out, 0, sizeof(out));
+		for (size_t bit = 0; bit < length; bit++) {
+			out[bit / 64] |= (uint64_t)1 << (bit % 64);
+		}
+		__sm_small_set_header(map, nwords);
+		memcpy(__sm_small_words(map), out,
+		    nwords * sizeof(uint64_t));
+		map->m_data_used = small_bytes;
+		return;
+	}
+	__sm_expand_sparse_chunk(&chunk, w32, cap);
+	/* Highest set bit within the chunk. */
+	size_t hi_word = 0;
+	bool any = false;
+	for (int i = 0; i < (int)SM_FLAGS_PER_INDEX; i++) {
+		if (cap[i] && w32[i] != 0) {
+			hi_word = (size_t)i;
+			any = true;
+		}
+	}
+	if (!any) {
+		/* Chunk with no set bits: collapse to empty chunk-mode. */
+		map->m_data_used = SM_SIZEOF_OVERHEAD;
+		__sm_set_chunk_count(map, 0);
+		return;
+	}
+	const uint64_t maxbit = (uint64_t)hi_word * 64 +
+	    (63 - (uint64_t)SM_CLZ64(w32[hi_word]));
+	if (maxbit >= SM_SMALL_MAX_BITS) {
+		return;
+	}
+	const size_t nwords = (size_t)(maxbit / 64) + 1;
+	const size_t small_bytes = SM_SIZEOF_OVERHEAD +
+	    nwords * sizeof(uint64_t);
+	if (small_bytes > map->m_data_used) {
+		return; /* chunk form is already smaller; keep it */
+	}
+	/* Build the small form from the expanded words.  small_bytes <=
+	 * m_data_used <= capacity, so it always fits. */
+	uint64_t out[SM_SMALL_MAX_WORDS];
+	memset(out, 0, sizeof(out));
+	for (size_t i = 0; i < nwords; i++) {
+		out[i] = w32[i];
+	}
+	__sm_small_set_header(map, nwords);
+	memcpy(__sm_small_words(map), out, nwords * sizeof(uint64_t));
+	map->m_data_used = small_bytes;
+}
+
+/*
+ * Materialize a small-mode map into a fresh chunk-mode map so the
+ * chunk-walking read/algebra paths get a uniform view without mutating
+ * the const input.  Returns NULL on allocation failure.
+ */
+static sm_t *
+__sm_materialize(const sm_t *small)
+{
+	const uint64_t *w = __sm_small_words(small);
+	const size_t n = __sm_small_nwords(small);
+	sm_t *m = sm_create(256);
+	if (m == NULL) {
+		return (NULL);
+	}
+	for (size_t i = 0; i < n; i++) {
+		uint64_t bits = w[i];
+		while (bits != 0) {
+			const int b = SM_CTZ64(bits);
+			bits &= bits - 1;
+			const uint64_t idx = (uint64_t)i * 64 + (uint64_t)b;
+			if (sm_add_grow(&m, idx) == SM_IDX_MAX) {
+				sm_free(m);
+				return (NULL);
+			}
+		}
+	}
+	/* sm_add keeps a near-zero set in small mode; force chunk mode so
+	 * the caller (the chunk-walking read/algebra paths) gets a real
+	 * chunk stream and __sm_chunk_view does not recurse forever. */
+	if (__sm_is_small(m) && !__sm_small_is_empty(m)) {
+		if (!__sm_promote(m)) {
+			/* Promote needs the chunk form to fit; grow and retry. */
+			sm_t *g = sm_set_data_size(m, NULL,
+			    sm_get_capacity(m) * 2 + 4096);
+			if (g == NULL) {
+				sm_free(m);
+				return (NULL);
+			}
+			m = g;
+			if (!__sm_promote(m)) {
+				sm_free(m);
+				return (NULL);
+			}
+		}
+	}
+	return (m);
+}
+
+/*
+ * Return a chunk-mode view of `map` for the raw-chunk-walking read and
+ * set-algebra paths.  If the map is already chunk mode (or NULL) it is
+ * returned as-is and *owned is false.  If it is small, a materialized
+ * chunk-mode copy is returned and *owned is set true; the caller must
+ * sm_free() it.  On materialization failure returns NULL with *owned
+ * false (callers treat NULL as an empty operand / allocation failure).
+ */
+static const sm_t *
+__sm_chunk_view(const sm_t *map, bool *owned)
+{
+	*owned = false;
+	if (map == NULL || !__sm_is_small(map)) {
+		return (map);
+	}
+	sm_t *m = __sm_materialize(map);
+	if (m == NULL) {
+		return (NULL);
+	}
+	*owned = true;
+	return (m);
+}
+
 /**
  * @brief Calculates the remaining capacity of the sparsemap.
  *
@@ -3993,6 +4561,9 @@ sm_contains(const sm_t *map, uint64_t idx, sm_cursor_t *cur)
 	 * legitimately return NULL when the result is empty. */
 	if (map == NULL) {
 		return (false);
+	}
+	if (__sm_is_small(map)) {
+		return (__sm_small_contains(map, idx));
 	}
 	__sm_assert(sm_get_size((sm_t *)map) >= SM_SIZEOF_OVERHEAD);
 
@@ -4210,7 +4781,27 @@ sm_remove(sm_t *map, const uint64_t idx)
 		errno = EINVAL;
 		return (SM_IDX_MAX);
 	}
-	return (__sm_map_unset(map, idx, true));
+	if (__sm_is_small(map)) {
+		const size_t w = (size_t)(idx / 64);
+		if (w < __sm_small_nwords(map)) {
+			__sm_small_words(map)[w] &=
+			    ~((uint64_t)1 << (idx % 64));
+			/* Shrink the trailing all-zero words so the footprint
+			 * tracks the new maximum index. */
+			size_t n = __sm_small_nwords(map);
+			uint64_t *words = __sm_small_words(map);
+			while (n > 0 && words[n - 1] == 0) {
+				n--;
+			}
+			__sm_small_set_header(map, n);
+			map->m_data_used = SM_SIZEOF_OVERHEAD +
+			    n * sizeof(uint64_t);
+		}
+		return (idx);
+	}
+	const uint64_t rc = __sm_map_unset(map, idx, true);
+	__sm_try_demote(map);
+	return (rc);
 }
 
 /**
@@ -4555,6 +5146,107 @@ done:;
 	return (ret_idx);
 }
 
+/*
+ * Small-mode bit set.  Grows the word array within the existing buffer
+ * capacity; returns SM_IDX_MAX (errno=ENOSPC) if the buffer is too
+ * small, so sm_add_grow can grow and retry.  The map stays in small
+ * mode.  Caller guarantees idx < SM_SMALL_MAX_BITS.
+ */
+static uint64_t
+__sm_small_add(sm_t *map, uint64_t idx)
+{
+	const size_t w = (size_t)(idx / 64);
+	size_t n = __sm_small_nwords(map);
+	if (w >= n) {
+		const size_t need = SM_SIZEOF_OVERHEAD +
+		    (w + 1) * sizeof(uint64_t);
+		if (need > __sm_cap(map)) {
+			errno = ENOSPC;
+			return (SM_IDX_MAX);
+		}
+		/* Zero the newly-exposed words. */
+		uint64_t *words = __sm_small_words(map);
+		for (size_t i = n; i <= w; i++) {
+			words[i] = 0;
+		}
+		n = w + 1;
+		__sm_small_set_header(map, n);
+		map->m_data_used = need;
+	}
+	__sm_small_words(map)[w] |= (uint64_t)1 << (idx % 64);
+	return (idx);
+}
+
+/*
+ * Unified add path handling both small and chunk mode.
+ *
+ *  - A small-mode map (or an empty chunk-mode map) whose new max index
+ *    stays below SM_SMALL_MAX_BITS stays/goes small.  If, after the add,
+ *    the equivalent single chunk would be strictly smaller, promote --
+ *    that always fits, since the chunk form is the smaller one.
+ *  - Otherwise (index out of small range, or already a multi-chunk map)
+ *    promote any small map to chunk form and use the chunk setter, then
+ *    try to demote the result back to small.
+ *
+ * The cursor accelerates the chunk-mode ascending path only; on any
+ * mode transition it is reset (layout changed) so a stale seat is never
+ * used.
+ */
+static uint64_t
+__sm_add_dispatch(sm_t *map, uint64_t idx, sm_cursor_t *cur)
+{
+	const bool small = __sm_is_small(map);
+	const bool empty_chunk = !small &&
+	    (map->m_data_used < SM_SIZEOF_OVERHEAD ||
+	        __sm_get_chunk_count(map) == 0);
+
+	if ((small || empty_chunk) && idx < SM_SMALL_MAX_BITS) {
+		if (empty_chunk) {
+			/* Turn the empty chunk-mode buffer into an empty
+			 * small-mode map (zero words). */
+			if (SM_SIZEOF_OVERHEAD > __sm_cap(map)) {
+				errno = ENOSPC;
+				return (SM_IDX_MAX);
+			}
+			__sm_small_set_header(map, 0);
+			map->m_data_used = SM_SIZEOF_OVERHEAD;
+		}
+		const uint64_t rc = __sm_small_add(map, idx);
+		if (rc == SM_IDX_MAX) {
+			return (SM_IDX_MAX); /* ENOSPC: caller may grow */
+		}
+		if (cur != NULL) {
+			*cur = (sm_cursor_t)SM_CURSOR_INIT;
+		}
+		/* Keep the smaller of the two forms.  Promote only when the
+		 * chunk form is strictly smaller (it then always fits). */
+		const uint64_t maxbit = __sm_small_maximum(map);
+		if (!__sm_small_is_better(maxbit, __sm_small_bytes(map),
+		        __sm_small_chunk_bytes(map))) {
+			(void)__sm_promote(map);
+		}
+		return (idx);
+	}
+
+	/* Chunk-mode path (promote first if the map is still small). */
+	if (small) {
+		if (!__sm_promote(map)) {
+			return (SM_IDX_MAX); /* ENOSPC: caller may grow */
+		}
+		if (cur != NULL) {
+			*cur = (sm_cursor_t)SM_CURSOR_INIT;
+		}
+	}
+	const uint64_t rc = __sm_map_set(map, idx, true, cur);
+	if (rc != SM_IDX_MAX) {
+		__sm_try_demote(map);
+		if (cur != NULL && __sm_is_small(map)) {
+			*cur = (sm_cursor_t)SM_CURSOR_INIT;
+		}
+	}
+	return (rc);
+}
+
 /**
  * @brief Sets the specified index in the sparsemap.
  *
@@ -4572,7 +5264,7 @@ sm_add(sm_t *map, const uint64_t idx)
 		errno = EINVAL;
 		return (SM_IDX_MAX);
 	}
-	return (__sm_map_set(map, idx, true, NULL));
+	return (__sm_add_dispatch(map, idx, NULL));
 }
 
 /* Cursor-threading variant of sm_add for O(N) bulk construction.
@@ -4598,7 +5290,7 @@ __sm_add_c(sm_t *map, uint64_t idx, sm_cursor_t *cur)
 	 * making bulk insert O(N^2)).  __sm_get_chunk_offset self-validates
 	 * the seat, so an occasionally-stale cursor is safe.
 	 */
-	return (__sm_map_set(map, idx, true, cur));
+	return (__sm_add_dispatch(map, idx, cur));
 }
 
 uint64_t
@@ -4689,6 +5381,8 @@ sm_minimum(const sm_t *map)
 {
 	if (map == NULL)
 		return (0);
+	if (__sm_is_small(map))
+		return (__sm_small_minimum(map));
 	__sm_check_invariants(map);
 	uint64_t offset = 0;
 	const size_t count = __sm_get_chunk_count(map);
@@ -4759,6 +5453,8 @@ sm_maximum(const sm_t *map)
 {
 	if (map == NULL)
 		return (0);
+	if (__sm_is_small(map))
+		return (__sm_small_maximum(map));
 	__sm_check_invariants(map);
 	const size_t count = __sm_get_chunk_count(map);
 
@@ -4893,6 +5589,10 @@ sm_get_size(sm_t *map)
 {
 	if (map == NULL)
 		return (0);
+	/* Small-set mode: the stored m_data_used is authoritative; the
+	 * chunk-walking size recompute must not run on a small body. */
+	if (__sm_is_small(map))
+		return (map->m_data_used);
 	if (map->m_data_used) {
 		const size_t size = __sm_get_size_impl(map);
 		if (size != map->m_data_used) {
@@ -4919,6 +5619,8 @@ sm_get_size(sm_t *map)
 size_t
 sm_cardinality(sm_t *map)
 {
+	if (map != NULL && __sm_is_small(map))
+		return ((size_t)__sm_small_cardinality(map));
 	return (sm_rank(map, 0, SM_IDX_MAX, true));
 }
 
@@ -4942,6 +5644,16 @@ void
 sm_scan(const sm_t *map, void (*scanner)(uint64_t[], size_t, void *aux),
     size_t skip, void *aux)
 {
+	if (map == NULL)
+		return;
+	if (__sm_is_small(map)) {
+		sm_t *m = __sm_materialize(map);
+		if (m == NULL)
+			return;
+		sm_scan(m, scanner, skip, aux);
+		sm_free(m);
+		return;
+	}
 	uint8_t *p = __sm_get_chunk_data(map, 0);
 	const size_t count = __sm_get_chunk_count(map);
 
@@ -5730,6 +6442,16 @@ sm_offset(const sm_t *map, ssize_t offset)
 	if (map == NULL) {
 		return (NULL);
 	}
+	if (__sm_is_small(map)) {
+		sm_t *m = __sm_materialize(map);
+		if (m == NULL)
+			return (NULL);
+		sm_t *r = sm_offset(m, offset);
+		sm_free(m);
+		if (r != NULL)
+			__sm_try_demote(r);
+		return (r);
+	}
 
 	/* offset == 0: just copy */
 	if (offset == 0) {
@@ -6120,6 +6842,9 @@ sm_is_empty(const sm_t *map)
 	if (map == NULL) {
 		return (true);
 	}
+	if (__sm_is_small(map)) {
+		return (__sm_small_is_empty(map));
+	}
 	__sm_check_invariants(map);
 	return (__sm_get_chunk_count(map) == 0);
 }
@@ -6241,6 +6966,30 @@ sm_next_member(const sm_t *map, uint64_t prev_idx, sm_cursor_t *cur)
 {
 	if (map == NULL)
 		return (SM_IDX_MAX);
+	if (__sm_is_small(map)) {
+		/* First set bit strictly greater than prev_idx (SM_IDX_MAX
+		 * means "from the start"). */
+		const uint64_t *words = __sm_small_words(map);
+		const size_t n = __sm_small_nwords(map);
+		const uint64_t from = (prev_idx == SM_IDX_MAX) ? 0
+		                                               : prev_idx + 1;
+		if (prev_idx != SM_IDX_MAX &&
+		    prev_idx >= (uint64_t)n * 64)
+			return (SM_IDX_MAX);
+		size_t w = (size_t)(from / 64);
+		if (w >= n)
+			return (SM_IDX_MAX);
+		uint64_t word = words[w] &
+		    (~(uint64_t)0 << (from % 64));
+		for (;;) {
+			if (word != 0)
+				return ((uint64_t)w * 64 +
+				    (uint64_t)SM_CTZ64(word));
+			if (++w >= n)
+				return (SM_IDX_MAX);
+			word = words[w];
+		}
+	}
 	__sm_check_invariants(map);
 	const size_t count = __sm_get_chunk_count(map);
 	if (count == 0)
@@ -6297,6 +7046,33 @@ sm_prev_member(const sm_t *map, uint64_t prev_idx, sm_cursor_t *cur)
 	(void)cur;
 	if (map == NULL)
 		return (SM_IDX_MAX);
+	if (__sm_is_small(map)) {
+		/* Highest set bit strictly less than prev_idx (SM_IDX_MAX
+		 * means "from the end"). */
+		const uint64_t *words = __sm_small_words(map);
+		const size_t n = __sm_small_nwords(map);
+		if (n == 0)
+			return (SM_IDX_MAX);
+		const uint64_t upper_excl =
+		    (prev_idx == SM_IDX_MAX) ? (uint64_t)n * 64 : prev_idx;
+		if (upper_excl == 0)
+			return (SM_IDX_MAX);
+		uint64_t last = upper_excl - 1;
+		if (last >= (uint64_t)n * 64)
+			last = (uint64_t)n * 64 - 1;
+		size_t w = (size_t)(last / 64);
+		uint64_t word = words[w] &
+		    (~(uint64_t)0 >> (63 - (last % 64)));
+		for (;;) {
+			if (word != 0)
+				return ((uint64_t)w * 64 +
+				    (63 - (uint64_t)SM_CLZ64(word)));
+			if (w == 0)
+				return (SM_IDX_MAX);
+			w--;
+			word = words[w];
+		}
+	}
 	__sm_check_invariants(map);
 	const size_t count = __sm_get_chunk_count(map);
 	if (count == 0)
@@ -6469,6 +7245,47 @@ __sm_run_iter_init(__sm_run_iter_t *it, const sm_t *map)
 	it->map = map;
 	if (map == NULL || sm_is_empty(map)) {
 		it->count = 0;
+		return;
+	}
+	if (__sm_is_small(map)) {
+		/* Decode the whole small map into the run buffer up front and
+		 * leave count == 0 so __sm_run_next just drains it.  A small
+		 * map spans < SM_SMALL_MAX_BITS (<= 1024) bits, whose worst
+		 * case (alternating) is <= 512 runs -- well within the buffer.
+		 * run_hi is exclusive here, matching __sm_run_decode_chunk. */
+		const uint64_t *w = __sm_small_words(map);
+		const size_t n = __sm_small_nwords(map);
+		it->count = 0;
+		it->nruns = 0;
+		it->next_run = 0;
+		bool open = false;
+		uint64_t cur_lo = 0, cur_hi = 0;
+		for (size_t i = 0; i < n; i++) {
+			const uint64_t base = (uint64_t)i * 64;
+			uint64_t word = w[i];
+			for (int b = 0; b < 64; b++) {
+				if ((word >> b) & 1u) {
+					const uint64_t bit = base + (uint64_t)b;
+					if (open && cur_hi == bit) {
+						cur_hi = bit + 1;
+					} else {
+						if (open) {
+							it->run_lo[it->nruns] =
+							    cur_lo;
+							it->run_hi[it->nruns++] =
+							    cur_hi;
+						}
+						cur_lo = bit;
+						cur_hi = bit + 1;
+						open = true;
+					}
+				}
+			}
+		}
+		if (open) {
+			it->run_lo[it->nruns] = cur_lo;
+			it->run_hi[it->nruns++] = cur_hi;
+		}
 		return;
 	}
 	it->count = __sm_get_chunk_count(map);
@@ -6947,6 +7764,7 @@ sm_xor(const sm_t *a, const sm_t *b)
 		sm_free(r);
 		return (NULL);
 	}
+	__sm_try_demote(r);
 	return (r);
 }
 
@@ -7016,6 +7834,7 @@ sm_extract_range(const sm_t *map, uint64_t lo, uint64_t hi)
 		sm_free(r);
 		return (NULL);
 	}
+	__sm_try_demote(r);
 	return (r);
 }
 
@@ -7313,6 +8132,7 @@ __sm_replace_buffer(sm_t *dst, sm_t *result)
 	memcpy(dst->m_data, result->m_data, result_size);
 	dst->m_data_used = result_size;
 	sm_free(result);
+	__sm_try_demote(dst);
 	return (dst);
 }
 
@@ -7404,6 +8224,23 @@ sm_validate(const sm_t *map)
 	if (map->m_data_used < SM_SIZEOF_OVERHEAD)
 		return (false);
 
+	/* Small-set mode: the header word's top bit is set and the low
+	 * bits hold the word count.  Valid iff nwords <= the span cap and
+	 * m_data_used exactly covers the header plus that many words. */
+	if (__sm_is_small(map)) {
+		const size_t nwords = __sm_small_nwords(map);
+		if (nwords > SM_SMALL_MAX_WORDS)
+			return (false);
+		if (map->m_data_used !=
+		    SM_SIZEOF_OVERHEAD + nwords * sizeof(uint64_t))
+			return (false);
+		/* A trailing all-zero word would mean a non-canonical form
+		 * (remove trims them); reject so equal sets have one encoding. */
+		if (nwords > 0 && __sm_small_words(map)[nwords - 1] == 0)
+			return (false);
+		return (true);
+	}
+
 	const size_t count = __sm_get_chunk_count(map);
 	if (count == 0) {
 		return (map->m_data_used == SM_SIZEOF_OVERHEAD);
@@ -7473,6 +8310,20 @@ sm_statistics(const sm_t *map, sm_stats_t *stats)
 	if (map == NULL)
 		return;
 
+	if (__sm_is_small(map)) {
+		/* Report the small map's real footprint; derive the chunk
+		 * breakdown from a materialized view (it would occupy those
+		 * chunks were it promoted). */
+		sm_t *m = __sm_materialize(map);
+		if (m != NULL) {
+			sm_statistics(m, stats);
+			sm_free(m);
+		}
+		stats->bytes_used = sm_get_size((sm_t *)map);
+		stats->bytes_capacity = sm_get_capacity(map);
+		return;
+	}
+
 	stats->bytes_used = sm_get_size((sm_t *)map);
 	stats->bytes_capacity = sm_get_capacity(map);
 
@@ -7539,6 +8390,9 @@ sm_shrink_to_fit(sm_t *map)
 #define SM_WIRE_VERSION    2u
 #define SM_WIRE_HEADER_LEN 16u
 #define SM_WIRE_FLAG_LE    0x01u
+/* Reserved header byte out[6]: a documented mirror of the body's own
+ * small-set marker (the body's header top bit is authoritative). */
+#define SM_WIRE_FLAG_SMALL 0x01u
 
 static bool
 __sm_host_is_little_endian(void)
@@ -7574,7 +8428,7 @@ sm_serialize(const sm_t *map, uint8_t *out, size_t out_size)
 	memcpy(out + 0, &magic, 4);
 	out[4] = SM_WIRE_VERSION;
 	out[5] = flags;
-	out[6] = 0;
+	out[6] = (map != NULL && __sm_is_small(map)) ? SM_WIRE_FLAG_SMALL : 0;
 	out[7] = 0;
 	memcpy(out + 8, &cardinality, 8);
 
@@ -7673,6 +8527,16 @@ sm_intersection(const sm_t *a, const sm_t *b)
 	__sm_check_invariants(b);
 	if (a == NULL || b == NULL) {
 		return (NULL);
+	}
+	if (__sm_is_small(a) || __sm_is_small(b)) {
+		bool oa, ob;
+		const sm_t *va = __sm_chunk_view(a, &oa);
+		const sm_t *vb = __sm_chunk_view(b, &ob);
+		sm_t *r = (va == NULL || vb == NULL) ? NULL
+		                                     : sm_intersection(va, vb);
+		if (oa) sm_free((sm_t *)va);
+		if (ob) sm_free((sm_t *)vb);
+		return (r);
 	}
 
 	const size_t a_count = __sm_get_chunk_count(a);
@@ -7868,6 +8732,7 @@ sm_intersection(const sm_t *a, const sm_t *b)
 		return (NULL);
 	}
 
+	__sm_try_demote(result);
 	return (result);
 }
 
@@ -7965,6 +8830,17 @@ sm_difference(const sm_t *a, const sm_t *b)
 	__sm_check_invariants(b);
 	if (a == NULL) {
 		return (NULL);
+	}
+	if (__sm_is_small(a) || __sm_is_small(b)) {
+		bool oa, ob;
+		const sm_t *va = __sm_chunk_view(a, &oa);
+		const sm_t *vb = __sm_chunk_view(b, &ob);
+		sm_t *r = (va == NULL || (b != NULL && vb == NULL))
+		    ? NULL
+		    : sm_difference(va, vb);
+		if (oa) sm_free((sm_t *)va);
+		if (ob) sm_free((sm_t *)vb);
+		return (r);
 	}
 
 	const size_t a_count = __sm_get_chunk_count(a);
@@ -8251,6 +9127,7 @@ sm_difference(const sm_t *a, const sm_t *b)
 		return (NULL);
 	}
 
+	__sm_try_demote(result);
 	return (result);
 }
 
@@ -8278,6 +9155,18 @@ sm_union(const sm_t *a, const sm_t *b)
 	__sm_check_invariants(b);
 	if (a == NULL && b == NULL) {
 		return (NULL);
+	}
+	if (__sm_is_small(a) || __sm_is_small(b)) {
+		bool oa, ob;
+		const sm_t *va = __sm_chunk_view(a, &oa);
+		const sm_t *vb = __sm_chunk_view(b, &ob);
+		sm_t *r = ((a != NULL && va == NULL) ||
+		              (b != NULL && vb == NULL))
+		    ? NULL
+		    : sm_union(va, vb);
+		if (oa) sm_free((sm_t *)va);
+		if (ob) sm_free((sm_t *)vb);
+		return (r);
 	}
 
 	const size_t a_count = a ? __sm_get_chunk_count(a) : 0;
@@ -8674,6 +9563,7 @@ sm_union(const sm_t *a, const sm_t *b)
 		return (NULL);
 	}
 
+	__sm_try_demote(result);
 	return (result);
 
 fail:
@@ -8691,6 +9581,18 @@ sm_split(sm_t *map, uint64_t idx, sm_t *other)
 	if (map == NULL || other == NULL) {
 		errno = EINVAL;
 		return (SM_IDX_MAX);
+	}
+	/* Split walks raw chunks; give it a chunk-mode map and an empty
+	 * chunk-mode destination.  Promote in place (within capacity) if
+	 * `map` is small; the destination is cleared to chunk-empty. */
+	if (__sm_is_small(map)) {
+		if (!__sm_promote(map)) {
+			errno = ENOSPC;
+			return (SM_IDX_MAX);
+		}
+	}
+	if (__sm_is_small(other)) {
+		sm_clear(other);
 	}
 	__sm_check_invariants(map);
 	__sm_check_invariants(other);
@@ -8977,6 +9879,8 @@ sm_split(sm_t *map, uint64_t idx, sm_t *other)
 	__sm_coalesce_map(map);
 	__sm_coalesce_map(other);
 
+	__sm_try_demote(map);
+	__sm_try_demote(other);
 	return (idx);
 }
 
@@ -8987,6 +9891,14 @@ sm_select(sm_t *map, uint64_t n, bool value)
 		/* Empty map: no set bits; unset bits are the whole line, so
 		 * the n-th unset bit is n.  Matches the count == 0 path. */
 		return (value ? SM_IDX_MAX : n);
+	}
+	if (__sm_is_small(map)) {
+		sm_t *m = __sm_materialize(map);
+		if (m == NULL)
+			return (value ? SM_IDX_MAX : n);
+		const uint64_t r = sm_select(m, n, value);
+		sm_free(m);
+		return (r);
 	}
 	__sm_check_invariants(map);
 	__sm_assert(sm_get_size(map) >= SM_SIZEOF_OVERHEAD);
@@ -9122,6 +10034,14 @@ sm_rank(sm_t *map, uint64_t begin, uint64_t end, bool value)
 {
 	if (map == NULL)
 		return (0);
+	if (__sm_is_small(map)) {
+		sm_t *m = __sm_materialize(map);
+		if (m == NULL)
+			return (0);
+		const size_t r = sm_rank(m, begin, end, value);
+		sm_free(m);
+		return (r);
+	}
 	__sm_check_invariants(map);
 	__sm_bitvec_t vec;
 	return (__sm_rank_vec(map, begin, end, value, &vec));
@@ -9132,6 +10052,14 @@ sm_span(sm_t *map, uint64_t idx, size_t len, bool value)
 {
 	if (map == NULL)
 		return (SM_IDX_MAX);
+	if (__sm_is_small(map)) {
+		sm_t *m = __sm_materialize(map);
+		if (m == NULL)
+			return (SM_IDX_MAX);
+		const uint64_t r = sm_span(m, idx, len, value);
+		sm_free(m);
+		return (r);
+	}
 	__sm_check_invariants(map);
 	__sm_bitvec_t vec = 0;
 
@@ -9212,6 +10140,13 @@ sm_contains_many(const sm_t *map, const uint64_t *idxs, bool *results,
 		__sm_assert(idxs[q] >= idxs[q - 1]);
 	}
 #endif
+
+	if (__sm_is_small(map)) {
+		for (size_t q = 0; q < n; q++) {
+			results[q] = __sm_small_contains(map, idxs[q]);
+		}
+		return;
+	}
 
 	const size_t count = __sm_get_chunk_count(map);
 	if (count == 0) {
@@ -9328,6 +10263,21 @@ sm_locator_build(const sm_t *map)
 {
 	if (map == NULL) {
 		return (NULL);
+	}
+	/* The locator indexes the chunk stream by byte offset; a small-set
+	 * map has no chunk stream.  Return a degenerate locator (n_sb == 0)
+	 * whose staleness check always trips, so every query falls back to
+	 * the plain, small-set-aware sm_contains / sm_rank / sm_select.
+	 * (Returning NULL would violate the "NULL only for an empty map"
+	 * contract that callers rely on.) */
+	if (__sm_is_small(map)) {
+		sm_locator_t *loc = (sm_locator_t *)__sm_alloc(sizeof(*loc));
+		if (loc == NULL) {
+			return (NULL);
+		}
+		memset(loc, 0, sizeof(*loc));
+		loc->map = map; /* n_sb == 0 => __sm_locator_is_stale => fallback */
+		return (loc);
 	}
 	const size_t count = __sm_get_chunk_count(map);
 	if (count == 0) {
@@ -9627,7 +10577,7 @@ sm_contains_cached(const sm_t *map, uint64_t idx, sm_cursor_cached_t *cache)
 	if (map == NULL) {
 		return (false);
 	}
-	if (cache == NULL) {
+	if (cache == NULL || __sm_is_small(map)) {
 		return (sm_contains(map, idx, NULL));
 	}
 
