@@ -10490,42 +10490,55 @@ sm_select(sm_t *map, uint64_t n, bool value)
 	}
 	__sm_check_invariants(map);
 	__sm_assert(sm_get_size(map) >= SM_SIZEOF_OVERHEAD);
-	const size_t count = __sm_get_chunk_count(map);
+	{
+		const size_t count = __sm_get_chunk_count(map);
+		uint8_t *p;
+		size_t i;
 
-	if (count == 0 && value == false) {
-		return (n);
-	}
-
-	uint8_t *p = __sm_get_chunk_data(map, 0);
-
-	for (size_t i = 0; i < count; i++) {
-		const __sm_idx_t start = __sm_load_idx((const uint8_t *)p);
-		/* Start of this chunk is greater than n meaning there are a set of 0s
-		 * before the first 1 sufficient to consume n. */
-		if (value == false && i == 0 && start > n) {
+		if (count == 0 && value == false) {
 			return (n);
 		}
-		p += SM_SIZEOF_OVERHEAD;
-		__sm_chunk_t chunk;
-		__sm_chunk_init(&chunk, p);
 
-		ssize_t new_n = n;
-		const size_t index =
-		    __sm_chunk_select(&chunk, n, &new_n, value);
-		if (new_n == -1) {
-			return (start + index);
+		p = __sm_get_chunk_data(map, 0);
+
+		for (i = 0; i < count; i++) {
+			const __sm_idx_t start =
+			    __sm_load_idx((const uint8_t *)p);
+			__sm_chunk_t chunk;
+			ssize_t new_n;
+			size_t index;
+			/* Start of this chunk is greater than n meaning there are a set of 0s
+			 * before the first 1 sufficient to consume n. */
+			if (value == false && i == 0 && start > n) {
+				return (n);
+			}
+			p += SM_SIZEOF_OVERHEAD;
+			__sm_chunk_init(&chunk, p);
+
+			new_n = (ssize_t)n;
+			index = __sm_chunk_select(&chunk, (ssize_t)n, &new_n,
+			    value);
+			if (new_n == -1) {
+				return (start + index);
+			}
+			n = (uint64_t)new_n;
+
+			p += __sm_chunk_get_size(&chunk);
 		}
-		n = new_n;
-
-		p += __sm_chunk_get_size(&chunk);
+		return (SM_IDX_MAX);
 	}
-	return (SM_IDX_MAX);
 }
 
 static size_t
 __sm_rank_vec(sm_t *map, uint64_t begin, uint64_t end, bool value,
     __sm_bitvec_t *vec)
 {
+	uint64_t span_width;
+	size_t width;
+	size_t count;
+	size_t set = 0;
+	uint8_t *p;
+	size_t i;
 	(void)vec; /* retained for ABI/signature compatibility */
 	__sm_assert(sm_get_size(map) >= SM_SIZEOF_OVERHEAD);
 
@@ -10540,8 +10553,8 @@ __sm_rank_vec(sm_t *map, uint64_t begin, uint64_t end, bool value,
 	 * count below stays meaningful.  A full-universe unset query is
 	 * degenerate (the answer is ~2^64) but must not wrap.
 	 */
-	const uint64_t span_width = end - begin;
-	const size_t width =
+	span_width = end - begin;
+	width =
 	    (span_width == UINT64_MAX) ? SIZE_MAX : (size_t)(span_width + 1);
 
 	/*
@@ -10558,30 +10571,39 @@ __sm_rank_vec(sm_t *map, uint64_t begin, uint64_t end, bool value,
 	 * get_position / RLE property tests).  We only ever ask it for
 	 * set bits here; unset is derived once at the end.
 	 */
-	const size_t count = __sm_get_chunk_count(map);
+	count = __sm_get_chunk_count(map);
 	if (count == 0) {
 		return (value ? 0 : width);
 	}
 
-	size_t set = 0;
-	uint8_t *p = __sm_get_chunk_data(map, 0);
-	for (size_t i = 0; i < count; i++) {
+	p = __sm_get_chunk_data(map, 0);
+	for (i = 0; i < count; i++) {
 		const __sm_idx_t start = __sm_load_idx((const uint8_t *)p);
-		p += SM_SIZEOF_OVERHEAD;
 		__sm_chunk_t chunk;
+		size_t chunk_size;
+		size_t cap;
+		uint64_t chunk_lo;
+		uint64_t span;
+		uint64_t chunk_hi_incl;
+		uint64_t ov_lo;
+		uint64_t ov_hi_incl;
+		size_t from;
+		size_t to;
+		__sm_chunk_rank_t rank;
+		p += SM_SIZEOF_OVERHEAD;
 		__sm_chunk_init(&chunk, p);
-		const size_t chunk_size = __sm_chunk_get_size(&chunk);
+		chunk_size = __sm_chunk_get_size(&chunk);
 		if (i + 1 < count) {
 			SM_PREFETCH(p + chunk_size + SM_SIZEOF_OVERHEAD);
 		}
-		const size_t cap = __sm_chunk_get_capacity(&chunk);
-		const uint64_t chunk_lo = start;
+		cap = __sm_chunk_get_capacity(&chunk);
+		chunk_lo = start;
 		/* Inclusive top of the chunk's covered span.  cap >= 1, and we
 		 * form (cap - 1) as a distance so the comparison below never
 		 * overflows even when chunk_lo is near UINT64_MAX (the
 		 * top-of-universe case). */
-		const uint64_t span = (uint64_t)cap - 1;
-		const uint64_t chunk_hi_incl =
+		span = (uint64_t)cap - 1;
+		chunk_hi_incl =
 		    (chunk_lo > UINT64_MAX - span) ? UINT64_MAX
 		                                  : chunk_lo + span;
 
@@ -10598,14 +10620,12 @@ __sm_rank_vec(sm_t *map, uint64_t begin, uint64_t end, bool value,
 		}
 
 		/* Overlap of [begin, end] with [chunk_lo, chunk_hi_incl]. */
-		const uint64_t ov_lo = begin > chunk_lo ? begin : chunk_lo;
-		const uint64_t ov_hi_incl =
-		    (end < chunk_hi_incl) ? end : chunk_hi_incl;
+		ov_lo = begin > chunk_lo ? begin : chunk_lo;
+		ov_hi_incl = (end < chunk_hi_incl) ? end : chunk_hi_incl;
 		/* Positions relative to the chunk start. */
-		const size_t from = (size_t)(ov_lo - chunk_lo);
-		const size_t to = (size_t)(ov_hi_incl - chunk_lo);
+		from = (size_t)(ov_lo - chunk_lo);
+		to = (size_t)(ov_hi_incl - chunk_lo);
 
-		__sm_chunk_rank_t rank;
 		set += __sm_chunk_rank(&rank, true, &chunk, from, to);
 		p += chunk_size;
 	}
