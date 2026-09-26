@@ -2966,16 +2966,20 @@ __sm_coalesce_map(sm_t *map)
 
 	while (count > 1) {
 		const __sm_idx_t start = __sm_load_idx((const uint8_t *)p);
+		size_t chunk_size;
+		size_t before;
+		size_t amt;
+		size_t after;
 		__sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
-		const size_t chunk_size = __sm_chunk_get_size(&chunk);
+		chunk_size = __sm_chunk_get_size(&chunk);
 		if (count > 1) {
 			SM_PREFETCH(p + SM_SIZEOF_OVERHEAD + chunk_size +
 			    SM_SIZEOF_OVERHEAD);
 		}
-		const size_t before = __sm_get_chunk_count(map);
-		const size_t amt = __sm_coalesce_chunk(map, &chunk, offset,
+		before = __sm_get_chunk_count(map);
+		amt = __sm_coalesce_chunk(map, &chunk, offset,
 		    start, p, SM_IDX_MAX, false, SIZE_MAX);
-		const size_t after = __sm_get_chunk_count(map);
+		after = __sm_get_chunk_count(map);
 		if (amt > 0 && after < before) {
 			/* A neighbour was absorbed at this position; stay put
 			 * and try to absorb the next one into the same chunk.
@@ -3056,6 +3060,7 @@ __sm_separate_rle_chunk(sm_t *map, __sm_chunk_sep_t *sep, const uint64_t idx,
 
 	__sm_chunk_t pivot_chunk;
 	__sm_chunk_t lrc;
+	uint64_t aligned_idx;
 
 	__sm_assert(state == 0 || state == 1 || state == -1);
 	__sm_assert(SM_IS_CHUNK_RLE(sep->target.chunk));
@@ -3077,7 +3082,7 @@ __sm_separate_rle_chunk(sm_t *map, __sm_chunk_sep_t *sep, const uint64_t idx,
 	        (sizeof(__sm_bitvec_t) * 6));
 
 	/* Find the starting offset for our pivot chunk ... */
-	const uint64_t aligned_idx = __sm_get_chunk_aligned_offset(idx);
+	aligned_idx = __sm_get_chunk_aligned_offset(idx);
 	__sm_assert(
 	    idx >= aligned_idx && idx < aligned_idx + SM_CHUNK_MAX_CAPACITY);
 	/* avoid changing the map->m_data and for now work in our buf ... */
@@ -3155,12 +3160,11 @@ __sm_separate_rle_chunk(sm_t *map, __sm_chunk_sep_t *sep, const uint64_t idx,
 			 * (size underflow) on maps whose RLE capacity was
 			 * widened well past the run.
 			 */
-			sep->count = (aligned_idx > sep->target.start) ? 2 : 1;
-			/* Does our pivot extend beyond the end of the run. */
 			const uint64_t amt_over = aligned_idx +
 			    SM_CHUNK_MAX_CAPACITY -
 			    (sep->target.start + sep->target.length);
-			/*
+			sep->count = (aligned_idx > sep->target.start) ? 2 : 1;
+			/* Does our pivot extend beyond the end of the run. */			/*
 			 * With the straddle guard above, 0 <= amt_over <
 			 * SM_CHUNK_MAX_CAPACITY, so amt_over / 64 * 2 <= 62 and
 			 * first_zero stays in (0, MAX_CAPACITY].  Assert the
@@ -3199,14 +3203,14 @@ __sm_separate_rle_chunk(sm_t *map, __sm_chunk_sep_t *sep, const uint64_t idx,
 					    amt_over / SM_BITS_PER_VECTOR * 2;
 				}
 				if (amt_over % SM_BITS_PER_VECTOR) {
-					/* Change only the flag at the position of the last index to "mixed" ... */
-					SM_CHUNK_SET_FLAGS(
-					    pivot_chunk.m_data[0], bv,
-					    SM_PAYLOAD_MIXED);
 					/* Partial run-tail vector: bits [0, first_zero%64) set. */
 					const __sm_bitvec_t tail_mask =
 					    ~(~(__sm_bitvec_t)0 << first_zero %
 					            SM_BITS_PER_VECTOR);
+					/* Change only the flag at the position of the last index to "mixed" ... */
+					SM_CHUNK_SET_FLAGS(
+					    pivot_chunk.m_data[0], bv,
+					    SM_PAYLOAD_MIXED);
 					if (state == 0 && bv == (idx - aligned_idx) /
 					        SM_BITS_PER_VECTOR) {
 						/*
