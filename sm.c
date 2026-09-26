@@ -9201,6 +9201,16 @@ static bool
 __sm_emit_chunk_bits(sm_t **resultp, const __sm_chunk_t *chunk, bool is_rle,
     __sm_idx_t chunk_start, size_t from, size_t to)
 {
+	__sm_bitvec_t words[SM_FLAGS_PER_INDEX];
+	int cap_flags[SM_FLAGS_PER_INDEX];
+	size_t rel_from;
+	size_t rel_to;
+	int start_word;
+	int end_word;
+	__sm_bitvec_t desc;
+	__sm_bitvec_t vecs[SM_FLAGS_PER_INDEX];
+	int nvecs;
+	int i;
 	if (from >= to)
 		return (true);
 
@@ -9219,19 +9229,17 @@ __sm_emit_chunk_bits(sm_t **resultp, const __sm_chunk_t *chunk, bool is_rle,
 	}
 
 	/* Sparse: expand, mask to [from, to) range, encode and append */
-	__sm_bitvec_t words[SM_FLAGS_PER_INDEX];
-	int cap_flags[SM_FLAGS_PER_INDEX];
 	__sm_expand_sparse_chunk(chunk, words, cap_flags);
 
 	/* Mask out bits outside [from, to) range relative to chunk_start */
-	const size_t rel_from = from - (size_t)chunk_start;
-	const size_t rel_to = to - (size_t)chunk_start;
-	const int start_word = (int)(rel_from / SM_BITS_PER_VECTOR);
-	const int end_word =
+	rel_from = from - (size_t)chunk_start;
+	rel_to = to - (size_t)chunk_start;
+	start_word = (int)(rel_from / SM_BITS_PER_VECTOR);
+	end_word =
 	    (int)((rel_to + SM_BITS_PER_VECTOR - 1) / SM_BITS_PER_VECTOR);
 
 	/* Zero words entirely before the range */
-	for (int i = 0; i < start_word && i < (int)SM_FLAGS_PER_INDEX; i++) {
+	for (i = 0; i < start_word && i < (int)SM_FLAGS_PER_INDEX; i++) {
 		words[i] = 0;
 		cap_flags[i] = 0;
 	}
@@ -9245,7 +9253,7 @@ __sm_emit_chunk_bits(sm_t **resultp, const __sm_chunk_t *chunk, bool is_rle,
 	}
 
 	/* Zero words entirely after the range */
-	for (int i = end_word; i < (int)SM_FLAGS_PER_INDEX; i++) {
+	for (i = end_word; i < (int)SM_FLAGS_PER_INDEX; i++) {
 		words[i] = 0;
 		cap_flags[i] = 0;
 	}
@@ -9259,9 +9267,6 @@ __sm_emit_chunk_bits(sm_t **resultp, const __sm_chunk_t *chunk, bool is_rle,
 		}
 	}
 
-	__sm_bitvec_t desc;
-	__sm_bitvec_t vecs[SM_FLAGS_PER_INDEX];
-	int nvecs;
 	if (__sm_encode_sparse_chunk(words, cap_flags, &desc, vecs, &nvecs)) {
 		if (!__sm_append_sparse_chunk(resultp, chunk_start, desc, vecs,
 		        nvecs)) {
@@ -9299,6 +9304,12 @@ sm_difference(const sm_t *a, const sm_t *b)
 	}
 
 	const size_t a_count = __sm_get_chunk_count(a);
+	size_t b_count;
+	size_t cap;
+	sm_t *result;
+	uint8_t *ap;
+	uint8_t *bp;
+	size_t ai = 0, bi = 0;
 	if (a_count == 0) {
 		return (NULL);
 	}
@@ -9308,25 +9319,27 @@ sm_difference(const sm_t *a, const sm_t *b)
 		return (sm_copy(a));
 	}
 
-	const size_t b_count = __sm_get_chunk_count(b);
+	b_count = __sm_get_chunk_count(b);
 
-	size_t cap = a->m_data_used;
+	cap = a->m_data_used;
 	if (cap < 1024)
 		cap = 1024;
 
-	sm_t *result = sparsemap(cap);
+	result = sparsemap(cap);
 	if (result == NULL) {
 		return (NULL);
 	}
 
-	uint8_t *ap = __sm_get_chunk_data(a, 0);
-	uint8_t *bp = __sm_get_chunk_data(b, 0);
-	size_t ai = 0, bi = 0;
+	ap = __sm_get_chunk_data(a, 0);
+	bp = __sm_get_chunk_data(b, 0);
 
 	while (ai < a_count) {
 		/* Read chunk a metadata */
 		const __sm_idx_t a_start = __sm_load_idx((const uint8_t *)ap);
 		__sm_chunk_t a_chunk;
+		size_t a_cursor;
+		uint8_t *bp_save;
+		size_t bi_save;
 		__sm_chunk_init(&a_chunk, ap + SM_SIZEOF_OVERHEAD);
 		const bool a_rle = SM_IS_CHUNK_RLE(&a_chunk);
 		const size_t a_cap_bits = __sm_chunk_get_capacity(&a_chunk);
@@ -9350,11 +9363,11 @@ sm_difference(const sm_t *a, const sm_t *b)
 		}
 
 		/* Cursor: tracks how far into this a chunk we've processed */
-		size_t a_cursor = (size_t)a_start;
+		a_cursor = (size_t)a_start;
 
 		/* Save b state so we can iterate b within this a chunk */
-		uint8_t *bp_save = bp;
-		size_t bi_save = bi;
+		bp_save = bp;
+		bi_save = bi;
 
 		/* Process all b chunks that overlap with this a chunk */
 		while (bi < b_count) {
