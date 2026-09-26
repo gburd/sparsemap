@@ -5800,6 +5800,10 @@ void
 sm_scan(const sm_t *map, void (*scanner)(uint64_t[], size_t, void *aux),
     size_t skip, void *aux)
 {
+	uint8_t *p;
+	size_t count;
+	size_t si;
+
 	if (map == NULL)
 		return;
 	if (__sm_is_small(map)) {
@@ -5810,19 +5814,21 @@ sm_scan(const sm_t *map, void (*scanner)(uint64_t[], size_t, void *aux),
 		sm_free(m);
 		return;
 	}
-	uint8_t *p = __sm_get_chunk_data(map, 0);
-	const size_t count = __sm_get_chunk_count(map);
+	p = __sm_get_chunk_data(map, 0);
+	count = __sm_get_chunk_count(map);
 
-	for (size_t i = 0; i < count; i++) {
+	for (si = 0; si < count; si++) {
 		const __sm_idx_t start = __sm_load_idx((const uint8_t *)p);
-		p += SM_SIZEOF_OVERHEAD;
 		__sm_chunk_t chunk;
+		size_t chunk_size;
+		size_t skipped;
+		p += SM_SIZEOF_OVERHEAD;
 		__sm_chunk_init(&chunk, p);
-		const size_t chunk_size = __sm_chunk_get_size(&chunk);
-		if (i + 1 < count) {
+		chunk_size = __sm_chunk_get_size(&chunk);
+		if (si + 1 < count) {
 			SM_PREFETCH(p + chunk_size + SM_SIZEOF_OVERHEAD);
 		}
-		const size_t skipped =
+		skipped =
 		    __sm_chunk_scan(&chunk, start, scanner, skip, aux);
 		if (skip) {
 			__sm_assert(skip >= skipped);
@@ -5873,14 +5879,15 @@ __sm_expand_sparse_chunk(const __sm_chunk_t *chunk, __sm_bitvec_t words[32],
 	/* Pass 1: prefix-sum of MIXED flag counts to break serial vec_idx dependency. */
 	int vec_offsets[SM_FLAGS_PER_INDEX];
 	int running = 0;
-	for (int i = 0; i < (int)SM_FLAGS_PER_INDEX; i++) {
+	int i;
+	for (i = 0; i < (int)SM_FLAGS_PER_INDEX; i++) {
 		vec_offsets[i] = running;
 		running +=
 		    (((desc >> (i * 2)) & SM_FLAG_MASK) == SM_PAYLOAD_MIXED);
 	}
 
 	/* Pass 2: each slot computed independently using precomputed offsets. */
-	for (int i = 0; i < (int)SM_FLAGS_PER_INDEX; i++) {
+	for (i = 0; i < (int)SM_FLAGS_PER_INDEX; i++) {
 		const unsigned f = (desc >> (i * 2)) & SM_FLAG_MASK;
 		cap_flags[i] = (f != SM_PAYLOAD_NONE);
 		words[i] = (f == SM_PAYLOAD_MIXED) ?
@@ -5938,9 +5945,10 @@ __sm_encode_sparse_chunk(__sm_bitvec_t words[32], int cap_flags[32],
 
 	/* Pass 2: compact MIXED vectors (serial but only touches MIXED slots). */
 	int nvecs = 0;
-	for (int i = 0; i < (int)SM_FLAGS_PER_INDEX; i++) {
-		if (flags[i] == SM_PAYLOAD_MIXED) {
-			out_vecs[nvecs++] = words[i];
+	int mi;
+	for (mi = 0; mi < (int)SM_FLAGS_PER_INDEX; mi++) {
+		if (flags[mi] == SM_PAYLOAD_MIXED) {
+			out_vecs[nvecs++] = words[mi];
 		}
 	}
 
@@ -5976,8 +5984,9 @@ __sm_expand_rle_as_words(const __sm_chunk_t *rle_chunk, __sm_idx_t rle_start,
 	const size_t rle_len = __sm_chunk_rle_get_length(rle_chunk);
 	const size_t rle_set_start = (size_t)rle_start;
 	const size_t rle_set_end = rle_set_start + rle_len;
+	int i;
 
-	for (int i = 0; i < (int)SM_FLAGS_PER_INDEX; i++) {
+	for (i = 0; i < (int)SM_FLAGS_PER_INDEX; i++) {
 		const size_t slot_start =
 		    (size_t)target_start + (size_t)i * SM_BITS_PER_VECTOR;
 		const size_t slot_end = slot_start + SM_BITS_PER_VECTOR;
@@ -6027,7 +6036,8 @@ static inline void
 __sm_words_or(__sm_bitvec_t dst[32], const __sm_bitvec_t a[32],
     const __sm_bitvec_t b[32])
 {
-	for (int i = 0; i < 32; i += 4) {
+	int i;
+	for (i = 0; i < 32; i += 4) {
 		__m256i va = _mm256_loadu_si256((const __m256i *)&a[i]);
 		__m256i vb = _mm256_loadu_si256((const __m256i *)&b[i]);
 		_mm256_storeu_si256((__m256i *)&dst[i],
@@ -6039,7 +6049,8 @@ static inline void
 __sm_words_and(__sm_bitvec_t dst[32], const __sm_bitvec_t a[32],
     const __sm_bitvec_t b[32])
 {
-	for (int i = 0; i < 32; i += 4) {
+	int i;
+	for (i = 0; i < 32; i += 4) {
 		__m256i va = _mm256_loadu_si256((const __m256i *)&a[i]);
 		__m256i vb = _mm256_loadu_si256((const __m256i *)&b[i]);
 		_mm256_storeu_si256((__m256i *)&dst[i],
@@ -6052,7 +6063,8 @@ __sm_words_andnot(__sm_bitvec_t dst[32], const __sm_bitvec_t a[32],
     const __sm_bitvec_t b[32])
 {
 	/* dst = a & ~b */
-	for (int i = 0; i < 32; i += 4) {
+	int i;
+	for (i = 0; i < 32; i += 4) {
 		__m256i va = _mm256_loadu_si256((const __m256i *)&a[i]);
 		__m256i vb = _mm256_loadu_si256((const __m256i *)&b[i]);
 		_mm256_storeu_si256((__m256i *)&dst[i],
@@ -6067,7 +6079,8 @@ static inline void
 __sm_words_or(__sm_bitvec_t dst[32], const __sm_bitvec_t a[32],
     const __sm_bitvec_t b[32])
 {
-	for (int i = 0; i < 32; i += 2) {
+	int i;
+	for (i = 0; i < 32; i += 2) {
 		__m128i va = _mm_loadu_si128((const __m128i *)&a[i]);
 		__m128i vb = _mm_loadu_si128((const __m128i *)&b[i]);
 		_mm_storeu_si128((__m128i *)&dst[i], _mm_or_si128(va, vb));
@@ -6078,7 +6091,8 @@ static inline void
 __sm_words_and(__sm_bitvec_t dst[32], const __sm_bitvec_t a[32],
     const __sm_bitvec_t b[32])
 {
-	for (int i = 0; i < 32; i += 2) {
+	int i;
+	for (i = 0; i < 32; i += 2) {
 		__m128i va = _mm_loadu_si128((const __m128i *)&a[i]);
 		__m128i vb = _mm_loadu_si128((const __m128i *)&b[i]);
 		_mm_storeu_si128((__m128i *)&dst[i], _mm_and_si128(va, vb));
@@ -6090,7 +6104,8 @@ __sm_words_andnot(__sm_bitvec_t dst[32], const __sm_bitvec_t a[32],
     const __sm_bitvec_t b[32])
 {
 	/* dst = a & ~b */
-	for (int i = 0; i < 32; i += 2) {
+	int i;
+	for (i = 0; i < 32; i += 2) {
 		__m128i va = _mm_loadu_si128((const __m128i *)&a[i]);
 		__m128i vb = _mm_loadu_si128((const __m128i *)&b[i]);
 		_mm_storeu_si128((__m128i *)&dst[i], _mm_andnot_si128(vb, va));
@@ -6104,7 +6119,8 @@ static inline void
 __sm_words_or(__sm_bitvec_t dst[32], const __sm_bitvec_t a[32],
     const __sm_bitvec_t b[32])
 {
-	for (int i = 0; i < 32; i++)
+	int i;
+	for (i = 0; i < 32; i++)
 		dst[i] = a[i] | b[i];
 }
 
@@ -6112,7 +6128,8 @@ static inline void
 __sm_words_and(__sm_bitvec_t dst[32], const __sm_bitvec_t a[32],
     const __sm_bitvec_t b[32])
 {
-	for (int i = 0; i < 32; i++)
+	int i;
+	for (i = 0; i < 32; i++)
 		dst[i] = a[i] & b[i];
 }
 
@@ -6120,7 +6137,8 @@ static inline void
 __sm_words_andnot(__sm_bitvec_t dst[32], const __sm_bitvec_t a[32],
     const __sm_bitvec_t b[32])
 {
-	for (int i = 0; i < 32; i++)
+	int i;
+	for (i = 0; i < 32; i++)
 		dst[i] = a[i] & ~b[i];
 }
 
