@@ -1467,6 +1467,10 @@ static size_t
 __sm_chunk_select(const __sm_chunk_t *chunk, ssize_t n, ssize_t *offset,
     const bool value)
 {
+	size_t ret = 0;
+	__sm_bitvec_t sel_desc;
+	size_t i;
+
 	/* RLE fast path */
 	if (SM_UNLIKELY(__sm_chunk_is_rle(chunk))) {
 		const size_t length = __sm_chunk_rle_get_length(chunk);
@@ -1486,12 +1490,13 @@ __sm_chunk_select(const __sm_chunk_t *chunk, ssize_t n, ssize_t *offset,
 		} else {
 			/* Selecting nth unset bit (0) */
 			/* Unset bits start at index length */
+			const size_t unset_count =
+			    (length >= capacity) ? 0 : capacity - length;
 			if (length >= capacity) {
 				/* No unset bits in this chunk */
 				*offset = n;
 				return (capacity);
 			}
-			const size_t unset_count = capacity - length;
 			if (n < (ssize_t)unset_count) {
 				*offset = -1;
 				return (length +
@@ -1512,9 +1517,7 @@ __sm_chunk_select(const __sm_chunk_t *chunk, ssize_t n, ssize_t *offset,
 	 * searching for 0s). For MIXED vectors, use popcount to quickly check if we need to scan
 	 * individual bits. Accumulate bit positions until we've found the nth occurrence.
 	 */
-	size_t ret = 0;
-	const __sm_bitvec_t sel_desc = *chunk->m_data;
-	size_t i;
+	sel_desc = *chunk->m_data;
 	for (i = 0; i < sizeof(__sm_bitvec_t); i++) {
 		const uint8_t b = __sm_desc_flag_byte(sel_desc, i);
 		int j;
@@ -1554,7 +1557,7 @@ __sm_chunk_select(const __sm_chunk_t *chunk, ssize_t n, ssize_t *offset,
 					continue;
 				}
 				*offset = -1;
-				return (ret + n);
+				return (ret + (size_t)n);
 			}
 			if (flags == SM_PAYLOAD_ONES) {
 				if (value == true) {
@@ -1574,7 +1577,7 @@ __sm_chunk_select(const __sm_chunk_t *chunk, ssize_t n, ssize_t *offset,
 						continue;
 					}
 					*offset = -1;
-					return (ret + n);
+					return (ret + (size_t)n);
 				}
 				ret += SM_BITS_PER_VECTOR;
 				continue;
@@ -1582,7 +1585,7 @@ __sm_chunk_select(const __sm_chunk_t *chunk, ssize_t n, ssize_t *offset,
 			if (flags == SM_PAYLOAD_MIXED) {
 				const __sm_bitvec_t w = chunk->m_data[1 +
 				    __sm_chunk_get_position(chunk,
-				        (i * SM_FLAGS_PER_INDEX_BYTE) + j)];
+				        (i * SM_FLAGS_PER_INDEX_BYTE) + (size_t)j)];
 				/* Use ctzll for fast bit extraction */
 				__sm_bitvec_t target_bits = value ? w : ~w;
 				__sm_bitvec_t remaining = target_bits;
@@ -1762,7 +1765,7 @@ __sm_chunk_rank(__sm_chunk_rank_t *rank, const bool value,
 					w = chunk->m_data[1 +
 					    __sm_chunk_get_position(chunk,
 					        (i * SM_FLAGS_PER_INDEX_BYTE) +
-					            j)];
+					            (size_t)j)];
 					if (to >= SM_BITS_PER_VECTOR) {
 						rank->pos += SM_BITS_PER_VECTOR;
 						to -= SM_BITS_PER_VECTOR;
@@ -1781,7 +1784,6 @@ __sm_chunk_rank(__sm_chunk_rank_t *rank, const bool value,
 						    from - SM_BITS_PER_VECTOR :
 						    0;
 					} else {
-						rank->pos += to + 1;
 						const uint64_t to_mask =
 						    (to == 63) ?
 						    UINT64_MAX :
@@ -1795,6 +1797,7 @@ __sm_chunk_rank(__sm_chunk_rank_t *rank, const bool value,
 						            (from >= 64 ?
 						                    64 :
 						                    from)));
+						rank->pos += to + 1;
 						/* Create a mask for the range [from, to] and use popcount. */
 						mask = to_mask & from_mask;
 						mw = (value ? w : ~w) & mask;
@@ -1922,7 +1925,7 @@ __sm_chunk_scan(const __sm_chunk_t *chunk, const __sm_idx_t start,
 			} else if (flags == SM_PAYLOAD_MIXED) {
 				__sm_bitvec_t remaining = chunk->m_data[1 +
 				    __sm_chunk_get_position(chunk,
-				        (i * SM_FLAGS_PER_INDEX_BYTE) + j)];
+				        (i * SM_FLAGS_PER_INDEX_BYTE) + (size_t)j)];
 				size_t n = 0;
 				while (remaining) {
 					int bb = SM_CTZ64(remaining);
@@ -2122,6 +2125,9 @@ __sm_get_size_impl(const sm_t *map)
 	uint8_t *start = __sm_get_chunk_data(map, 0);
 	uint8_t *p = start;
 	uint8_t *end = map->m_data + __sm_cap(map);
+	size_t count;
+	size_t valid_count = 0;
+	size_t i;
 
 	/* Defensive: a chunk-data start outside the data buffer means the
 	 * map header itself is corrupt.  Return the empty-map size. */
@@ -2129,9 +2135,7 @@ __sm_get_size_impl(const sm_t *map)
 		return (SM_SIZEOF_OVERHEAD);
 	}
 
-	const size_t count = __sm_get_chunk_count(map);
-	size_t valid_count = 0;
-	size_t i;
+	count = __sm_get_chunk_count(map);
 	for (i = 0; i < count; i++) {
 		__sm_chunk_t chunk;
 		size_t chunk_size;
@@ -2206,11 +2210,6 @@ static ssize_t
 __sm_get_chunk_offset(const sm_t *map, const uint64_t idx, sm_cursor_t *cur)
 {
 	const size_t count = __sm_get_chunk_count(map);
-
-	if (count == 0) {
-		return (-1);
-	}
-
 	uint8_t *base = __sm_get_chunk_data(map, 0);
 	uint8_t *p = base;
 	/* Offsets returned here are relative to `base` (the first chunk);
@@ -2220,13 +2219,18 @@ __sm_get_chunk_offset(const sm_t *map, const uint64_t idx, sm_cursor_t *cur)
 	 * walk by stream_end is correct no matter where we resume from
 	 * (unlike an ordinal count, which would over-run when resuming
 	 * partway through the chunk list). */
-	const size_t stream_end = (size_t)map->m_data_used - SM_SIZEOF_OVERHEAD;
+	const size_t stream_end =
+	    (size_t)map->m_data_used - SM_SIZEOF_OVERHEAD;
 
 	/* Byte offset (base-relative) of the chunk immediately BEFORE the
 	 * chunk we finally return, or SIZE_MAX if none.  Captured for free
 	 * during the forward walk and handed back to the caller so the
 	 * coalescing path can find the left neighbor without a head-walk. */
 	size_t prev_off = SIZE_MAX;
+
+	if (count == 0) {
+		return (-1);
+	}
 
 	/*
 	 * Cursor fast-path.  If the caller passed a valid cursor whose
@@ -2259,9 +2263,10 @@ __sm_get_chunk_offset(const sm_t *map, const uint64_t idx, sm_cursor_t *cur)
 	for (;;) {
 		const __sm_idx_t s = __sm_load_idx((const uint8_t *)p);
 		__sm_chunk_t chunk;
+		size_t next_off;
 		__sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
 		__sm_assert(s == __sm_get_chunk_aligned_offset(s));
-		const size_t next_off = (size_t)(p - base) +
+		next_off = (size_t)(p - base) +
 		    SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&chunk);
 		if (idx >= s + __sm_chunk_get_capacity(&chunk) &&
 		    next_off < stream_end) {
@@ -2382,7 +2387,8 @@ __sm_small_cardinality(const sm_t *map)
 	const uint64_t *w = __sm_small_words(map);
 	const size_t n = __sm_small_nwords(map);
 	uint64_t c = 0;
-	for (size_t i = 0; i < n; i++) {
+	size_t i;
+	for (i = 0; i < n; i++) {
 		c += (uint64_t)SM_POPCOUNT64(w[i]);
 	}
 	return (c);
@@ -2393,7 +2399,8 @@ __sm_small_is_empty(const sm_t *map)
 {
 	const uint64_t *w = __sm_small_words(map);
 	const size_t n = __sm_small_nwords(map);
-	for (size_t i = 0; i < n; i++) {
+	size_t i;
+	for (i = 0; i < n; i++) {
 		if (w[i] != 0) {
 			return (false);
 		}
@@ -2406,7 +2413,8 @@ __sm_small_minimum(const sm_t *map)
 {
 	const uint64_t *w = __sm_small_words(map);
 	const size_t n = __sm_small_nwords(map);
-	for (size_t i = 0; i < n; i++) {
+	size_t i;
+	for (i = 0; i < n; i++) {
 		if (w[i] != 0) {
 			return ((uint64_t)i * 64 + (uint64_t)SM_CTZ64(w[i]));
 		}
@@ -2419,7 +2427,8 @@ __sm_small_maximum(const sm_t *map)
 {
 	const uint64_t *w = __sm_small_words(map);
 	const size_t n = __sm_small_nwords(map);
-	for (size_t i = n; i-- > 0;) {
+	size_t i;
+	for (i = n; i-- > 0;) {
 		if (w[i] != 0) {
 			return ((uint64_t)i * 64 + (63 -
 			    (uint64_t)SM_CLZ64(w[i])));
