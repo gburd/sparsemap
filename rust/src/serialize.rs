@@ -54,6 +54,17 @@ const OVERHEAD: usize = 8;
 const RLE_FLAG_BITS: u64 = 0b01 << 62;
 const RLE_FLAG_MASK: u64 = 0b11 << 62;
 const RLE_MAX_SPAN: u64 = 0x7FFF_FFFF; // 31-bit cap/len fields
+/// Small-set marker: the C library sets the top bit of the body's
+/// 8-byte header word (where chunk mode stores the chunk count) to mark
+/// a bare `uint64` bitmapword array from bit 0.  The low 32 bits hold
+/// the word count.  A real chunk count never nears 2^63, so the bit is
+/// unambiguous.  The Rust encoder never emits this form (it always
+/// writes chunk mode); the decoder must read it because the C encoder
+/// does emit it for near-zero sets.
+const SMALL_FLAG: u64 = 1 << 63;
+const SMALL_WMASK: u64 = (1 << 32) - 1;
+/// Hard cap on the word count, mirroring C's SM_SMALL_MAX_WORDS (16).
+const SMALL_MAX_WORDS: u64 = 16;
 
 /// Error returned by [`SparseMap::from_bytes`] for malformed input.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -163,6 +174,48 @@ impl SparseMap {
 
         let body = &buf[HEADER_LEN..];
         let count = read_u64(body, 0, le).ok_or(DecodeError::Corrupt)?;
+
+        // Small-set body: the header word's top bit is set and the low
+        // 32 bits hold the word count.  The body is a bare uint64
+        // bitmapword[] from bit 0 (bit i in word i/64), exactly like the
+        // C small-set form.  Validate to the same rules the C
+        // sm_validate applies (nwords <= cap, body length exact, no
+        // trailing all-zero word) so a malformed small stream is
+        // rejected, not mis-decoded.
+        if count & SMALL_FLAG != 0 {
+            let nwords = count & SMALL_WMASK;
+            if nwords > SMALL_MAX_WORDS {
+                return Err(DecodeError::Corrupt);
+            }
+            let need = OVERHEAD + (nwords as usize) * 8;
+            if body.len() != need {
+                return Err(DecodeError::Corrupt);
+            }
+            let mut map = SparseMap::new();
+            let mut last_word = 0u64;
+            for w in 0..nwords as usize {
+                let word = read_u64(body, OVERHEAD + w * 8, le)
+                    .ok_or(DecodeError::Corrupt)?;
+                last_word = word;
+                if word == 0 {
+                    continue;
+                }
+                let base = (w as u64) * 64;
+                let mut bits = word;
+                while bits != 0 {
+                    let b = bits.trailing_zeros() as u64;
+                    bits &= bits - 1;
+                    map.insert(base + b);
+                }
+            }
+            // Canonical: the top word must be non-zero when nwords > 0
+            // (the C encoder trims trailing zero words).
+            if nwords > 0 && last_word == 0 {
+                return Err(DecodeError::Corrupt);
+            }
+            return Ok(map);
+        }
+
         // Chunks begin after the 8-byte chunk-count header.
         let mut pos = OVERHEAD;
 
@@ -500,5 +553,93 @@ mod hostile {
                 assert_eq!(re.as_ref(), Ok(&m), "decoded map is not round-trip stable");
             }
         }
+    }
+
+    // --- Small-set mode: the C encoder emits a bare bitmapword[] from
+    // bit 0 behind a header word whose top bit is set.  The Rust
+    // decoder must read it and reject malformed small bodies. ---
+
+    fn small_header(nwords: u64) -> Vec<u8> {
+        header(SMALL_FLAG | nwords)
+    }
+
+    #[test]
+    fn small_decodes_near_zero_set() {
+        // {0, 5, 70}: words[0] has bits 0 and 5, words[1] has bit 6.
+        let mut b = small_header(2);
+        b.extend_from_slice(&((1u64 << 0) | (1u64 << 5)).to_le_bytes());
+        b.extend_from_slice(&(1u64 << 6).to_le_bytes());
+        let m = SparseMap::from_bytes(&b).expect("valid small body");
+        assert_eq!(m.cardinality(), 3);
+        assert!(m.contains(0) && m.contains(5) && m.contains(70));
+        assert!(!m.contains(1) && !m.contains(64));
+        let bits: Vec<u64> = m.iter().collect();
+        assert_eq!(bits, alloc::vec![0, 5, 70]);
+    }
+
+    #[test]
+    fn small_empty_decodes_empty() {
+        let b = small_header(0);
+        let m = SparseMap::from_bytes(&b).expect("empty small body");
+        assert!(m.is_empty());
+    }
+
+    #[test]
+    fn small_dense_run_decodes() {
+        // {0..127}: two all-ones words.
+        let mut b = small_header(2);
+        b.extend_from_slice(&u64::MAX.to_le_bytes());
+        b.extend_from_slice(&u64::MAX.to_le_bytes());
+        let m = SparseMap::from_bytes(&b).expect("valid small run");
+        assert_eq!(m.cardinality(), 128);
+        assert_eq!(m.min(), Some(0));
+        assert_eq!(m.max(), Some(127));
+    }
+
+    #[test]
+    fn small_rejects_nwords_over_cap() {
+        let mut b = small_header(17);
+        for _ in 0..17 {
+            b.extend_from_slice(&1u64.to_le_bytes());
+        }
+        assert_eq!(SparseMap::from_bytes(&b), Err(DecodeError::Corrupt));
+    }
+
+    #[test]
+    fn small_rejects_body_length_mismatch() {
+        // Header claims 4 words but only 2 are present.
+        let mut b = small_header(4);
+        b.extend_from_slice(&1u64.to_le_bytes());
+        b.extend_from_slice(&2u64.to_le_bytes());
+        assert_eq!(SparseMap::from_bytes(&b), Err(DecodeError::Corrupt));
+    }
+
+    #[test]
+    fn small_rejects_trailing_zero_word() {
+        // nwords=2 with the top word zero is non-canonical.
+        let mut b = small_header(2);
+        b.extend_from_slice(&1u64.to_le_bytes());
+        b.extend_from_slice(&0u64.to_le_bytes());
+        assert_eq!(SparseMap::from_bytes(&b), Err(DecodeError::Corrupt));
+    }
+
+    #[test]
+    fn small_rejects_truncated_buffer() {
+        // nwords=2 but only one word follows the header.
+        let mut b = small_header(2);
+        b.extend_from_slice(&5u64.to_le_bytes());
+        assert_eq!(SparseMap::from_bytes(&b), Err(DecodeError::Corrupt));
+    }
+
+    #[test]
+    fn small_round_trips_through_rust_encoder() {
+        // A C small body decodes to a map that the Rust encoder writes
+        // back (in chunk mode) and re-reads unchanged.
+        let mut b = small_header(2);
+        b.extend_from_slice(&((1u64 << 0) | (1u64 << 5)).to_le_bytes());
+        b.extend_from_slice(&(1u64 << 6).to_le_bytes());
+        let m = SparseMap::from_bytes(&b).expect("valid small body");
+        let re = SparseMap::from_bytes(&m.to_bytes()).expect("rust re-encode");
+        assert_eq!(re, m);
     }
 }
