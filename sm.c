@@ -8133,16 +8133,18 @@ sm_xor(const sm_t *a, const sm_t *b)
 	while (have_a || have_b) {
 		/* The next boundary among the two active runs. */
 		uint64_t lo = have_a ? alo : blo;
+		bool in_a;
+		bool in_b;
+		uint64_t next = UINT64_MAX;
 		if (have_b && blo < lo)
 			lo = blo;
 		if (!have_pos || pos < lo) {
 			pos = lo;
 			have_pos = true;
 		}
-		const bool in_a = have_a && pos >= alo && pos < ahi;
-		const bool in_b = have_b && pos >= blo && pos < bhi;
+		in_a = have_a && pos >= alo && pos < ahi;
+		in_b = have_b && pos >= blo && pos < bhi;
 		/* End of the current homogeneous segment. */
-		uint64_t next = UINT64_MAX;
 		if (have_a) {
 			if (pos < alo && alo < next)
 				next = alo;
@@ -8228,12 +8230,14 @@ sm_extract_range(const sm_t *map, uint64_t lo, uint64_t hi)
 	em.resultp = &r;
 	__sm_run_iter_init(&it, map);
 	while (__sm_run_next(&it, &rlo, &rhi)) {
+		uint64_t clip_lo;
+		uint64_t clip_hi;
 		if (rhi <= lo)
 			continue;
 		if (rlo >= hi)
 			break; /* runs are ascending; nothing more overlaps */
-		const uint64_t clip_lo = rlo < lo ? lo : rlo;
-		const uint64_t clip_hi = rhi > hi ? hi : rhi;
+		clip_lo = rlo < lo ? lo : rlo;
+		clip_hi = rhi > hi ? hi : rhi;
 		if (!__sm_add_run_grow(&em, clip_lo, clip_hi)) {
 			sm_free(r);
 			return (NULL);
@@ -8401,15 +8405,18 @@ sm_compare(const sm_t *a, const sm_t *b)
 	pa = alo;
 	pb = blo;
 	while (have_a && have_b) {
+		uint64_t a_rem;
+		uint64_t b_rem;
+		uint64_t step;
 		if (pa < pb)
 			return (-1);
 		if (pa > pb)
 			return (1);
 		/* pa == pb: both runs share consecutive members up to the
 		 * shorter run's end; skip that common prefix at once. */
-		const uint64_t a_rem = ahi - pa;
-		const uint64_t b_rem = bhi - pb;
-		const uint64_t step = a_rem < b_rem ? a_rem : b_rem;
+		a_rem = ahi - pa;
+		b_rem = bhi - pb;
+		step = a_rem < b_rem ? a_rem : b_rem;
 		pa += step;
 		pb += step;
 		if (pa >= ahi) {
@@ -8449,16 +8456,18 @@ sm_subset_compare(const sm_t *a, const sm_t *b)
 	have_b = __sm_run_next(&ib, &blo, &bhi);
 	while (have_a || have_b) {
 		uint64_t lo = have_a ? alo : blo;
+		bool in_a;
+		bool in_b;
+		uint64_t next = UINT64_MAX;
 		if (have_b && blo < lo)
 			lo = blo;
 		if (!have_pos || pos < lo) {
 			pos = lo;
 			have_pos = true;
 		}
-		const bool in_a = have_a && pos >= alo && pos < ahi;
-		const bool in_b = have_b && pos >= blo && pos < bhi;
+		in_a = have_a && pos >= alo && pos < ahi;
+		in_b = have_b && pos >= blo && pos < bhi;
 		/* End of the current homogeneous segment. */
-		uint64_t next = UINT64_MAX;
 		if (have_a) {
 			if (pos < alo && alo < next)
 				next = alo;
@@ -8638,6 +8647,13 @@ sm_flip_range(sm_t *map, uint64_t lo, uint64_t hi)
 bool
 sm_validate(const sm_t *map)
 {
+	size_t count;
+	uint8_t *p;
+	uint8_t *end;
+	__sm_idx_t prev_start = 0;
+	uint64_t prev_end = 0; /* start + capacity of the previous chunk */
+	bool first = true;
+	size_t i;
 	if (map == NULL)
 		return (true);
 	if (map->m_data == NULL && __sm_cap(map) > 0)
@@ -8667,13 +8683,7 @@ sm_validate(const sm_t *map)
 		return (true);
 	}
 
-	const size_t count = __sm_get_chunk_count(map);
-	uint8_t *p;
-	uint8_t *end;
-	__sm_idx_t prev_start = 0;
-	uint64_t prev_end = 0; /* start + capacity of the previous chunk */
-	bool first = true;
-	size_t i;
+	count = __sm_get_chunk_count(map);
 	if (count == 0) {
 		return (map->m_data_used == SM_SIZEOF_OVERHEAD);
 	}
@@ -8972,6 +8982,13 @@ __sm_copy_chunk_to_result(sm_t **resultp, const uint8_t *chunk_ptr)
 sm_t *
 sm_intersection(const sm_t *a, const sm_t *b)
 {
+	size_t a_count;
+	size_t b_count;
+	size_t cap;
+	sm_t *result;
+	uint8_t *ap;
+	uint8_t *bp;
+	size_t ai = 0, bi = 0;
 	__sm_check_invariants(a);
 	__sm_check_invariants(b);
 	if (a == NULL || b == NULL) {
@@ -8988,13 +9005,8 @@ sm_intersection(const sm_t *a, const sm_t *b)
 		return (r);
 	}
 
-	const size_t a_count = __sm_get_chunk_count(a);
-	const size_t b_count = __sm_get_chunk_count(b);
-	size_t cap;
-	sm_t *result;
-	uint8_t *ap;
-	uint8_t *bp;
-	size_t ai = 0, bi = 0;
+	a_count = __sm_get_chunk_count(a);
+	b_count = __sm_get_chunk_count(b);
 
 	if (a_count == 0 || b_count == 0) {
 		return (NULL);
@@ -9286,6 +9298,13 @@ __sm_emit_chunk_bits(sm_t **resultp, const __sm_chunk_t *chunk, bool is_rle,
 sm_t *
 sm_difference(const sm_t *a, const sm_t *b)
 {
+	size_t a_count;
+	size_t b_count;
+	size_t cap;
+	sm_t *result;
+	uint8_t *ap;
+	uint8_t *bp;
+	size_t ai = 0, bi = 0;
 	__sm_check_invariants(a);
 	__sm_check_invariants(b);
 	if (a == NULL) {
@@ -9303,13 +9322,7 @@ sm_difference(const sm_t *a, const sm_t *b)
 		return (r);
 	}
 
-	const size_t a_count = __sm_get_chunk_count(a);
-	size_t b_count;
-	size_t cap;
-	sm_t *result;
-	uint8_t *ap;
-	uint8_t *bp;
-	size_t ai = 0, bi = 0;
+	a_count = __sm_get_chunk_count(a);
 	if (a_count == 0) {
 		return (NULL);
 	}
@@ -9621,6 +9634,19 @@ sm_difference(const sm_t *a, const sm_t *b)
 sm_t *
 sm_union(const sm_t *a, const sm_t *b)
 {
+	size_t a_count;
+	size_t b_count;
+	size_t cap;
+	sm_t *result;
+	uint8_t *ap;
+	uint8_t *bp;
+	size_t ai = 0, bi = 0;
+	/* Cursors track how far into each current chunk we've already emitted.
+     A value of 0 means "fresh chunk" (reset after advancing).  When a
+     chunk is partially consumed, the cursor holds the absolute bit
+     position up to which bits have been emitted. */
+	size_t a_cursor = 0;
+	size_t b_cursor = 0;
 	__sm_check_invariants(a);
 	__sm_check_invariants(b);
 	if (a == NULL && b == NULL) {
@@ -9639,19 +9665,8 @@ sm_union(const sm_t *a, const sm_t *b)
 		return (r);
 	}
 
-	const size_t a_count = a ? __sm_get_chunk_count(a) : 0;
-	const size_t b_count = b ? __sm_get_chunk_count(b) : 0;
-	size_t cap;
-	sm_t *result;
-	uint8_t *ap;
-	uint8_t *bp;
-	size_t ai = 0, bi = 0;
-	/* Cursors track how far into each current chunk we've already emitted.
-     A value of 0 means "fresh chunk" (reset after advancing).  When a
-     chunk is partially consumed, the cursor holds the absolute bit
-     position up to which bits have been emitted. */
-	size_t a_cursor = 0;
-	size_t b_cursor = 0;
+	a_count = a ? __sm_get_chunk_count(a) : 0;
+	b_count = b ? __sm_get_chunk_count(b) : 0;
 
 	if (a_count == 0 && b_count == 0) {
 		return (NULL);
