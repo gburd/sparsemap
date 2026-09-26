@@ -101,10 +101,17 @@ exercise_mutating(const sm_t *orig, const uint8_t *data, size_t size)
     sm_t *d = sm_xor(m, orig);
     sm_t *e = sm_offset(m, 37);
     sm_t *f = sm_offset(m, -37);
+    /* Extreme |offset|: the shifted-start math must stay well-defined
+     * (no signed-overflow UB) for offsets near +/-SSIZE_MAX. */
+    sm_t *e2 = sm_offset(m, (ssize_t)0x7FFFFFFFFFFFFFFFLL);
+    sm_t *f2 = sm_offset(m, -(ssize_t)0x7FFFFFFFFFFFFFFFLL);
+    sm_t *e3 = sm_offset(m, (ssize_t)((uint64_t)1 << 62));
+    sm_t *f3 = sm_offset(m, -(ssize_t)((uint64_t)1 << 62));
     sm_t *g = sm_create(1 << 16);
     if (g != NULL) (void)sm_split(m, 4096, g);
     sm_free(a); sm_free(b); sm_free(c); sm_free(d);
-    sm_free(e); sm_free(f); sm_free(g); sm_free(m);
+    sm_free(e); sm_free(f); sm_free(e2); sm_free(f2);
+    sm_free(e3); sm_free(f3); sm_free(g); sm_free(m);
 }
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size);
