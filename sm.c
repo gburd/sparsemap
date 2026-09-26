@@ -10070,6 +10070,14 @@ fail:
 uint64_t
 sm_split(sm_t *map, uint64_t idx, sm_t *other)
 {
+	size_t i;
+	size_t count;
+	bool in_middle = false;
+	uint8_t *src;
+	uint8_t *dst;
+	size_t split_offset;
+	size_t chunks_to_move;
+	uint8_t *map_end;
 	if (map == NULL || other == NULL) {
 		errno = EINVAL;
 		return (SM_IDX_MAX);
@@ -10088,9 +10096,7 @@ sm_split(sm_t *map, uint64_t idx, sm_t *other)
 	}
 	__sm_check_invariants(map);
 	__sm_check_invariants(other);
-	size_t i;
-	const size_t count = __sm_get_chunk_count(map);
-	bool in_middle = false;
+	count = __sm_get_chunk_count(map);
 
 	__sm_assert(sm_cardinality(other) == 0);
 
@@ -10125,16 +10131,16 @@ sm_split(sm_t *map, uint64_t idx, sm_t *other)
 	 * 4) Keep half in the src and insert the other half into the dst
 	 * 5) Move any remaining chunks to dst.
 	 */
-	uint8_t *src = __sm_get_chunk_data(map, 0);
-	uint8_t *dst = __sm_get_chunk_end(other);
+	src = __sm_get_chunk_data(map, 0);
+	dst = __sm_get_chunk_end(other);
 
 	/* (1): skip over chunks that are entirely to the left. */
 	for (i = 0; i < count; i++) {
 		const __sm_idx_t start = __sm_load_idx((const uint8_t *)src);
+		__sm_chunk_t chunk;
 		if (start == idx) {
 			break;
 		}
-		__sm_chunk_t chunk;
 		__sm_chunk_init(&chunk, src + SM_SIZEOF_OVERHEAD);
 		if (start <= idx && start + __sm_chunk_get_capacity(&chunk) > idx) {
 			in_middle = true;
@@ -10180,6 +10186,10 @@ sm_split(sm_t *map, uint64_t idx, sm_t *other)
 			SM_ALIGNAS(__sm_bitvec_t) uint8_t
 			    buf[(SM_SIZEOF_OVERHEAD * (unsigned long)3) +
 			        (sizeof(__sm_bitvec_t) * 6)] = { 0 };
+			__sm_chunk_sep_t sep;
+			int sep_rc;
+			size_t src_offset;
+			size_t rle_data_off;
 
 			/* Copy the source chunk into the buffer. */
 			memcpy(buf + SM_SIZEOF_OVERHEAD, src,
@@ -10193,16 +10203,15 @@ sm_split(sm_t *map, uint64_t idx, sm_t *other)
 			__sm_chunk_init(&chunk, buf + (SM_SIZEOF_OVERHEAD * 2));
 
 			/* Finally, let's separate the RLE chunk at index. */
-			__sm_chunk_sep_t sep = {
-				.target = { .p = buf + SM_SIZEOF_OVERHEAD,
-				    .offset = SM_SIZEOF_OVERHEAD,
-				    .chunk = &chunk,
-				    .start = src_start,
-				    .length =
-				        __sm_chunk_rle_get_length(&s_chunk),
-				    .capacity =
-				        __sm_chunk_get_capacity(&s_chunk) }
-			};
+			memset(&sep, 0, sizeof(sep));
+			sep.target.p = buf + SM_SIZEOF_OVERHEAD;
+			sep.target.offset = SM_SIZEOF_OVERHEAD;
+			sep.target.chunk = &chunk;
+			sep.target.start = src_start;
+			sep.target.length =
+			    __sm_chunk_rle_get_length(&s_chunk);
+			sep.target.capacity =
+			    __sm_chunk_get_capacity(&s_chunk);
 			/*
 			 * Pre-fix the return value here was discarded, then sep.expand_by
 			 * was used unconditionally below.  If the separate function
@@ -10213,7 +10222,7 @@ sm_split(sm_t *map, uint64_t idx, sm_t *other)
 			 * negative-size-param in __sm_insert_data and by glibc as
 			 * stack-smashing.  Now we propagate the failure up.
 			 */
-			const int sep_rc =
+			sep_rc =
 			    __sm_separate_rle_chunk(&stunt, &sep, idx, -1);
 			if (sep_rc != 0) {
 				return (SM_IDX_MAX);
@@ -10226,7 +10235,7 @@ sm_split(sm_t *map, uint64_t idx, sm_t *other)
 			 */
 			SM_ENOUGH_SPACE(sep.expand_by);
 			/* Save src offset before insert, as insert will invalidate the pointer */
-			size_t src_offset = src - map->m_data;
+			src_offset = src - map->m_data;
 			/* __sm_insert_data / __sm_get_chunk_data take a
 			 * DATA-region-relative offset (they add SM_SIZEOF_OVERHEAD
 			 * for the chunk-count header themselves).  `src_offset`
@@ -10241,7 +10250,7 @@ sm_split(sm_t *map, uint64_t idx, sm_t *other)
 			 * cardinality was correct.  This is the same data-vs-
 			 * m_data offset convention __sm_separate_rle_chunk's own
 			 * internal insert uses (target.offset is data-relative). */
-			const size_t rle_data_off =
+			rle_data_off =
 			    src_offset - SM_SIZEOF_OVERHEAD;
 			__sm_insert_data(map,
 			    rle_data_off + SM_SIZEOF_OVERHEAD +
@@ -10309,8 +10318,9 @@ sm_split(sm_t *map, uint64_t idx, sm_t *other)
 		 * middle one are untouched, so its m_data offset `mid_off` is
 		 * stable across the mutation. */
 		const size_t mid_off = (size_t)(src - map->m_data);
+		size_t j;
 		__sm_store_idx((uint8_t *)dst, src_start);
-		for (size_t j = idx; j < src_start + SM_CHUNK_MAX_CAPACITY;
+		for (j = idx; j < src_start + SM_CHUNK_MAX_CAPACITY;
 		     j++) {
 			if (sm_contains(map, j, NULL)) {
 				__sm_map_set(other, j, false, NULL);
@@ -10337,14 +10347,14 @@ sm_split(sm_t *map, uint64_t idx, sm_t *other)
 
 	/* Now continue with all remaining chunks. */
 	/* Save the offset where moved chunks start, so we can truncate map later */
-	size_t split_offset = src - map->m_data;
+	split_offset = (size_t)(src - map->m_data);
 	/* Upper bound on chunks to move: the mutation in the in_middle phase
 	 * can have removed the middle chunk (dropping the count) or left `i`
 	 * out of step, so `count - i` is unreliable.  The probe below
 	 * re-derives the exact movable count by byte-walking from `src` to
 	 * the current data end; seed the bound with the current chunk count,
 	 * which can never undercount. */
-	size_t chunks_to_move = __sm_get_chunk_count(map);
+	chunks_to_move = __sm_get_chunk_count(map);
 	/* The chunk stream ends here; the move must never read past it.  On
 	 * a valid-but-adversarial map the RLE-separation and sparse-split
 	 * phases above can leave `i` disagreeing with the bytes actually
@@ -10352,7 +10362,7 @@ sm_split(sm_t *map, uint64_t idx, sm_t *other)
 	 * source-side over-read in __sm_append_data (ASan heap-buffer-
 	 * overflow READ, then heap corruption on reuse).  Bounding every
 	 * walk by map_end keeps the move within the source buffer. */
-	uint8_t *const map_end = map->m_data + map->m_data_used;
+	map_end = map->m_data + map->m_data_used;
 
 	/*
 	 * The destination is caller-provided and may be far smaller than
@@ -10371,14 +10381,16 @@ sm_split(sm_t *map, uint64_t idx, sm_t *other)
 		uint8_t *probe = src;
 		size_t need = 0;
 		size_t movable = 0;
-		for (size_t j = 0; j < chunks_to_move; j++) {
+		size_t j;
+		for (j = 0; j < chunks_to_move; j++) {
+			__sm_chunk_t c;
+			size_t sz;
 			if (probe + SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) >
 			    map_end) {
 				break;
 			}
-			__sm_chunk_t c;
 			__sm_chunk_init(&c, probe + SM_SIZEOF_OVERHEAD);
-			const size_t sz = SM_SIZEOF_OVERHEAD +
+			sz = SM_SIZEOF_OVERHEAD +
 			    __sm_chunk_get_size(&c);
 			if (probe + sz > map_end) {
 				break;
@@ -10394,25 +10406,31 @@ sm_split(sm_t *map, uint64_t idx, sm_t *other)
 		}
 	}
 
-	for (size_t j = 0; j < chunks_to_move; j++) {
-		__sm_chunk_t chunk;
-		__sm_chunk_init(&chunk, src + SM_SIZEOF_OVERHEAD);
-		size_t chunk_size =
-		    SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&chunk);
+	{
+		size_t j;
+		for (j = 0; j < chunks_to_move; j++) {
+			__sm_chunk_t chunk;
+			size_t chunk_size;
+			__sm_chunk_init(&chunk, src + SM_SIZEOF_OVERHEAD);
+			chunk_size =
+			    SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&chunk);
 
-		/* Copy chunk to other.  The total was reserved before the
-		 * loop started, so this cannot fail; if it ever did, the
-		 * move would already be half-applied, so treat it as
-		 * unreachable rather than pretending it can be unwound. */
-		if (SM_UNLIKELY(!__sm_append_data(other, src, chunk_size))) {
-			__sm_assert(!"sm_split: capacity check disagreed with "
-			             "the move loop");
-			errno = ENOSPC;
-			return (SM_IDX_MAX);
+			/* Copy chunk to other.  The total was reserved before the
+			 * loop started, so this cannot fail; if it ever did, the
+			 * move would already be half-applied, so treat it as
+			 * unreachable rather than pretending it can be unwound. */
+			if (SM_UNLIKELY(!__sm_append_data(other, src,
+			        chunk_size))) {
+				__sm_assert(!"sm_split: capacity check disagreed with "
+				             "the move loop");
+				errno = ENOSPC;
+				return (SM_IDX_MAX);
+			}
+			__sm_set_chunk_count(other,
+			    __sm_get_chunk_count(other) + 1);
+
+			src += chunk_size;
 		}
-		__sm_set_chunk_count(other, __sm_get_chunk_count(other) + 1);
-
-		src += chunk_size;
 	}
 
 	/* Update chunk counts and force recalculation of data sizes */
