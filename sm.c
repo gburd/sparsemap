@@ -2977,7 +2977,7 @@ __sm_coalesce_map(sm_t *map)
 			    SM_SIZEOF_OVERHEAD);
 		}
 		before = __sm_get_chunk_count(map);
-		amt = __sm_coalesce_chunk(map, &chunk, offset,
+		amt = (size_t)__sm_coalesce_chunk(map, &chunk, offset,
 		    start, p, SM_IDX_MAX, false, SIZE_MAX);
 		after = __sm_get_chunk_count(map);
 		if (amt > 0 && after < before) {
@@ -4055,6 +4055,10 @@ sm_set_data_size(sm_t *map, uint8_t *data, const size_t size)
 	cur_cap = __sm_cap(map);
 	switch (__sm_kind(map)) {
 	case SM_OWNED_CONTIGUOUS: {
+		size_t total_size;
+		size_t padding;
+		const size_t old_capacity = cur_cap;
+		sm_t *m;
 		if (size == cur_cap) {
 			return (map);
 		}
@@ -4063,13 +4067,12 @@ sm_set_data_size(sm_t *map, uint8_t *data, const size_t size)
 		 * new data buffer + alignment padding so m_data lands on an 8-byte
 		 * boundary.
 		 */
-		size_t total_size = sizeof(sm_t) + size;
-		const size_t padding =
+		total_size = sizeof(sm_t) + size;
+		padding =
 		    total_size % 8 == 0 ? 0 : 8 - (total_size % 8);
 		total_size += padding;
 
-		const size_t old_capacity = cur_cap;
-		sm_t *m = (sm_t *)__sm_realloc(map, total_size);
+		m = (sm_t *)__sm_realloc(map, total_size);
 		if (!m) {
 			/* Original block still valid; leave map untouched. */
 			return (NULL);
@@ -4094,11 +4097,11 @@ sm_set_data_size(sm_t *map, uint8_t *data, const size_t size)
 	}
 
 	case SM_OWNED_SPLIT: {
+		uint8_t *new_data;
 		if (size == cur_cap) {
 			return (map);
 		}
-		uint8_t *new_data =
-		    (uint8_t *)__sm_realloc(map->m_data, size);
+		new_data = (uint8_t *)__sm_realloc(map->m_data, size);
 		if (!new_data) {
 			return (NULL);
 		}
@@ -4192,22 +4195,22 @@ __sm_small_is_run_from_zero(const sm_t *map, uint64_t *run_len_out)
 	bool ended = false;
 	size_t i;
 	for (i = 0; i < n; i++) {
+		const uint64_t lo = w[i];
 		if (ended) {
-			if (w[i] != 0) {
+			if (lo != 0) {
 				return (false); /* bits after the run: a gap */
 			}
 			continue;
 		}
-		if (w[i] == ~(uint64_t)0) {
+		if (lo == ~(uint64_t)0) {
 			len += 64;
 			continue;
 		}
-		if (w[i] == 0) {
+		if (lo == 0) {
 			ended = true; /* run ends on a whole-word boundary */
 			continue;
 		}
 		/* Partial word: must be a low-contiguous mask (1<<r)-1. */
-		const uint64_t lo = w[i];
 		if ((lo & (lo + 1)) != 0) {
 			return (false); /* not a low-contiguous prefix */
 		}
