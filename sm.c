@@ -4574,11 +4574,12 @@ __sm_materialize(const sm_t *small)
 static const sm_t *
 __sm_chunk_view(const sm_t *map, bool *owned)
 {
+	sm_t *m;
 	*owned = false;
 	if (map == NULL || !__sm_is_small(map)) {
 		return (map);
 	}
-	sm_t *m = __sm_materialize(map);
+	m = __sm_materialize(map);
 	if (m == NULL) {
 		return (NULL);
 	}
@@ -4925,9 +4926,11 @@ sm_remove(sm_t *map, const uint64_t idx)
 		}
 		return (idx);
 	}
-	const uint64_t rc = __sm_map_unset(map, idx, true);
-	__sm_try_demote(map);
-	return (rc);
+	{
+		const uint64_t rc = __sm_map_unset(map, idx, true);
+		__sm_try_demote(map);
+		return (rc);
+	}
 }
 
 /**
@@ -5152,8 +5155,8 @@ __sm_map_set(sm_t *map, uint64_t idx, const bool coalesce, sm_cursor_t *cur)
 		 * in this run.
 		 */
 
-		__sm_chunk_set_rle(&chunk);
 		const size_t rle_length = SM_CHUNK_MAX_CAPACITY + 1;
+		__sm_chunk_set_rle(&chunk);
 		__sm_chunk_rle_set_capacity(&chunk,
 		    __sm_chunk_rle_capacity_limit(map, start, rle_length,
 		        offset));
@@ -5524,17 +5527,18 @@ sm_assign(sm_t *map, const uint64_t idx, const bool value)
 uint64_t
 sm_minimum(const sm_t *map)
 {
+	uint64_t offset = 0;
+	size_t count;
+	uint8_t *p;
+	uint64_t relative_position;
+	__sm_chunk_t chunk;
+	size_t m;
 	if (map == NULL)
 		return (0);
 	if (__sm_is_small(map))
 		return (__sm_small_minimum(map));
 	__sm_check_invariants(map);
-	uint64_t offset = 0;
-	const size_t count = __sm_get_chunk_count(map);
-	uint8_t *p;
-	uint64_t relative_position;
-	__sm_chunk_t chunk;
-	size_t m;
+	count = __sm_get_chunk_count(map);
 	if (count == 0) {
 		return (0);
 	}
@@ -5603,12 +5607,7 @@ done:;
 uint64_t
 sm_maximum(const sm_t *map)
 {
-	if (map == NULL)
-		return (0);
-	if (__sm_is_small(map))
-		return (__sm_small_maximum(map));
-	__sm_check_invariants(map);
-	const size_t count = __sm_get_chunk_count(map);
+	size_t count;
 	uint8_t *p;
 	__sm_idx_t start;
 	__sm_chunk_t chunk;
@@ -5616,6 +5615,12 @@ sm_maximum(const sm_t *map)
 	uint64_t relative_position;
 	size_t i;
 	size_t m;
+	if (map == NULL)
+		return (0);
+	if (__sm_is_small(map))
+		return (__sm_small_maximum(map));
+	__sm_check_invariants(map);
+	count = __sm_get_chunk_count(map);
 
 	/* the ending offset of a map containing zero chunks is zero */
 	if (count == 0) {
@@ -5700,17 +5705,21 @@ sm_maximum(const sm_t *map)
 double
 sm_fill_factor(sm_t *map)
 {
+	size_t rank;
+	uint64_t lo;
+	uint64_t hi;
+	uint64_t range;
 	if (map == NULL)
 		return (0.0);
 	__sm_check_invariants(map);
-	const size_t rank = sm_rank(map, 0, SM_IDX_MAX, true);
+	rank = sm_rank(map, 0, SM_IDX_MAX, true);
 	if (rank == 0) {
 		return (0.0);
 	}
-	const uint64_t lo = sm_minimum(map);
-	const uint64_t hi = sm_maximum(map);
+	lo = sm_minimum(map);
+	hi = sm_maximum(map);
 	/* range = hi - lo + 1 (the inclusive span containing all set bits). */
-	const uint64_t range = hi - lo + 1;
+	range = hi - lo + 1;
 	if (range == 0) {
 		return (0.0);
 	}
