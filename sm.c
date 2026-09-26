@@ -6509,49 +6509,55 @@ __sm_emit_rle(__sm_emitter_t *e, __sm_idx_t start, size_t capacity,
 	 */
 	(void)capacity;
 
-	const size_t full = (length / SM_CHUNK_MAX_CAPACITY) *
-	    SM_CHUNK_MAX_CAPACITY;
-	if (full > 0) {
-		if (!__sm_emit_flush(e)) {
-			return (false);
+	{
+		const size_t full = (length / SM_CHUNK_MAX_CAPACITY) *
+		    SM_CHUNK_MAX_CAPACITY;
+		const size_t rem = length - full;
+		__sm_bitvec_t w[32];
+		int c[32];
+		int i;
+		size_t bit;
+		if (full > 0) {
+			if (!__sm_emit_flush(e)) {
+				return (false);
+			}
+			if (!__sm_append_rle_chunk(e->resultp, start, full,
+			        full)) {
+				return (false);
+			}
+			e->rle_start = start;
+			e->rle_end = (size_t)start + full;
+			e->rle_len = full;
+			e->have_rle = true;
 		}
-		if (!__sm_append_rle_chunk(e->resultp, start, full, full)) {
-			return (false);
+
+		if (rem == 0) {
+			return (true);
 		}
-		e->rle_start = start;
-		e->rle_end = (size_t)start + full;
-		e->rle_len = full;
-		e->have_rle = true;
-	}
 
-	const size_t rem = length - full;
-	if (rem == 0) {
-		return (true);
+		memset(w, 0, sizeof(w));
+		/* Full 32-slot capacity (see __sm_emit_run): a partial trailing run
+		 * still claims the whole chunk window, encoding the unset tail slots
+		 * as ZEROS rather than NONE. */
+		for (i = 0; i < 32; i++)
+			c[i] = 1;
+		for (bit = 0; bit < rem; bit += SM_BITS_PER_VECTOR) {
+			const size_t slot = bit / SM_BITS_PER_VECTOR;
+			const size_t n = (rem - bit < SM_BITS_PER_VECTOR) ?
+			    rem - bit :
+			    SM_BITS_PER_VECTOR;
+			w[slot] = (n == SM_BITS_PER_VECTOR) ?
+			    ~(__sm_bitvec_t)0 :
+			    (((__sm_bitvec_t)1 << n) - 1);
+		}
+		/* The remainder starts exactly where the RLE part ended, so it is
+		 * outside that chunk's span; clear the marker so the assertion in
+		 * __sm_emit_words (which forbids a start *inside* the span) is not
+		 * confused by the boundary case. */
+		e->have_rle = false;
+		return (__sm_emit_words(e,
+		    (__sm_idx_t)((size_t)start + full), w, c));
 	}
-
-	__sm_bitvec_t w[32];
-	int c[32];
-	memset(w, 0, sizeof(w));
-	/* Full 32-slot capacity (see __sm_emit_run): a partial trailing run
-	 * still claims the whole chunk window, encoding the unset tail slots
-	 * as ZEROS rather than NONE. */
-	for (int i = 0; i < 32; i++)
-		c[i] = 1;
-	for (size_t bit = 0; bit < rem; bit += SM_BITS_PER_VECTOR) {
-		const size_t slot = bit / SM_BITS_PER_VECTOR;
-		const size_t n = (rem - bit < SM_BITS_PER_VECTOR) ?
-		    rem - bit :
-		    SM_BITS_PER_VECTOR;
-		w[slot] = (n == SM_BITS_PER_VECTOR) ?
-		    ~(__sm_bitvec_t)0 :
-		    (((__sm_bitvec_t)1 << n) - 1);
-	}
-	/* The remainder starts exactly where the RLE part ended, so it is
-	 * outside that chunk's span; clear the marker so the assertion in
-	 * __sm_emit_words (which forbids a start *inside* the span) is not
-	 * confused by the boundary case. */
-	e->have_rle = false;
-	return (__sm_emit_words(e, (__sm_idx_t)((size_t)start + full), w, c));
 }
 
 /*
@@ -6574,30 +6580,33 @@ __sm_emit_rle(__sm_emitter_t *e, __sm_idx_t start, size_t capacity,
 static bool
 __sm_emit_run(__sm_emitter_t *e, uint64_t lo, uint64_t hi)
 {
+	uint64_t aligned;
+	uint64_t body_lo = lo;
 	if (lo >= hi) {
 		return (true);
 	}
 
 	/* Sub-chunk head: bits from lo up to the next chunk boundary. */
-	const uint64_t aligned = ((lo + SM_CHUNK_MAX_CAPACITY - 1) /
+	aligned = ((lo + SM_CHUNK_MAX_CAPACITY - 1) /
 	                             SM_CHUNK_MAX_CAPACITY) *
 	    SM_CHUNK_MAX_CAPACITY;
-	uint64_t body_lo = lo;
 	if (aligned > lo) {
 		const uint64_t head_hi = aligned < hi ? aligned : hi;
 		const __sm_idx_t chunk_start =
 		    (__sm_idx_t)(lo - (lo % SM_CHUNK_MAX_CAPACITY));
 		__sm_bitvec_t w[32];
 		int c[32];
+		int i;
+		uint64_t bit;
 		memset(w, 0, sizeof(w));
 		/* Full 32-slot capacity, matching __sm_expand_rle_as_words: a
 		 * sparse chunk with front slots marked NONE (cap 0) instead of
 		 * ZEROS confuses the reader, which then finds only the first set
 		 * bit.  Every emitted sparse chunk claims the whole 2048-bit
 		 * window and encodes absent slots as ZEROS. */
-		for (int i = 0; i < 32; i++)
+		for (i = 0; i < 32; i++)
 			c[i] = 1;
-		for (uint64_t bit = lo; bit < head_hi; bit++) {
+		for (bit = lo; bit < head_hi; bit++) {
 			const uint64_t off = bit - chunk_start;
 			const size_t slot = off / SM_BITS_PER_VECTOR;
 			w[slot] |= (__sm_bitvec_t)1
@@ -6616,8 +6625,10 @@ __sm_emit_run(__sm_emitter_t *e, uint64_t lo, uint64_t hi)
 	/* body_lo is now chunk-aligned; __sm_emit_rle emits the whole
 	 * output chunks as RLE and forwards its own sub-chunk tail to the
 	 * words path.  capacity == length keeps the RLE chunk-aligned. */
-	const size_t len = (size_t)(hi - body_lo);
-	return (__sm_emit_rle(e, (__sm_idx_t)body_lo, len, len));
+	{
+		const size_t len = (size_t)(hi - body_lo);
+		return (__sm_emit_rle(e, (__sm_idx_t)body_lo, len, len));
+	}
 }
 
 /*
