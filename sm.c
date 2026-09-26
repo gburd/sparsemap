@@ -1886,8 +1886,11 @@ __sm_set_chunk_count(const sm_t *map, const size_t new_count)
 #define SM_SMALL_FLAG   ((uint64_t)1 << 63)
 #define SM_SMALL_WMASK  (((uint64_t)1 << 32) - 1)
 /* Hard span cap: at 16 words the small form is at most 8 + 16*8 = 136
- * bytes, and stays <= chunk form for every set it can hold.  Above this
- * the map is always in chunk mode. */
+ * bytes.  It is preferred over the chunk form whenever it is not larger
+ * and fits in place; in a tightly-sized buffer a growth-to-shrink is
+ * skipped, so the small form can occasionally sit up to one word larger
+ * than the chunk equivalent -- never larger than a Bitmapset.  Above
+ * this cap the map is always in chunk mode. */
 #define SM_SMALL_MAX_WORDS 16u
 #define SM_SMALL_MAX_BITS  (SM_SMALL_MAX_WORDS * 64u)
 

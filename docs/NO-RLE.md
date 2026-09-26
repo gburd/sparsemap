@@ -58,9 +58,15 @@ small mode:  [ 0x8000...00 | nwords : 8 bytes ][ word[0] ][ word[1] ] ... [ word
 
 A chunk count never approaches 2^63, so the top bit is free.  The cap is
 `SM_SMALL_MAX_WORDS = 16` words (1024 bits); above that the map is always
-in chunk mode.  The small form is chosen only when it is `<=` the size
-the equivalent single chunk would occupy, so it can never lose to chunk
-mode.
+in chunk mode.  A small-mode add prefers the chunk form whenever it is
+smaller *and* fits in the current buffer in place; if a tight buffer
+would force a grow just to shrink the representation, the map stays in
+the small form rather than reallocating.  So the small form is normally
+the smaller of the two, but a set built by ascending inserts into a
+tightly-sized buffer can sit in a small form up to one word (8 bytes)
+larger than its chunk equivalent.  Either way the footprint stays at or
+below an equivalent `Bitmapset` (verified over two million random
+near-zero sets), which is the guarantee that matters to a consumer.
 
 ### Footprint (bytes)
 
