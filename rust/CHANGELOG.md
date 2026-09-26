@@ -4,6 +4,36 @@ All notable changes to the Rust `sparsemap` crate are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com), and
 the crate follows [SemVer](https://semver.org).
 
+## [5.6.0] - 2026-09-25
+
+A security-hardening release, matching the C library at 5.6.0.  This is
+the first release where the **Rust decoder itself** was hardened, not
+just realigned.
+
+### Security
+
+- `SparseMap::from_bytes` now uses checked arithmetic on chunk starts
+  and spans and rejects structurally-invalid input (RLE length beyond
+  capacity, unaligned or overflowing chunk starts, overlapping spans,
+  non-ascending starts) with `DecodeError::Corrupt`.  Debug builds
+  previously panicked on adversarial input and release builds -- what
+  the Python wheel ships -- wrapped silently, returning maps that
+  iterated out of order and gave wrong set-operation results.
+  `from_bytes` now never panics and never returns a corrupt map on any
+  `&[u8]`; a `cargo-fuzz` target guards this (10M+ runs clean).
+- The Python binding raises `ValueError` on malformed bytes rather than
+  constructing a corrupt map.
+
+### Note
+
+The C library shares the same version.  Its 5.6.0 hardening (validated
+decode at every entry, memory-safety fixes in the chunk-split and
+set-path routines, O(chunks) set algebra, one NULL-map contract) is C
+representation-specific; the Rust port models a map as a `BTreeMap` and
+is structurally immune to those particular bugs, but the decode-safety
+work above is its own.  Wire format unchanged (version 2); C and Rust
+remain mutually readable for same-endian streams.
+
 ## [5.5.1] - 2026-09-07
 
 Version realigned with the C `sparsemap` library, which is at 5.5.1.
