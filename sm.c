@@ -276,6 +276,9 @@ void
 /* Defaults for any hook the consumer did not supply and that the
  * diagnostic build did not define above. */
 #ifndef __sm_diag
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((unused))
+#endif
 static inline void
 #if defined(__GNUC__) || defined(__clang__)
     __attribute__((format(printf, 1, 2)))
