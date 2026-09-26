@@ -5926,6 +5926,11 @@ static bool
 __sm_encode_sparse_chunk(__sm_bitvec_t words[32], int cap_flags[32],
     __sm_bitvec_t *out_desc, __sm_bitvec_t out_vecs[32], int *out_nvecs)
 {
+	__sm_bitvec_t desc = 0;
+	bool has_bits = false;
+	unsigned flags[SM_FLAGS_PER_INDEX];
+	int i;
+
 	/* Slot 31 (the highest) must never be NONE, because NONE in bits 63:62
      of the descriptor would be misidentified as the RLE flag.  Force it
      to ZEROS (adding 64 bits of harmless zero capacity) when needed. */
@@ -5935,10 +5940,7 @@ __sm_encode_sparse_chunk(__sm_bitvec_t words[32], int cap_flags[32],
 	}
 
 	/* Pass 1: compute flags for each slot (no inter-iteration dependency). */
-	__sm_bitvec_t desc = 0;
-	bool has_bits = false;
-	unsigned flags[SM_FLAGS_PER_INDEX];
-	for (int i = 0; i < (int)SM_FLAGS_PER_INDEX; i++) {
+	for (i = 0; i < (int)SM_FLAGS_PER_INDEX; i++) {
 		unsigned f;
 		if (!cap_flags[i]) {
 			f = SM_PAYLOAD_NONE;
@@ -6254,6 +6256,9 @@ __sm_append_rle_chunk(sm_t **resultp, __sm_idx_t start, size_t capacity,
     size_t length)
 {
 	sm_t *result = *resultp;
+	const size_t chunk_size = SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t);
+	SM_ALIGNAS(__sm_bitvec_t) uint8_t rle_buf[sizeof(__sm_bitvec_t)] = { 0 };
+	__sm_chunk_t tmp;
 
 	/* Inline coalescing: try to merge with the last emitted chunk. */
 	const size_t count = __sm_get_chunk_count(result);
@@ -6318,6 +6323,7 @@ __sm_append_rle_chunk(sm_t **resultp, __sm_idx_t start, size_t capacity,
 						    (size_t)(last_p -
 						        __sm_get_chunk_data(
 						            result, 0));
+						size_t j;
 						__sm_remove_data(result,
 						    last_offset +
 						        SM_SIZEOF_OVERHEAD +
@@ -6326,7 +6332,6 @@ __sm_append_rle_chunk(sm_t **resultp, __sm_idx_t start, size_t capacity,
 						/* Re-init after data shift */
 						last_p = __sm_get_chunk_data(
 						    result, 0);
-						size_t j;
 						for (j = 0;
 						     j < count - 1; j++) {
 							__sm_chunk_t c;
@@ -6354,9 +6359,6 @@ __sm_append_rle_chunk(sm_t **resultp, __sm_idx_t start, size_t capacity,
 	}
 
 	/* No merge possible: append new RLE chunk */
-	const size_t chunk_size = SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t);
-	SM_ALIGNAS(__sm_bitvec_t) uint8_t rle_buf[sizeof(__sm_bitvec_t)] = { 0 };
-	__sm_chunk_t tmp;
 	if (!__sm_ensure_capacity(resultp, chunk_size)) {
 		return (false);
 	}
@@ -6776,6 +6778,12 @@ sm_offset(const sm_t *map, ssize_t offset)
 		if (__sm_chunk_is_rle(&chunk)) {
 			const size_t rle_len =
 			    __sm_chunk_rle_get_length(&chunk);
+			bool neg;
+			uint64_t mag;
+			uint64_t clipped_start;
+			size_t new_len;
+			__sm_idx_t aligned_start;
+			size_t rle_offset_in_chunk;
 
 			/* RLE set bits occupy [src_start, src_start + rle_len).
 			 * After the shift they occupy [start, start + rle_len)
@@ -6783,11 +6791,7 @@ sm_offset(const sm_t *map, ssize_t offset)
 			 * unsigned magnitude + sign so a large |offset| cannot
 			 * overflow a signed intermediate; clip the part that
 			 * falls below bit 0. */
-			bool neg;
-			const uint64_t mag =
-			    __sm_offset_abs_start(src_start, offset, &neg);
-			uint64_t clipped_start;
-			size_t new_len;
+			mag = __sm_offset_abs_start(src_start, offset, &neg);
 			if (neg) {
 				/* Run starts mag bits below 0. */
 				if (rle_len <= (size_t)mag) {
@@ -6804,10 +6808,10 @@ sm_offset(const sm_t *map, ssize_t offset)
 			}
 
 			/* Align the start to chunk boundary */
-			__sm_idx_t aligned_start =
+			aligned_start =
 			    (__sm_idx_t)__sm_get_chunk_aligned_offset(
 			        (size_t)clipped_start);
-			size_t rle_offset_in_chunk =
+			rle_offset_in_chunk =
 			    (size_t)clipped_start - aligned_start;
 
 			if (rle_offset_in_chunk == 0) {
@@ -6828,24 +6832,30 @@ sm_offset(const sm_t *map, ssize_t offset)
 				/* Emit first partial chunk as sparse */
 				size_t first_chunk_bits =
 				    SM_CHUNK_MAX_CAPACITY - rle_offset_in_chunk;
+				__sm_bitvec_t fw[32] = { 0 };
+				int fc[32] = { 0 };
+				size_t last_data_slot;
+				size_t bp;
+				size_t bl;
+				size_t remaining;
+				__sm_idx_t cur_start;
+				size_t s;
 				if (first_chunk_bits > new_len) {
 					first_chunk_bits = new_len;
 				}
 
-				__sm_bitvec_t fw[32] = { 0 };
-				int fc[32] = { 0 };
 				/* Mark capacity for all slots up to and including the data */
-				size_t last_data_slot =
+				last_data_slot =
 				    (rle_offset_in_chunk + first_chunk_bits +
 				        SM_BITS_PER_VECTOR - 1) /
 				    SM_BITS_PER_VECTOR;
-				for (size_t s = 0; s < last_data_slot && s < 32;
+				for (s = 0; s < last_data_slot && s < 32;
 				     s++) {
 					fc[s] = 1;
 				}
 				/* Set the actual bits */
-				size_t bp = rle_offset_in_chunk;
-				size_t bl = first_chunk_bits;
+				bp = rle_offset_in_chunk;
+				bl = first_chunk_bits;
 				while (bl > 0) {
 					size_t slot = bp / SM_BITS_PER_VECTOR;
 					size_t bit_in_vec =
@@ -6872,8 +6882,8 @@ sm_offset(const sm_t *map, ssize_t offset)
 					return (NULL);
 				}
 
-				size_t remaining = new_len - first_chunk_bits;
-				__sm_idx_t cur_start =
+				remaining = new_len - first_chunk_bits;
+				cur_start =
 				    aligned_start + SM_CHUNK_MAX_CAPACITY;
 
 				/* Emit middle RLE for full chunks */
