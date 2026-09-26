@@ -8039,10 +8039,12 @@ __sm_add_run_grow(__sm_emitter_t *e, uint64_t lo, uint64_t hi)
 void
 sm_to_array(const sm_t *map, uint64_t *out, size_t *n_out)
 {
+	size_t cap;
+	size_t written = 0;
+	uint64_t i = SM_IDX_MAX;
 	if (n_out == NULL)
 		return;
-	const size_t cap = (out == NULL) ? 0 : *n_out;
-	size_t written = 0;
+	cap = (out == NULL) ? 0 : *n_out;
 
 	if (out == NULL) {
 		/* Query: just count. */
@@ -8050,7 +8052,6 @@ sm_to_array(const sm_t *map, uint64_t *out, size_t *n_out)
 		return;
 	}
 
-	uint64_t i = SM_IDX_MAX;
 	while ((i = sm_next_member(map, i, NULL)) != SM_IDX_MAX) {
 		if (written >= cap)
 			break;
@@ -8067,9 +8068,10 @@ sm_to_array(const sm_t *map, uint64_t *out, size_t *n_out)
 bool
 sm_add_range(sm_t *map, uint64_t lo, uint64_t hi)
 {
+	uint64_t i;
 	if (map == NULL || lo >= hi)
 		return (lo >= hi); /* empty range = OK */
-	for (uint64_t i = lo; i < hi; i++) {
+	for (i = lo; i < hi; i++) {
 		if (sm_add(map, i) == SM_IDX_MAX) {
 			return (false);
 		}
@@ -8080,9 +8082,10 @@ sm_add_range(sm_t *map, uint64_t lo, uint64_t hi)
 bool
 sm_remove_range(sm_t *map, uint64_t lo, uint64_t hi)
 {
+	uint64_t i;
 	if (map == NULL || lo >= hi)
 		return (lo >= hi);
-	for (uint64_t i = lo; i < hi; i++) {
+	for (i = lo; i < hi; i++) {
 		if (sm_remove(map, i) == SM_IDX_MAX) {
 			return (false);
 		}
@@ -8093,6 +8096,16 @@ sm_remove_range(sm_t *map, uint64_t lo, uint64_t hi)
 sm_t *
 sm_xor(const sm_t *a, const sm_t *b)
 {
+	size_t cap;
+	sm_t *r;
+	__sm_emitter_t em;
+	__sm_run_iter_t ia, ib;
+	uint64_t alo = 0, ahi = 0, blo = 0, bhi = 0;
+	bool have_a, have_b;
+	/* pos = left edge of the not-yet-emitted portion of the current
+	 * a/b runs; overlaps cancel, gaps in exactly one survive. */
+	uint64_t pos = 0;
+	bool have_pos = false;
 	if (sm_is_empty(a) && sm_is_empty(b))
 		return (NULL);
 	if (sm_is_empty(a))
@@ -8101,8 +8114,8 @@ sm_xor(const sm_t *a, const sm_t *b)
 		return (sm_copy(a));
 
 	/* Allocate a result big enough for the union (upper bound). */
-	const size_t cap = sm_get_capacity(a) + sm_get_capacity(b);
-	sm_t *r = sm_create(cap > 1024 ? cap : 1024);
+	cap = sm_get_capacity(a) + sm_get_capacity(b);
+	r = sm_create(cap > 1024 ? cap : 1024);
 	if (r == NULL)
 		return (NULL);
 
@@ -8111,19 +8124,12 @@ sm_xor(const sm_t *a, const sm_t *b)
 	 * size of the operands, not their popcount, so a 2^31-bit run is
 	 * one iteration rather than 2^31.  Each survivor is emitted whole
 	 * through the ordered emitter, so a giant run costs O(chunks). */
-	__sm_emitter_t em;
 	memset(&em, 0, sizeof(em));
 	em.resultp = &r;
-	__sm_run_iter_t ia, ib;
 	__sm_run_iter_init(&ia, a);
 	__sm_run_iter_init(&ib, b);
-	uint64_t alo = 0, ahi = 0, blo = 0, bhi = 0;
-	bool have_a = __sm_run_next(&ia, &alo, &ahi);
-	bool have_b = __sm_run_next(&ib, &blo, &bhi);
-	/* pos = left edge of the not-yet-emitted portion of the current
-	 * a/b runs; overlaps cancel, gaps in exactly one survive. */
-	uint64_t pos = 0;
-	bool have_pos = false;
+	have_a = __sm_run_next(&ia, &alo, &ahi);
+	have_b = __sm_run_next(&ib, &blo, &bhi);
 	while (have_a || have_b) {
 		/* The next boundary among the two active runs. */
 		uint64_t lo = have_a ? alo : blo;
@@ -8197,15 +8203,20 @@ sm_andnot(const sm_t *a, const sm_t *b)
 sm_t *
 sm_extract_range(const sm_t *map, uint64_t lo, uint64_t hi)
 {
+	size_t cap;
+	sm_t *r;
+	__sm_emitter_t em;
+	__sm_run_iter_t it;
+	uint64_t rlo = 0, rhi = 0;
 	if (map == NULL || sm_is_empty(map) || lo >= hi)
 		return (NULL);
 
 	/* Estimate result capacity from the input -- worst case is the same
 	 * shape, capped to the requested range size. */
-	size_t cap = sm_get_size((sm_t *)map) + 64;
+	cap = sm_get_size((sm_t *)map) + 64;
 	if (cap < 1024)
 		cap = 1024;
-	sm_t *r = sm_create(cap);
+	r = sm_create(cap);
 	if (r == NULL)
 		return (NULL);
 
@@ -8213,12 +8224,9 @@ sm_extract_range(const sm_t *map, uint64_t lo, uint64_t hi)
 	 * Run-based, so a 2^31-bit run outside the window costs one
 	 * iteration rather than 2^31 bit lookups, and a run inside the
 	 * window is emitted whole in O(chunks) via the ordered emitter. */
-	__sm_emitter_t em;
 	memset(&em, 0, sizeof(em));
 	em.resultp = &r;
-	__sm_run_iter_t it;
 	__sm_run_iter_init(&it, map);
-	uint64_t rlo = 0, rhi = 0;
 	while (__sm_run_next(&it, &rlo, &rhi)) {
 		if (rhi <= lo)
 			continue;
@@ -8249,13 +8257,13 @@ sm_extract_range(const sm_t *map, uint64_t lo, uint64_t hi)
 size_t
 sm_xor_cardinality(const sm_t *a, const sm_t *b)
 {
+	uint64_t inter = 0, uni = 0;
 	if (sm_is_empty(a) && sm_is_empty(b))
 		return (0);
 	if (sm_is_empty(a))
 		return (sm_cardinality((sm_t *)b));
 	if (sm_is_empty(b))
 		return (sm_cardinality((sm_t *)a));
-	uint64_t inter = 0, uni = 0;
 	__sm_run_pair_counts(a, b, NULL, NULL, &inter, &uni);
 	return ((size_t)(uni - inter));
 }
