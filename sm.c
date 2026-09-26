@@ -661,8 +661,9 @@ __sm_chunk_rle_get_capacity(const __sm_chunk_t *chunk)
 static void
 __sm_chunk_rle_set_capacity(const __sm_chunk_t *chunk, const size_t capacity)
 {
+	__sm_bitvec_t w;
 	__sm_assert(capacity <= SM_CHUNK_RLE_MAX_CAPACITY);
-	__sm_bitvec_t w = chunk->m_data[0];
+	w = chunk->m_data[0];
 	w &= ~SM_RLE_CAPACITY_MASK;
 	w |= ((__sm_bitvec_t)capacity << 31) & SM_RLE_CAPACITY_MASK;
 	chunk->m_data[0] = w;
@@ -703,9 +704,10 @@ __sm_chunk_rle_get_length(const __sm_chunk_t *chunk)
 static void
 __sm_chunk_rle_set_length(const __sm_chunk_t *chunk, const size_t length)
 {
+	__sm_bitvec_t w;
 	__sm_assert(length <= SM_CHUNK_RLE_MAX_LENGTH);
 	__sm_assert(length <= __sm_chunk_rle_get_capacity(chunk));
-	__sm_bitvec_t w = chunk->m_data[0];
+	w = chunk->m_data[0];
 	w &= ~SM_RLE_LENGTH_MASK;
 	w |= length & SM_RLE_LENGTH_MASK;
 	chunk->m_data[0] = w;
@@ -984,7 +986,7 @@ static size_t
 __sm_chunk_calc_vector_size(const uint8_t b)
 {
 	/* clang-format off */
-  static int lookup[] = {
+  static const size_t lookup[] = {
     0,  0,  1,  0,  0,  0,  1,  0,  1,  1,  2,  1,  0,  0,  1,  0,
     0,  0,  1,  0,  0,  0,  1,  0,  1,  1,  2,  1,  0,  0,  1,  0,
     1,  1,  2,  1,  1,  1,  2,  1,  2,  2,  3,  2,  1,  1,  2,  1,
@@ -1115,14 +1117,16 @@ __sm_chunk_init(__sm_chunk_t *chunk, uint8_t *data)
 SM_ALWAYS_INLINE size_t
 __sm_chunk_get_capacity(const __sm_chunk_t *chunk)
 {
+	size_t capacity = SM_CHUNK_MAX_CAPACITY;
+	__sm_bitvec_t desc;
+	size_t i;
+
 	/* Handle RLE which encodes the capacity in the vector. */
 	if (SM_UNLIKELY(__sm_chunk_is_rle(chunk))) {
 		return (__sm_chunk_rle_get_capacity(chunk));
 	}
 
-	size_t capacity = SM_CHUNK_MAX_CAPACITY;
-	const __sm_bitvec_t desc = *chunk->m_data;
-	size_t i;
+	desc = *chunk->m_data;
 
 	for (i = 0; i < sizeof(__sm_bitvec_t); i++) {
 		const uint8_t b = __sm_desc_flag_byte(desc, i);
@@ -1154,17 +1158,18 @@ __sm_chunk_get_capacity(const __sm_chunk_t *chunk)
 static void
 __sm_chunk_increase_capacity(const __sm_chunk_t *chunk, const size_t capacity)
 {
+	const size_t initial_capacity = __sm_chunk_get_capacity(chunk);
+	size_t increased = 0;
+	size_t i;
+
 	__sm_assert(capacity % SM_BITS_PER_VECTOR == 0);
 	__sm_assert(capacity <= SM_CHUNK_MAX_CAPACITY);
-	__sm_assert(capacity > __sm_chunk_get_capacity(chunk));
+	__sm_assert(capacity > initial_capacity);
 
-	const size_t initial_capacity = __sm_chunk_get_capacity(chunk);
 	if (capacity <= initial_capacity || capacity > SM_CHUNK_MAX_CAPACITY) {
 		return;
 	}
 
-	size_t increased = 0;
-	size_t i;
 	for (i = 0; i < sizeof(__sm_bitvec_t); i++) {
 		const uint8_t b = __sm_desc_flag_byte(*chunk->m_data, i);
 		int j;
@@ -1273,6 +1278,10 @@ __sm_chunk_get_size(const __sm_chunk_t *chunk)
 SM_ALWAYS_INLINE bool
 __sm_chunk_is_set(const __sm_chunk_t *chunk, const size_t idx)
 {
+	size_t bv;
+	size_t flags;
+	__sm_bitvec_t w;
+
 	if (SM_UNLIKELY(__sm_chunk_is_rle(chunk))) {
 		if (idx < __sm_chunk_rle_get_length(chunk)) {
 			return (true);
@@ -1287,11 +1296,11 @@ __sm_chunk_is_set(const __sm_chunk_t *chunk, const size_t idx)
 		return (false);
 	}
 	/* in which __sm_bitvec_t is |idx| stored? */
-	const size_t bv = idx / SM_BITS_PER_VECTOR;
+	bv = idx / SM_BITS_PER_VECTOR;
 	__sm_assert(bv < SM_FLAGS_PER_INDEX);
 
 	/* now retrieve the flags of that __sm_bitvec_t */
-	const size_t flags = SM_CHUNK_GET_FLAGS(*chunk->m_data, bv);
+	flags = SM_CHUNK_GET_FLAGS(*chunk->m_data, bv);
 	switch (flags) {
 	case SM_PAYLOAD_ZEROS:
 	case SM_PAYLOAD_NONE:
@@ -1304,8 +1313,7 @@ __sm_chunk_is_set(const __sm_chunk_t *chunk, const size_t idx)
 	}
 
 	/* get the __sm_bitvec_t at |bv| */
-	const __sm_bitvec_t w =
-	    chunk->m_data[1 + __sm_chunk_get_position(chunk, bv)];
+	w = chunk->m_data[1 + __sm_chunk_get_position(chunk, bv)];
 	/* and finally check the bit in that __sm_bitvec_t */
 	return ((w & (__sm_bitvec_t)1 << idx % SM_BITS_PER_VECTOR) > 0);
 }
@@ -1469,10 +1477,10 @@ __sm_chunk_select(const __sm_chunk_t *chunk, ssize_t n, ssize_t *offset,
 			/* RLE has run of 1s from index 0 to length-1 */
 			if (n < (ssize_t)length) {
 				*offset = -1;
-				return (n); /* nth set bit is at index n */
+				return ((size_t)n); /* nth set bit is at index n */
 			} else {
 				*offset = n -
-				    length; /* propagate remainder to next chunk */
+				    (ssize_t)length; /* propagate remainder to next chunk */
 				return (capacity);
 			}
 		} else {
@@ -1487,10 +1495,10 @@ __sm_chunk_select(const __sm_chunk_t *chunk, ssize_t n, ssize_t *offset,
 			if (n < (ssize_t)unset_count) {
 				*offset = -1;
 				return (length +
-				    n); /* nth unset bit is at (length + n) */
+				    (size_t)n); /* nth unset bit is at (length + n) */
 			} else {
 				*offset =
-				    n - unset_count; /* propagate remainder */
+				    n - (ssize_t)unset_count; /* propagate remainder */
 				return (capacity);
 			}
 		}
@@ -1826,9 +1834,16 @@ static size_t
 __sm_chunk_scan(const __sm_chunk_t *chunk, const __sm_idx_t start,
     void (*scanner)(uint64_t[], size_t, void *aux), size_t skip, void *aux)
 {
+	uint64_t buffer[SM_BITS_PER_VECTOR];
+	size_t i;
+	size_t pos = 0;
+	size_t skipped = 0;
+	__sm_bitvec_t scan_desc;
+
 	/* RLE fast path */
 	if (SM_UNLIKELY(__sm_chunk_is_rle(chunk))) {
 		const size_t length = __sm_chunk_rle_get_length(chunk);
+		size_t scan_start;
 
 		/* RLE chunks only contain set bits from 0 to length-1 */
 		if (skip >= length) {
@@ -1836,11 +1851,7 @@ __sm_chunk_scan(const __sm_chunk_t *chunk, const __sm_idx_t start,
 		}
 
 		/* Skip first `skip` bits, then scan the rest */
-		const size_t scan_start = skip;
-
-		/* Process in batches using same buffer size as sparse code */
-		uint64_t buffer[SM_BITS_PER_VECTOR];
-		size_t i;
+		scan_start = skip;
 
 		for (i = scan_start; i < length;) {
 			size_t batch_size = SM_BITS_PER_VECTOR;
@@ -1865,11 +1876,7 @@ __sm_chunk_scan(const __sm_chunk_t *chunk, const __sm_idx_t start,
 	 * 'pos' tracks the bit offset within the chunk (each vector = SM_BITS_PER_VECTOR).
 	 * 'skip' counts set bits remaining to skip before scanning.
 	 * Returns the number of set bits skipped in this chunk. */
-	size_t pos = 0;
-	size_t skipped = 0;
-	uint64_t buffer[SM_BITS_PER_VECTOR];
-	const __sm_bitvec_t scan_desc = *chunk->m_data;
-	size_t i;
+	scan_desc = *chunk->m_data;
 	for (i = 0; i < sizeof(__sm_bitvec_t); i++) {
 		const uint8_t b = __sm_desc_flag_byte(scan_desc, i);
 		int j;
