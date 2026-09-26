@@ -7705,14 +7705,18 @@ __sm_run_next_raw(__sm_run_iter_t *it, uint64_t *lo, uint64_t *hi)
 		if (it->idx >= it->count) {
 			return (false);
 		}
-		const __sm_idx_t start = __sm_load_idx((const uint8_t *)it->p);
-		__sm_chunk_t chunk;
-		__sm_chunk_init(&chunk, it->p + SM_SIZEOF_OVERHEAD);
-		const size_t chunk_bytes =
-		    SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&chunk);
-		__sm_run_decode_chunk(it, start);
-		it->p += chunk_bytes;
-		it->idx++;
+		{
+			const __sm_idx_t start =
+			    __sm_load_idx((const uint8_t *)it->p);
+			__sm_chunk_t chunk;
+			size_t chunk_bytes;
+			__sm_chunk_init(&chunk, it->p + SM_SIZEOF_OVERHEAD);
+			chunk_bytes =
+			    SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&chunk);
+			__sm_run_decode_chunk(it, start);
+			it->p += chunk_bytes;
+			it->idx++;
+		}
 		/* loop back to drain the freshly-decoded run list */
 	}
 }
@@ -7780,12 +7784,13 @@ __sm_run_pair_counts(const sm_t *a, const sm_t *b, uint64_t *cnt_a,
     uint64_t *cnt_b, uint64_t *inter, uint64_t *uni)
 {
 	__sm_run_iter_t ia, ib;
+	uint64_t alo = 0, ahi = 0, blo = 0, bhi = 0;
+	bool have_a, have_b;
+	uint64_t ca = 0, cb = 0, ci = 0;
 	__sm_run_iter_init(&ia, a);
 	__sm_run_iter_init(&ib, b);
-	uint64_t alo = 0, ahi = 0, blo = 0, bhi = 0;
-	bool have_a = __sm_run_next(&ia, &alo, &ahi);
-	bool have_b = __sm_run_next(&ib, &blo, &bhi);
-	uint64_t ca = 0, cb = 0, ci = 0;
+	have_a = __sm_run_next(&ia, &alo, &ahi);
+	have_b = __sm_run_next(&ib, &blo, &bhi);
 	/* Intersection by interval sweep: at each step add the overlap of
 	 * the two active runs, then consume whichever ends first so the
 	 * other can still overlap the consumed side's later runs.  Runs
@@ -7821,11 +7826,11 @@ __sm_run_pair_counts(const sm_t *a, const sm_t *b, uint64_t *cnt_a,
 size_t
 sm_union_cardinality(const sm_t *a, const sm_t *b)
 {
+	uint64_t uni = 0;
 	if (sm_is_empty(a))
 		return (b ? sm_cardinality((sm_t *)b) : 0);
 	if (sm_is_empty(b))
 		return (sm_cardinality((sm_t *)a));
-	uint64_t uni = 0;
 	__sm_run_pair_counts(a, b, NULL, NULL, NULL, &uni);
 	return ((size_t)uni);
 }
@@ -7833,9 +7838,9 @@ sm_union_cardinality(const sm_t *a, const sm_t *b)
 size_t
 sm_intersection_cardinality(const sm_t *a, const sm_t *b)
 {
+	uint64_t inter = 0;
 	if (sm_is_empty(a) || sm_is_empty(b))
 		return (0);
-	uint64_t inter = 0;
 	__sm_run_pair_counts(a, b, NULL, NULL, &inter, NULL);
 	return ((size_t)inter);
 }
@@ -7843,11 +7848,11 @@ sm_intersection_cardinality(const sm_t *a, const sm_t *b)
 size_t
 sm_difference_cardinality(const sm_t *a, const sm_t *b)
 {
+	uint64_t ca = 0, inter = 0;
 	if (sm_is_empty(a))
 		return (0);
 	if (sm_is_empty(b))
 		return (sm_cardinality((sm_t *)a));
-	uint64_t ca = 0, inter = 0;
 	__sm_run_pair_counts(a, b, &ca, NULL, &inter, NULL);
 	return ((size_t)(ca - inter));
 }
@@ -7855,11 +7860,11 @@ sm_difference_cardinality(const sm_t *a, const sm_t *b)
 bool
 sm_nonempty_difference(const sm_t *a, const sm_t *b)
 {
+	uint64_t ca = 0, inter = 0;
 	if (sm_is_empty(a))
 		return (false);
 	if (sm_is_empty(b))
 		return (true);
-	uint64_t ca = 0, inter = 0;
 	__sm_run_pair_counts(a, b, &ca, NULL, &inter, NULL);
 	return (ca > inter);
 }
@@ -7867,9 +7872,9 @@ sm_nonempty_difference(const sm_t *a, const sm_t *b)
 double
 sm_jaccard_index(const sm_t *a, const sm_t *b)
 {
+	uint64_t inter = 0, uni = 0;
 	if (sm_is_empty(a) && sm_is_empty(b))
 		return (0.0);
-	uint64_t inter = 0, uni = 0;
 	__sm_run_pair_counts(a, b, NULL, NULL, &inter, &uni);
 	return (uni == 0 ? 0.0 : (double)inter / (double)uni);
 }
@@ -7909,11 +7914,14 @@ sm_add_many(sm_t *map, const uint64_t *arr, size_t n)
 		return (false);
 	memcpy(sorted, arr, n * sizeof(uint64_t));
 	qsort(sorted, n, sizeof(uint64_t), __sm_cmp_u64);
-	sm_cursor_t cur = SM_CURSOR_INIT;
-	for (size_t i = 0; i < n; i++) {
-		if (__sm_add_c(map, sorted[i], &cur) == SM_IDX_MAX) {
-			ok = false;
-			break;
+	{
+		sm_cursor_t cur = SM_CURSOR_INIT;
+		size_t i;
+		for (i = 0; i < n; i++) {
+			if (__sm_add_c(map, sorted[i], &cur) == SM_IDX_MAX) {
+				ok = false;
+				break;
+			}
 		}
 	}
 	__sm_free(sorted);
@@ -7944,32 +7952,38 @@ sm_add_many_grow(sm_t **map, const uint64_t *arr, size_t n)
 	memcpy(sorted, arr, n * sizeof(uint64_t));
 	if (n > 1)
 		qsort(sorted, n, sizeof(uint64_t), __sm_cmp_u64);
-	sm_cursor_t cur = SM_CURSOR_INIT;
-	for (size_t i = 0; i < n; i++) {
-		int retries = 0;
-		sm_t *before = *map;
-		while (__sm_add_c(*map, sorted[i], &cur) == SM_IDX_MAX) {
-			if (++retries > 16) {
-				ok = false;
-				break;
+	{
+		sm_cursor_t cur = SM_CURSOR_INIT;
+		size_t i;
+		for (i = 0; i < n; i++) {
+			int retries = 0;
+			sm_t *before = *map;
+			while (__sm_add_c(*map, sorted[i], &cur) ==
+			    SM_IDX_MAX) {
+				size_t new_cap;
+				sm_t *grown;
+				if (++retries > 16) {
+					ok = false;
+					break;
+				}
+				/* ENOSPC: grow geometrically with a 4 KiB floor. */
+				new_cap = sm_get_capacity(*map) * 2;
+				if (new_cap < 4096)
+					new_cap = 4096;
+				grown = sm_set_data_size(*map, NULL, new_cap);
+				if (grown == NULL) {
+					ok = false;
+					break;
+				}
+				*map = grown;
 			}
-			/* ENOSPC: grow geometrically with a 4 KiB floor. */
-			size_t new_cap = sm_get_capacity(*map) * 2;
-			if (new_cap < 4096)
-				new_cap = 4096;
-			sm_t *grown = sm_set_data_size(*map, NULL, new_cap);
-			if (grown == NULL) {
-				ok = false;
+			if (!ok)
 				break;
-			}
-			*map = grown;
+			/* A grow may have relocated the buffer; the cursor's byte
+			 * offset is then meaningless.  Reset it when *map moved. */
+			if (*map != before)
+				cur = (sm_cursor_t)SM_CURSOR_INIT;
 		}
-		if (!ok)
-			break;
-		/* A grow may have relocated the buffer; the cursor's byte
-		 * offset is then meaningless.  Reset it when *map moved. */
-		if (*map != before)
-			cur = (sm_cursor_t)SM_CURSOR_INIT;
 	}
 	__sm_free(sorted);
 	return (ok);
