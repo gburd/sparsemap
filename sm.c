@@ -4597,9 +4597,10 @@ __sm_chunk_view(const sm_t *map, bool *owned)
 double
 sm_capacity_remaining(const sm_t *map)
 {
+	size_t cap;
 	if (map == NULL)
 		return (0.0);
-	const size_t cap = __sm_cap(map);
+	cap = __sm_cap(map);
 	if (map->m_data_used >= cap) {
 		return (0);
 	}
@@ -4644,6 +4645,10 @@ sm_get_capacity(const sm_t *map)
 SM_HOT bool
 sm_contains(const sm_t *map, uint64_t idx, sm_cursor_t *cur)
 {
+	ssize_t offset;
+	uint8_t *p;
+	__sm_idx_t start;
+	__sm_chunk_t chunk;
 	/* Defensive: NULL or empty maps contain nothing.  Accepting NULL is
 	 * cheap insurance for consumers that pass the result of
 	 * sm_intersection / sm_difference / sm_xor unchecked, which
@@ -4657,7 +4662,7 @@ sm_contains(const sm_t *map, uint64_t idx, sm_cursor_t *cur)
 	__sm_assert(sm_get_size((sm_t *)map) >= SM_SIZEOF_OVERHEAD);
 
 	/* Get the __sm_chunk_t which manages this index */
-	const ssize_t offset = __sm_get_chunk_offset(map, idx, cur);
+	offset = __sm_get_chunk_offset(map, idx, cur);
 
 	/* No __sm_chunk_t's available -> the bit is not set */
 	if (offset == -1) {
@@ -4665,9 +4670,8 @@ sm_contains(const sm_t *map, uint64_t idx, sm_cursor_t *cur)
 	}
 
 	/* Otherwise load the __sm_chunk_t */
-	uint8_t *p = __sm_get_chunk_data(map, offset);
-	const __sm_idx_t start = __sm_load_idx((const uint8_t *)p);
-	__sm_chunk_t chunk;
+	p = __sm_get_chunk_data(map, (size_t)offset);
+	start = __sm_load_idx((const uint8_t *)p);
 	__sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
 
 	/*
@@ -4710,6 +4714,16 @@ static __sm_idx_t
 __sm_map_unset(sm_t *map, uint64_t idx, const bool coalesce)
 {
 	const uint64_t ret_idx = idx;
+	size_t offset;
+	size_t chunk_offset;
+	uint8_t *p = NULL;
+	__sm_idx_t start = 0;
+	__sm_chunk_t chunk;
+	size_t capacity;
+	size_t pos = 0;
+	__sm_bitvec_t vec = ~(__sm_bitvec_t)0;
+
+	__sm_chunk_init(&chunk, NULL);
 	__sm_assert(sm_get_size(map) >= SM_SIZEOF_OVERHEAD);
 
 	/* Clearing a bit could require an additional vector, let's ensure we have that
@@ -4717,8 +4731,8 @@ __sm_map_unset(sm_t *map, uint64_t idx, const bool coalesce)
 	SM_ENOUGH_SPACE(SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t));
 
 	/* Determine if there is a chunk that could contain this index. */
-	size_t offset = __sm_get_chunk_offset(map, idx, NULL);
-	size_t chunk_offset = offset;
+	offset = (size_t)__sm_get_chunk_offset(map, idx, NULL);
+	chunk_offset = offset;
 
 	if ((ssize_t)offset == -1) {
 		/* There are no chunks in the map, there is nothing to clear, this is a
@@ -4734,8 +4748,8 @@ __sm_map_unset(sm_t *map, uint64_t idx, const bool coalesce)
 	 * - the index is beyond the end of the last chunk, or
 	 * - we found a chunk that can contain this index.
 	 */
-	uint8_t *p = __sm_get_chunk_data(map, offset);
-	const __sm_idx_t start = __sm_load_idx((const uint8_t *)p);
+	p = __sm_get_chunk_data(map, offset);
+	start = __sm_load_idx((const uint8_t *)p);
 	__sm_assert(start == __sm_get_chunk_aligned_offset(start));
 
 	if (idx < start) {
@@ -4747,9 +4761,8 @@ __sm_map_unset(sm_t *map, uint64_t idx, const bool coalesce)
 		goto done;
 	}
 
-	__sm_chunk_t chunk;
 	__sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
-	const size_t capacity = __sm_chunk_get_capacity(&chunk);
+	capacity = __sm_chunk_get_capacity(&chunk);
 
 	if (idx - start >= capacity) {
 		/*
@@ -4773,6 +4786,7 @@ __sm_map_unset(sm_t *map, uint64_t idx, const bool coalesce)
 
 		/* Is the 0-based index beyond the run length? */
 		const size_t length = __sm_chunk_rle_get_length(&chunk);
+		__sm_chunk_sep_t sep;
 		if (idx >= start + length) {
 			goto done;
 		}
@@ -4813,7 +4827,6 @@ __sm_map_unset(sm_t *map, uint64_t idx, const bool coalesce)
 		 * starting offset, so let's first find what we'll call the "pivot" chunk
 		 * wherein we'll find the index we need to clear. That chunk will be sparse.
 		 */
-		__sm_chunk_sep_t sep;
 		memset(&sep, 0, sizeof(sep));
 		sep.target.p = p;
 		sep.target.offset = offset;
@@ -4832,8 +4845,6 @@ __sm_map_unset(sm_t *map, uint64_t idx, const bool coalesce)
 		goto done;
 	}
 
-	size_t pos = 0;
-	__sm_bitvec_t vec = ~(__sm_bitvec_t)0;
 	switch (__sm_chunk_clr_bit(&chunk, idx - start, &pos)) {
 	case SM_OK:
 		break;
@@ -4894,12 +4905,14 @@ sm_remove(sm_t *map, const uint64_t idx)
 	if (__sm_is_small(map)) {
 		const size_t w = (size_t)(idx / 64);
 		if (w < __sm_small_nwords(map)) {
+			size_t n;
+			uint64_t *words;
 			__sm_small_words(map)[w] &=
 			    ~((uint64_t)1 << (idx % 64));
 			/* Shrink the trailing all-zero words so the footprint
 			 * tracks the new maximum index. */
-			size_t n = __sm_small_nwords(map);
-			uint64_t *words = __sm_small_words(map);
+			n = __sm_small_nwords(map);
+			words = __sm_small_words(map);
 			while (n > 0 && words[n - 1] == 0) {
 				n--;
 			}
