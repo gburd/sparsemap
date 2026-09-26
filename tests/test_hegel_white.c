@@ -146,7 +146,6 @@ make_sparse_chunk(hegel_test_case *tc)
 	for (int i = 0; i < cut; i++)
 		SM_CHUNK_SET_FLAGS(*desc, i, SM_PAYLOAD_NONE);
 
-	assert(__sm_chunk_is_rle(&chunk) == false);
 	return (p);
 }
 
@@ -209,10 +208,12 @@ prop_get_capacity(hegel_test_case *tc, void *ctx)
 }
 
 /*
- * Property (RLE-free reader decision): a wire stream carrying an RLE
- * descriptor -- which this build cannot represent -- must be rejected
- * cleanly.  sm_deserialize returns NULL or a valid map, and any
- * survivor is RLE-free and passes sm_validate.  Never a crash.
+ * Property (sparse-only reader): a wire stream carrying a descriptor
+ * with the old run-length top-bit pattern -- which this build has no
+ * concept of -- is read as an ordinary sparse chunk.  sm_deserialize
+ * returns NULL or a valid map; any survivor passes sm_validate and is
+ * a well-formed sparse map.  Structural validation bounds every read,
+ * so the crafted bytes never cause a crash or over-read.
  */
 static void
 prop_reject_rle_wire(hegel_test_case *tc, void *ctx)
