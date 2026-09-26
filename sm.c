@@ -8990,12 +8990,17 @@ sm_intersection(const sm_t *a, const sm_t *b)
 
 	const size_t a_count = __sm_get_chunk_count(a);
 	const size_t b_count = __sm_get_chunk_count(b);
+	size_t cap;
+	sm_t *result;
+	uint8_t *ap;
+	uint8_t *bp;
+	size_t ai = 0, bi = 0;
 
 	if (a_count == 0 || b_count == 0) {
 		return (NULL);
 	}
 
-	size_t cap = a->m_data_used;
+	cap = a->m_data_used;
 	{
 		size_t cap_b = b->m_data_used;
 		if (cap_b > cap)
@@ -9004,14 +9009,13 @@ sm_intersection(const sm_t *a, const sm_t *b)
 	if (cap < 1024)
 		cap = 1024;
 
-	sm_t *result = sparsemap(cap);
+	result = sparsemap(cap);
 	if (result == NULL) {
 		return (NULL);
 	}
 
-	uint8_t *ap = __sm_get_chunk_data(a, 0);
-	uint8_t *bp = __sm_get_chunk_data(b, 0);
-	size_t ai = 0, bi = 0;
+	ap = __sm_get_chunk_data(a, 0);
+	bp = __sm_get_chunk_data(b, 0);
 
 	while (ai < a_count && bi < b_count) {
 		/* Read chunk a metadata */
@@ -9060,21 +9064,22 @@ sm_intersection(const sm_t *a, const sm_t *b)
 			/* Word-level AND of two aligned sparse chunks */
 			__sm_bitvec_t aw[32], bw[32];
 			int ac[32], bc[32];
+			__sm_bitvec_t rw[32];
+			int rc[32];
+			__sm_bitvec_t desc;
+			__sm_bitvec_t vecs[32];
+			int nvecs;
+			int i;
 			__sm_expand_sparse_chunk(&a_chunk, aw, ac);
 			__sm_expand_sparse_chunk(&b_chunk, bw, bc);
 
-			__sm_bitvec_t rw[32];
-			int rc[32];
 			__sm_words_and(rw, aw, bw);
-			for (int i = 0; i < (int)SM_FLAGS_PER_INDEX; i++) {
+			for (i = 0; i < (int)SM_FLAGS_PER_INDEX; i++) {
 				rc[i] = (ac[i] && bc[i]) ? 1 : 0;
 				if (!rc[i])
 					rw[i] = 0;
 			}
 
-			__sm_bitvec_t desc;
-			__sm_bitvec_t vecs[32];
-			int nvecs;
 			if (__sm_encode_sparse_chunk(rw, rc, &desc, vecs,
 			        &nvecs)) {
 				if (!__sm_append_sparse_chunk(&result, a_start,
@@ -9115,6 +9120,12 @@ sm_intersection(const sm_t *a, const sm_t *b)
 			    bw[SM_FLAGS_PER_INDEX];
 			int ac[SM_FLAGS_PER_INDEX], bc[SM_FLAGS_PER_INDEX];
 			__sm_idx_t result_start;
+			__sm_bitvec_t rw[SM_FLAGS_PER_INDEX];
+			int rc[SM_FLAGS_PER_INDEX];
+			__sm_bitvec_t desc;
+			__sm_bitvec_t vecs[SM_FLAGS_PER_INDEX];
+			int nvecs;
+			int i;
 
 			if (!a_rle && !b_rle) {
 				/* Both sparse but misaligned (shouldn't normally happen) */
@@ -9136,25 +9147,20 @@ sm_intersection(const sm_t *a, const sm_t *b)
 			} else {
 				/* Both RLE: already handled above, should not reach here */
 				result_start = a_start;
-				for (int i = 0; i < (int)SM_FLAGS_PER_INDEX;
+				for (i = 0; i < (int)SM_FLAGS_PER_INDEX;
 				     i++) {
 					aw[i] = bw[i] = 0;
 					ac[i] = bc[i] = 0;
 				}
 			}
 
-			__sm_bitvec_t rw[SM_FLAGS_PER_INDEX];
-			int rc[SM_FLAGS_PER_INDEX];
 			__sm_words_and(rw, aw, bw);
-			for (int i = 0; i < (int)SM_FLAGS_PER_INDEX; i++) {
+			for (i = 0; i < (int)SM_FLAGS_PER_INDEX; i++) {
 				rc[i] = (ac[i] && bc[i]) ? 1 : 0;
 				if (!rc[i])
 					rw[i] = 0;
 			}
 
-			__sm_bitvec_t desc;
-			__sm_bitvec_t vecs[SM_FLAGS_PER_INDEX];
-			int nvecs;
 			if (__sm_encode_sparse_chunk(rw, rc, &desc, vecs,
 			        &nvecs)) {
 				if (!__sm_append_sparse_chunk(&result,
