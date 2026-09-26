@@ -404,6 +404,15 @@ sm_bitmap_from_uint64(sm_t *map, int offset, uint64_t number)
   }
 }
 
+void
+sm_bitmap_from_uint64_at(sm_t *map, uint64_t base, uint64_t number)
+{
+  for (int i = 0; i < 64; i++) {
+    bool bit = number & ((uint64_t)1 << i);
+    sm_assign(map, base + (uint64_t)i, bit);
+  }
+}
+
 uint64_t
 sm_add_span(sm_t *map, int map_size, int span_length)
 {

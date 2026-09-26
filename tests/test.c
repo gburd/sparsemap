@@ -742,12 +742,14 @@ test_api_scan_tear_down(void *fixture)
 void
 scan_for_0xfeedfacebadcoffee(uint64_t v[], size_t n, void *aux)
 {
+  /* Absolute bit positions of the pattern, shifted by BASE=1024 so the
+   * map is in chunk mode (word 16) rather than the small-set flat form. */
   size_t bit_pos[] = { 1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 22, 23, 24, 26, 27, 29, 31, 32, 33, 34, 35, 38, 39, 41, 43, 44, 45, 46, 47, 48, 50, 51,
     53, 54, 55, 57, 58, 59, 60, 61, 62, 63 };
   (void)aux;
 
   for (size_t i = 0; i < n; i++) {
-    assert(v[i] == bit_pos[i]);
+    assert(v[i] == 1024 + bit_pos[i]);
   }
 }
 static MunitResult
@@ -757,7 +759,9 @@ test_api_scan(const MunitParameter params[], void *data)
   (void)params;
 
   assert_ptr_not_null(map);
-  sm_bitmap_from_uint64(map, 0, ((uint64_t)0xfeedface << 32) | 0xbadc0ffee);
+  /* Place the 64-bit pattern at base 1024 -> chunk mode; scan must yield
+   * the same relative bit positions, shifted by 1024. */
+  sm_bitmap_from_uint64_at(map, 1024, ((uint64_t)0xfeedface << 32) | 0xbadc0ffee);
   sm_scan(map, scan_for_0xfeedfacebadcoffee, 0, NULL);
 
   return MUNIT_OK;
@@ -1210,7 +1214,8 @@ test_api_select_setup(const MunitParameter params[], void *user_data)
   sm_t *map = (sm_t *)test_api_setup(params, user_data);
 
   sm_init(map, buf, 1024);
-  sm_bitmap_from_uint64(map, 0, ((uint64_t)0xfeedface << 32) | 0xbadc0ffee);
+  /* Base 1024 -> chunk mode, so select exercises the chunk codec. */
+  sm_bitmap_from_uint64_at(map, 1024, ((uint64_t)0xfeedface << 32) | 0xbadc0ffee);
 
   return (void *)map;
 }
@@ -1231,10 +1236,11 @@ test_api_select(const MunitParameter params[], void *data)
   assert_ptr_not_null(map);
 
   /* NOTE: select() is 0-based, to get the bit position of the 1st logical bit set
-     call select(map, 0), to get the 18th, select(map, 17), etc. */
-  assert_true(sm_select(map, 0, true) == 1);
-  assert_true(sm_select(map, 4, true) == 6);
-  assert_true(sm_select(map, 17, true) == 26);
+     call select(map, 0), to get the 18th, select(map, 17), etc.  Absolute
+     return values are shifted by BASE=1024 with the pattern. */
+  assert_true(sm_select(map, 0, true) == 1024 + 1);
+  assert_true(sm_select(map, 4, true) == 1024 + 6);
+  assert_true(sm_select(map, 17, true) == 1024 + 26);
 
   return MUNIT_OK;
 }
@@ -1553,16 +1559,17 @@ test_api_rank_true(const MunitParameter params[], void *data)
   assert_ptr_not_null(map);
 
   for (int i = 0; i < 10; i++) {
-    sm_add(map, i);
+    sm_add(map, 1024 + i);
   }
   /* rank() is also 0-based, for consistency (and confusion sake); consider the
-     range as [start, end] of [0, 9] counts the bits set in the first 10
-     positions (starting from the LSB) in the index. */
+     range as [start, end] of [1024, 1033] counts the bits set in the first 10
+     positions of the shifted (chunk-mode) run.  Shifted by 1024 so the run is
+     stored as a chunk, not the small-set flat form. */
   r1 = rank_uint64((uint64_t)-1, 0, 9);
-  r2 = sm_rank(map, 0, 9, true);
+  r2 = sm_rank(map, 1024, 1024 + 9, true);
   assert_true(r1 == r2);
-  assert_true(sm_rank(map, 0, 9, true) == 10);
-  assert_true(sm_rank(map, 1000, 1050, true) == 0);
+  assert_true(sm_rank(map, 1024, 1024 + 9, true) == 10);
+  assert_true(sm_rank(map, 3000, 3050, true) == 0);
 
   sm_clear(map);
 
@@ -1834,68 +1841,70 @@ test_api_intersection(const MunitParameter params[], void *data)
   (void)params;
   (void)data;
 
-  /* Test 1: Disjoint maps = empty result */
+  /* Test 1: Disjoint maps = empty result.  Indices shifted by 1024 so
+   * both maps are in chunk mode (index >= 1024), exercising the sparse
+   * chunk path rather than the small-set flat form. */
   {
     sm_t *a = sparsemap(1024);
     sm_t *b = sparsemap(1024);
-    sm_add(a, 10);
-    sm_add(a, 20);
-    sm_add(b, 100);
-    sm_add(b, 200);
+    sm_add(a, 1024 + 10);
+    sm_add(a, 1024 + 20);
+    sm_add(b, 1024 + 100);
+    sm_add(b, 1024 + 200);
     sm_t *r = sm_intersection(a, b);
     assert_ptr_equal(r, NULL);
     free(a);
     free(b);
   }
 
-  /* Test 2: Identical maps = same cardinality */
+  /* Test 2: Identical maps = same cardinality (chunk mode). */
   {
     sm_t *a = sparsemap(1024);
-    sm_add(a, 10);
-    sm_add(a, 20);
-    sm_add(a, 30);
+    sm_add(a, 1024 + 10);
+    sm_add(a, 1024 + 20);
+    sm_add(a, 1024 + 30);
     sm_t *b = sm_copy(a);
     sm_t *r = sm_intersection(a, b);
     assert_ptr_not_null(r);
     assert_size(sm_cardinality(r), ==, 3);
-    assert_true(sm_contains(r, 10, NULL));
-    assert_true(sm_contains(r, 20, NULL));
-    assert_true(sm_contains(r, 30, NULL));
+    assert_true(sm_contains(r, 1024 + 10, NULL));
+    assert_true(sm_contains(r, 1024 + 20, NULL));
+    assert_true(sm_contains(r, 1024 + 30, NULL));
     free(r);
     free(a);
     free(b);
   }
 
-  /* Test 3: One empty map = empty result */
+  /* Test 3: One empty map = empty result (chunk mode). */
   {
     sm_t *a = sparsemap(1024);
     sm_t *b = sparsemap(1024);
-    sm_add(a, 10);
-    sm_add(a, 20);
+    sm_add(a, 1024 + 10);
+    sm_add(a, 1024 + 20);
     sm_t *r = sm_intersection(a, b);
     assert_ptr_equal(r, NULL);
     free(a);
     free(b);
   }
 
-  /* Test 4: Partial overlap with sparse chunks */
+  /* Test 4: Partial overlap with sparse chunks (shifted into chunk mode). */
   {
     sm_t *a = sparsemap(1024);
     sm_t *b = sparsemap(1024);
     for (int i = 0; i < 100; i++) {
-      sm_add(a, i);
+      sm_add(a, 1024 + i);
     }
     for (int i = 50; i < 150; i++) {
-      sm_add(b, i);
+      sm_add(b, 1024 + i);
     }
     sm_t *r = sm_intersection(a, b);
     assert_ptr_not_null(r);
     assert_size(sm_cardinality(r), ==, 50);
     for (int i = 50; i < 100; i++) {
-      assert_true(sm_contains(r, i, NULL));
+      assert_true(sm_contains(r, 1024 + i, NULL));
     }
-    assert_false(sm_contains(r, 49, NULL));
-    assert_false(sm_contains(r, 100, NULL));
+    assert_false(sm_contains(r, 1024 + 49, NULL));
+    assert_false(sm_contains(r, 1024 + 100, NULL));
     free(r);
     free(a);
     free(b);
@@ -1974,30 +1983,30 @@ test_api_difference(const MunitParameter params[], void *data)
   (void)params;
   (void)data;
 
-  /* Test 1: Difference with empty b = copy of a */
+  /* Test 1: Difference with empty b = copy of a (chunk mode, +1024). */
   {
     sm_t *a = sparsemap(1024);
     sm_t *b = sparsemap(1024);
-    sm_add(a, 10);
-    sm_add(a, 20);
-    sm_add(a, 30);
+    sm_add(a, 1024 + 10);
+    sm_add(a, 1024 + 20);
+    sm_add(a, 1024 + 30);
     sm_t *r = sm_difference(a, b);
     assert_ptr_not_null(r);
     assert_size(sm_cardinality(r), ==, 3);
-    assert_true(sm_contains(r, 10, NULL));
-    assert_true(sm_contains(r, 20, NULL));
-    assert_true(sm_contains(r, 30, NULL));
+    assert_true(sm_contains(r, 1024 + 10, NULL));
+    assert_true(sm_contains(r, 1024 + 20, NULL));
+    assert_true(sm_contains(r, 1024 + 30, NULL));
     free(r);
     free(a);
     free(b);
   }
 
-  /* Test 2: Difference with identical b = empty */
+  /* Test 2: Difference with identical b = empty (chunk mode). */
   {
     sm_t *a = sparsemap(1024);
-    sm_add(a, 10);
-    sm_add(a, 20);
-    sm_add(a, 30);
+    sm_add(a, 1024 + 10);
+    sm_add(a, 1024 + 20);
+    sm_add(a, 1024 + 30);
     sm_t *b = sm_copy(a);
     sm_t *r = sm_difference(a, b);
     assert_ptr_equal(r, NULL);
@@ -2005,41 +2014,41 @@ test_api_difference(const MunitParameter params[], void *data)
     free(b);
   }
 
-  /* Test 3: Disjoint b = copy of a */
+  /* Test 3: Disjoint b = copy of a (chunk mode). */
   {
     sm_t *a = sparsemap(1024);
     sm_t *b = sparsemap(1024);
-    sm_add(a, 10);
-    sm_add(a, 20);
-    sm_add(b, 100);
-    sm_add(b, 200);
+    sm_add(a, 1024 + 10);
+    sm_add(a, 1024 + 20);
+    sm_add(b, 1024 + 100);
+    sm_add(b, 1024 + 200);
     sm_t *r = sm_difference(a, b);
     assert_ptr_not_null(r);
     assert_size(sm_cardinality(r), ==, 2);
-    assert_true(sm_contains(r, 10, NULL));
-    assert_true(sm_contains(r, 20, NULL));
+    assert_true(sm_contains(r, 1024 + 10, NULL));
+    assert_true(sm_contains(r, 1024 + 20, NULL));
     free(r);
     free(a);
     free(b);
   }
 
-  /* Test 4: Partial overlap subtraction */
+  /* Test 4: Partial overlap subtraction (chunk mode). */
   {
     sm_t *a = sparsemap(1024);
     sm_t *b = sparsemap(1024);
     for (int i = 0; i < 100; i++) {
-      sm_add(a, i);
+      sm_add(a, 1024 + i);
     }
     for (int i = 50; i < 150; i++) {
-      sm_add(b, i);
+      sm_add(b, 1024 + i);
     }
     sm_t *r = sm_difference(a, b);
     assert_ptr_not_null(r);
     assert_size(sm_cardinality(r), ==, 50);
     for (int i = 0; i < 50; i++) {
-      assert_true(sm_contains(r, i, NULL));
+      assert_true(sm_contains(r, 1024 + i, NULL));
     }
-    assert_false(sm_contains(r, 50, NULL));
+    assert_false(sm_contains(r, 1024 + 50, NULL));
     free(r);
     free(a);
     free(b);
@@ -2066,29 +2075,30 @@ test_api_difference(const MunitParameter params[], void *data)
     free(b);
   }
 
-  /* Test 6: Subtract from middle of sparse chunk */
+  /* Test 6: Subtract from middle of sparse chunk (shifted into chunk
+   * mode: word-boundary bits 0..63 become 1024..1087). */
   {
     sm_t *a = sparsemap(1024);
     sm_t *b = sparsemap(1024);
-    /* a: bits 0..63 all set */
+    /* a: bits 1024..1087 all set */
     for (int i = 0; i < 64; i++) {
-      sm_add(a, i);
+      sm_add(a, 1024 + i);
     }
-    /* b: bits 20..39 set */
+    /* b: bits 1044..1063 set */
     for (int i = 20; i < 40; i++) {
-      sm_add(b, i);
+      sm_add(b, 1024 + i);
     }
     sm_t *r = sm_difference(a, b);
     assert_ptr_not_null(r);
     assert_size(sm_cardinality(r), ==, 44);
     for (int i = 0; i < 20; i++) {
-      assert_true(sm_contains(r, i, NULL));
+      assert_true(sm_contains(r, 1024 + i, NULL));
     }
     for (int i = 20; i < 40; i++) {
-      assert_false(sm_contains(r, i, NULL));
+      assert_false(sm_contains(r, 1024 + i, NULL));
     }
     for (int i = 40; i < 64; i++) {
-      assert_true(sm_contains(r, i, NULL));
+      assert_true(sm_contains(r, 1024 + i, NULL));
     }
     free(r);
     free(a);
@@ -2176,19 +2186,21 @@ test_integration_rle_transition(const MunitParameter params[], void *data)
 
   assert_ptr_not_null(map);
 
-  /* Phase 1: Create sparse chunk with mixed set/unset bits */
+  /* Phase 1: Create sparse chunk with mixed set/unset bits.  Shifted by
+   * 1024 so the chunk is in chunk mode (small-set mode would store this
+   * as the flat form and never exercise the sparse chunk codec). */
   sm_clear(map);
   for (int i = 0; i < 100; i += 2) {
-    sm_add(map, i); /* Set every other bit: 0, 2, 4, ..., 98 */
+    sm_add(map, 1024 + i); /* Set every other bit: 1024,1026,...,1122 */
   }
   assert_true(sm_cardinality(map) == 50);
-  assert_true(sm_contains(map, 0, NULL) == true);
-  assert_true(sm_contains(map, 1, NULL) == false);
+  assert_true(sm_contains(map, 1024 + 0, NULL) == true);
+  assert_true(sm_contains(map, 1024 + 1, NULL) == false);
 
-  /* Verify select works on sparse chunk */
-  assert_true(sm_select(map, 0, true) == 0);
-  assert_true(sm_select(map, 1, true) == 2);
-  assert_true(sm_select(map, 49, true) == 98);
+  /* Verify select works on sparse chunk (absolute indices shift too) */
+  assert_true(sm_select(map, 0, true) == 1024 + 0);
+  assert_true(sm_select(map, 1, true) == 1024 + 2);
+  assert_true(sm_select(map, 49, true) == 1024 + 98);
 
   /* Phase 2: Fill gaps to create long contiguous run (trigger RLE encoding) */
   sm_clear(map);

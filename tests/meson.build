@@ -50,7 +50,7 @@ if get_option('b_coverage')
   test_defines += '-DSM_COVERAGE_BUILD=1'
 endif
 
-foreach name : ['test_rle_standalone', 'test_heisenbug', 'test_empty_map', 'test_coverage', 'test_portability', 'test_large_index', 'test_validate', 'test_amplify', 'test_split_safety', 'test_null', 'test_smallset']
+foreach name : ['test_rle_standalone', 'test_heisenbug', 'test_empty_map', 'test_coverage', 'test_portability', 'test_large_index', 'test_validate', 'test_amplify', 'test_split_safety', 'test_null', 'test_smallset', 'test_smallset_api', 'test_smallset_transitions']
   exe = executable(name,
     name + '.c',
     dependencies : libsparsemap_dep,
@@ -77,6 +77,19 @@ test_prefix = executable('test_prefix',
   include_directories : inc,
 )
 test('prefix', test_prefix, timeout : 60)
+
+# Chunk-transition corners + the RLE-free contract.  Unlike the API-only
+# suites above, this file #includes ../sm.c (like test_prefix /
+# test_hegel_white) so it can walk the real chunk stream with the
+# library's own codec and prove the encoder never emits an RLE
+# descriptor; it therefore compiles its own copy of the source and does
+# NOT link libsparsemap_dep (that would duplicate every symbol).
+test_chunk_transitions = executable('test_chunk_transitions',
+  'test_chunk_transitions.c',
+  include_directories : inc,
+  c_args : test_defines + ['-Wno-unused-function'],
+)
+test('chunk_transitions', test_chunk_transitions, timeout : 120)
 
 # Property tests using hegel-c (optional).  hegel-c has no pkg-config
 # file and is usually vendored or installed by hand, so we probe for
