@@ -1878,15 +1878,15 @@ CASE(test_statistics)
     sm_add(m, 1500);
     sm_statistics(m, &s);
     EXPECT(s.chunks_total == 1, "sparse: 1 chunk");
-    EXPECT(s.chunks_sparse == 1 && s.chunks_reserved == 0, "all sparse");
-    EXPECT(s.bits_set == 2 && s.bits_in_sparse == 2, "2 bits sparse");
+    EXPECT(s.chunks_sparse == 1, "all sparse");
+    EXPECT(s.bits_set == 2, "2 bits sparse");
 
     /* Dense run: stored as all-ONES sparse chunks. */
     sm_clear(m);
     for (uint64_t i = 0; i < 4096; i++) sm_add(m, i);
     sm_statistics(m, &s);
     EXPECT(s.bits_set == 4096, "4096 bits set");
-    EXPECT(s.chunks_reserved == 0, "dense run is sparse chunks");
+    EXPECT(s.chunks_sparse == s.chunks_total, "dense run is sparse chunks");
     /* Two all-ONES sparse chunks (descriptor-only, 8 bytes each) hold
      * 2048 bits apiece; still very efficient. */
     EXPECT(s.bytes_per_set_bit < 0.1, "all-ONES sparse: low bytes per bit");

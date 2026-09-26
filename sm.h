@@ -1637,14 +1637,11 @@ bool sm_validate(const sm_t *map);
  * unexpectedly-large maps.
  */
 typedef struct sm_stats {
-	size_t chunks_total;      /**< total chunks */
-	size_t chunks_reserved;   /**< always 0 (reserved, kept for API compatibility) */
-	size_t chunks_sparse;     /**< chunks using sparse encoding */
+	size_t chunks_total;      /**< total chunks (all sparse in this build) */
+	size_t chunks_sparse;     /**< chunks using sparse encoding (== chunks_total) */
 	size_t bytes_used;        /**< sm_get_size(map) */
 	size_t bytes_capacity;    /**< sm_get_capacity(map) */
 	uint64_t bits_set;        /**< sm_cardinality(map) */
-	uint64_t bits_reserved;   /**< always 0 (reserved, kept for API compatibility) */
-	uint64_t bits_in_sparse;  /**< bits set within sparse chunks */
 	double bytes_per_set_bit; /**< bytes_used / bits_set */
 } sm_stats_t;
 

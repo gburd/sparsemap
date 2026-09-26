@@ -6549,25 +6549,22 @@ sm_statistics(const sm_t *map, sm_stats_t *stats)
 		__sm_chunk_t chunk;
 		__sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
 		chunk_size = __sm_chunk_get_size(&chunk);
-		/* Every chunk is sparse in this build; chunks_reserved /
-		 * bits_reserved remain 0 (kept in sm_stats_t for API
-		 * compatibility). */
+		/* Every chunk is sparse in this build. */
 		stats->chunks_sparse++;
 		desc = chunk.m_data[0];
 		pos = 1;
 		for (v = 0; v < SM_FLAGS_PER_INDEX; v++) {
 			const size_t flags = SM_CHUNK_GET_FLAGS(desc, v);
 			if (flags == SM_PAYLOAD_ONES) {
-				stats->bits_in_sparse += SM_BITS_PER_VECTOR;
+				stats->bits_set += SM_BITS_PER_VECTOR;
 			} else if (flags == SM_PAYLOAD_MIXED) {
-				stats->bits_in_sparse +=
+				stats->bits_set +=
 				    (uint64_t)SM_POPCOUNT64(chunk.m_data[pos]);
 				pos++;
 			}
 		}
 		p += SM_SIZEOF_OVERHEAD + chunk_size;
 	}
-	stats->bits_set = stats->bits_reserved + stats->bits_in_sparse;
 	stats->bytes_per_set_bit = stats->bits_set == 0 ?
 	    0.0 :
 	    (double)stats->bytes_used / (double)stats->bits_set;
