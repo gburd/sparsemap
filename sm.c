@@ -6170,14 +6170,17 @@ __sm_ensure_capacity(sm_t **resultp, size_t needed)
 	if (result->m_data_used + needed <= __sm_cap(result)) {
 		return (true);
 	}
-	size_t cap = __sm_cap(result);
-	size_t new_cap = cap + (cap / 2 > needed ? cap / 2 : needed + 256);
-	sm_t *grown = sm_set_data_size(result, NULL, new_cap);
-	if (grown == NULL) {
-		return (false);
+	{
+		size_t cap = __sm_cap(result);
+		size_t new_cap =
+		    cap + (cap / 2 > needed ? cap / 2 : needed + 256);
+		sm_t *grown = sm_set_data_size(result, NULL, new_cap);
+		if (grown == NULL) {
+			return (false);
+		}
+		*resultp = grown;
+		return (true);
 	}
-	*resultp = grown;
-	return (true);
 }
 
 /**
@@ -6196,10 +6199,12 @@ __sm_append_sparse_chunk(sm_t **resultp, __sm_idx_t start, __sm_bitvec_t desc,
 {
 	const size_t chunk_size = SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) +
 	    (size_t)nvecs * sizeof(__sm_bitvec_t);
+	sm_t *result;
+	int i;
 	if (!__sm_ensure_capacity(resultp, chunk_size)) {
 		return (false);
 	}
-	sm_t *result = *resultp;
+	result = *resultp;
 
 	/* Capacity for the whole chunk was reserved above, so these appends
 	 * cannot fail; check anyway so the invariant is enforced by the
@@ -6212,7 +6217,7 @@ __sm_append_sparse_chunk(sm_t **resultp, __sm_idx_t start, __sm_bitvec_t desc,
 	        sizeof(__sm_bitvec_t)))) {
 		return (false);
 	}
-	for (int i = 0; i < nvecs; i++) {
+	for (i = 0; i < nvecs; i++) {
 		if (SM_UNLIKELY(!__sm_append_data(result,
 		        (const uint8_t *)&vecs[i], sizeof(__sm_bitvec_t)))) {
 			return (false);
@@ -6244,16 +6249,17 @@ __sm_append_rle_chunk(sm_t **resultp, __sm_idx_t start, size_t capacity,
 		/* Find the last chunk in the result */
 		uint8_t *p = __sm_get_chunk_data(result, 0);
 		uint8_t *last_p = p;
-		for (size_t i = 0; i < count; i++) {
-			last_p = p;
+		__sm_idx_t last_start;
+		__sm_chunk_t last_chunk;
+		size_t i;
+		for (i = 0; i < count; i++) {
 			__sm_chunk_t c;
+			last_p = p;
 			__sm_chunk_init(&c, p + SM_SIZEOF_OVERHEAD);
 			p += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&c);
 		}
 
-		const __sm_idx_t last_start =
-		    __sm_load_idx((const uint8_t *)last_p);
-		__sm_chunk_t last_chunk;
+		last_start = __sm_load_idx((const uint8_t *)last_p);
 		__sm_chunk_init(&last_chunk, last_p + SM_SIZEOF_OVERHEAD);
 
 		if (__sm_chunk_is_rle(&last_chunk)) {
@@ -6308,8 +6314,9 @@ __sm_append_rle_chunk(sm_t **resultp, __sm_idx_t start, size_t capacity,
 						/* Re-init after data shift */
 						last_p = __sm_get_chunk_data(
 						    result, 0);
-						for (size_t i = 0;
-						     i < count - 1; i++) {
+						size_t j;
+						for (j = 0;
+						     j < count - 1; j++) {
 							__sm_chunk_t c;
 							__sm_chunk_init(&c,
 							    last_p +
@@ -6336,6 +6343,8 @@ __sm_append_rle_chunk(sm_t **resultp, __sm_idx_t start, size_t capacity,
 
 	/* No merge possible: append new RLE chunk */
 	const size_t chunk_size = SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t);
+	SM_ALIGNAS(__sm_bitvec_t) uint8_t rle_buf[sizeof(__sm_bitvec_t)] = { 0 };
+	__sm_chunk_t tmp;
 	if (!__sm_ensure_capacity(resultp, chunk_size)) {
 		return (false);
 	}
@@ -6348,8 +6357,6 @@ __sm_append_rle_chunk(sm_t **resultp, __sm_idx_t start, size_t capacity,
 	}
 
 	/* Build and write the RLE word */
-	SM_ALIGNAS(__sm_bitvec_t) uint8_t rle_buf[sizeof(__sm_bitvec_t)] = { 0 };
-	__sm_chunk_t tmp;
 	__sm_chunk_init(&tmp, rle_buf);
 	__sm_chunk_set_rle(&tmp);
 	__sm_chunk_rle_set_capacity(&tmp, capacity);
@@ -6410,18 +6417,21 @@ __sm_emit_flush(__sm_emitter_t *e)
 	if (!e->pending) {
 		return (true);
 	}
-	e->pending = false;
-	__sm_bitvec_t desc;
-	__sm_bitvec_t vecs[32];
-	int nvecs;
-	if (!__sm_encode_sparse_chunk(e->words, e->cap, &desc, vecs, &nvecs)) {
-		return (true); /* nothing set: emit nothing */
+	{
+		__sm_bitvec_t desc;
+		__sm_bitvec_t vecs[32];
+		int nvecs;
+		e->pending = false;
+		if (!__sm_encode_sparse_chunk(e->words, e->cap, &desc, vecs,
+		        &nvecs)) {
+			return (true); /* nothing set: emit nothing */
+		}
+		/* Once a sparse chunk lands after the RLE chunk, that chunk is no
+		 * longer the tail and its span must not absorb later emits. */
+		e->have_rle = false;
+		return (__sm_append_sparse_chunk(e->resultp, e->start, desc,
+		    vecs, nvecs));
 	}
-	/* Once a sparse chunk lands after the RLE chunk, that chunk is no
-	 * longer the tail and its span must not absorb later emits. */
-	e->have_rle = false;
-	return (__sm_append_sparse_chunk(e->resultp, e->start, desc, vecs,
-	    nvecs));
 }
 
 /* Emit (or merge) a sparse output chunk given as expanded words. */
