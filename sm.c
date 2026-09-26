@@ -9400,6 +9400,8 @@ sm_difference(const sm_t *a, const sm_t *b)
 			__sm_chunk_t b_chunk;
 			bool b_rle;
 			size_t b_cap_bits;
+			size_t ov_start;
+			size_t ov_end;
 			size_t b_size;
 			size_t b_end;
 			__sm_chunk_init(&b_chunk, bp + SM_SIZEOF_OVERHEAD);
@@ -9420,10 +9422,10 @@ sm_difference(const sm_t *a, const sm_t *b)
 			}
 
 			/* Overlap region */
-			const size_t ov_start = (size_t)b_start > a_cursor ?
+			ov_start = (size_t)b_start > a_cursor ?
 			    (size_t)b_start :
 			    a_cursor;
-			const size_t ov_end = a_end < b_end ? a_end : b_end;
+			ov_end = a_end < b_end ? a_end : b_end;
 
 			/* Emit a's surviving bits in the gap [a_cursor, ov_start) */
 			if (!__sm_emit_chunk_bits(&result, &a_chunk, a_rle,
@@ -10190,9 +10192,12 @@ sm_split(sm_t *map, uint64_t idx, sm_t *other)
 	/* (2): The idx falls within a chunk then it has to be split. */
 	if (in_middle) {
 		__sm_chunk_t s_chunk, d_chunk;
+		__sm_idx_t src_start;
+		size_t mid_off;
+		size_t j;
 		__sm_chunk_init(&s_chunk, src + SM_SIZEOF_OVERHEAD);
 		__sm_chunk_init(&d_chunk, dst + SM_SIZEOF_OVERHEAD);
-		__sm_idx_t src_start = __sm_load_idx((const uint8_t *)src);
+		src_start = __sm_load_idx((const uint8_t *)src);
 
 		/* (2a) Does the idx fall within the range of an RLE chunk? */
 		if (SM_IS_CHUNK_RLE(&s_chunk)) {
@@ -10259,7 +10264,7 @@ sm_split(sm_t *map, uint64_t idx, sm_t *other)
 			 */
 			SM_ENOUGH_SPACE(sep.expand_by);
 			/* Save src offset before insert, as insert will invalidate the pointer */
-			src_offset = src - map->m_data;
+			src_offset = (size_t)(src - map->m_data);
 			/* __sm_insert_data / __sm_get_chunk_data take a
 			 * DATA-region-relative offset (they add SM_SIZEOF_OVERHEAD
 			 * for the chunk-count header themselves).  `src_offset`
@@ -10307,19 +10312,21 @@ sm_split(sm_t *map, uint64_t idx, sm_t *other)
 		 * refuse up front with the documented ENOSPC if it will not
 		 * fit, leaving both maps untouched. */
 		{
-			const size_t max_chunk = SM_SIZEOF_OVERHEAD +
-			    sizeof(__sm_bitvec_t) *
-			        (size_t)(1 + SM_FLAGS_PER_INDEX);
-			if (other->m_data_used + max_chunk > __sm_cap(other)) {
-				errno = ENOSPC;
-				return (SM_IDX_MAX);
-			}
+		const size_t max_chunk = SM_SIZEOF_OVERHEAD +
+		    sizeof(__sm_bitvec_t) *
+		        (size_t)(1 + SM_FLAGS_PER_INDEX);
+		if (other->m_data_used + max_chunk > __sm_cap(other)) {
+			errno = ENOSPC;
+			return (SM_IDX_MAX);
+		}
 		}
 
 		/* Zero out the space we'll need at the proper location in dst. */
+		{
 		uint8_t buf[SM_SIZEOF_OVERHEAD +
 		    (sizeof(__sm_bitvec_t) * 2)] = { 0 };
 		memcpy(dst, &buf, sizeof(buf));
+		}
 
 		/* And add a chunk to the other map. */
 		__sm_set_chunk_count(other, __sm_get_chunk_count(other) + 1);
@@ -10341,8 +10348,7 @@ sm_split(sm_t *map, uint64_t idx, sm_t *other)
 		 * invalid when the middle chunk vanished).  Chunks BEFORE the
 		 * middle one are untouched, so its m_data offset `mid_off` is
 		 * stable across the mutation. */
-		const size_t mid_off = (size_t)(src - map->m_data);
-		size_t j;
+		mid_off = (size_t)(src - map->m_data);
 		__sm_store_idx((uint8_t *)dst, src_start);
 		for (j = idx; j < src_start + SM_CHUNK_MAX_CAPACITY;
 		     j++) {
@@ -10484,9 +10490,11 @@ sm_select(sm_t *map, uint64_t n, bool value)
 		sm_t *m = __sm_materialize(map);
 		if (m == NULL)
 			return (value ? SM_IDX_MAX : n);
-		const uint64_t r = sm_select(m, n, value);
-		sm_free(m);
-		return (r);
+		{
+			const uint64_t r = sm_select(m, n, value);
+			sm_free(m);
+			return (r);
+		}
 	}
 	__sm_check_invariants(map);
 	__sm_assert(sm_get_size(map) >= SM_SIZEOF_OVERHEAD);
@@ -10852,6 +10860,9 @@ __sm_isqrt(size_t x)
 static bool
 __sm_locator_is_stale(const sm_locator_t *loc)
 {
+	uint8_t *base;
+	__sm_idx_t first;
+	__sm_idx_t last;
 	if (loc == NULL || loc->map == NULL || loc->n_sb == 0) {
 		return (true);
 	}
@@ -10864,8 +10875,8 @@ __sm_locator_is_stale(const sm_locator_t *loc)
 	 * best-effort check, not a proof of freshness -- but any miss still
 	 * yields a correct answer via the fine-walk, which self-validates
 	 * against the actual chunk bytes it reads. */
-	uint8_t *base = __sm_get_chunk_data(loc->map, 0);
-	const __sm_idx_t first = __sm_load_idx((const uint8_t *)base);
+	base = __sm_get_chunk_data(loc->map, 0);
+	first = __sm_load_idx((const uint8_t *)base);
 	if (first != loc->first_start) {
 		return (true);
 	}
@@ -10873,7 +10884,7 @@ __sm_locator_is_stale(const sm_locator_t *loc)
 	    (size_t)loc->map->m_data_used - SM_SIZEOF_OVERHEAD) {
 		return (true);
 	}
-	const __sm_idx_t last =
+	last =
 	    __sm_load_idx((const uint8_t *)(base + loc->last_offset));
 	if (last != loc->last_start) {
 		return (true);
