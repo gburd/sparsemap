@@ -4114,6 +4114,8 @@ sm_set_data_size(sm_t *map, uint8_t *data, const size_t size)
 	}
 
 	case SM_WRAPPED: {
+		uint8_t *new_data;
+		size_t copy_bytes;
 		/*
 		 * Caller owns m_data.  Two cases:
 		 *
@@ -4142,11 +4144,11 @@ sm_set_data_size(sm_t *map, uint8_t *data, const size_t size)
 			return (map);
 		}
 
-		uint8_t *new_data = (uint8_t *)__sm_alloc_zero(asize);
+		new_data = (uint8_t *)__sm_alloc_zero(asize);
 		if (!new_data) {
 			return (NULL);
 		}
-		const size_t copy_bytes = map->m_data_used <= cur_cap ?
+		copy_bytes = map->m_data_used <= cur_cap ?
 		    map->m_data_used :
 		    cur_cap;
 		if (copy_bytes > 0 && map->m_data != NULL) {
@@ -4188,7 +4190,8 @@ __sm_small_is_run_from_zero(const sm_t *map, uint64_t *run_len_out)
 	const size_t n = __sm_small_nwords(map);
 	uint64_t len = 0;
 	bool ended = false;
-	for (size_t i = 0; i < n; i++) {
+	size_t i;
+	for (i = 0; i < n; i++) {
 		if (ended) {
 			if (w[i] != 0) {
 				return (false); /* bits after the run: a gap */
@@ -4245,14 +4248,17 @@ __sm_small_chunk_bytes(const sm_t *map)
 	const uint64_t *w = __sm_small_words(map);
 	const size_t n = __sm_small_nwords(map);
 	size_t mixed = 0;
-	for (size_t i = 0; i < n; i++) {
+	uint64_t run_len = 0;
+	const size_t sparse_base = SM_SIZEOF_OVERHEAD + SM_SIZEOF_OVERHEAD +
+	    sizeof(__sm_bitvec_t);
+	size_t sparse;
+	size_t i;
+	for (i = 0; i < n; i++) {
 		if (w[i] != 0 && w[i] != ~(uint64_t)0) {
 			mixed++;
 		}
 	}
-	const size_t sparse = SM_SIZEOF_OVERHEAD + SM_SIZEOF_OVERHEAD +
-	    sizeof(__sm_bitvec_t) + mixed * sizeof(__sm_bitvec_t);
-	uint64_t run_len = 0;
+	sparse = sparse_base + mixed * sizeof(__sm_bitvec_t);
 	if (__sm_small_is_run_from_zero(map, &run_len) &&
 	    run_len <= (uint64_t)SM_CHUNK_RLE_MAX_LENGTH) {
 		const size_t rle = SM_SIZEOF_OVERHEAD + SM_SIZEOF_OVERHEAD +
@@ -4299,15 +4305,15 @@ __sm_promote_run_as_rle(sm_t *map, uint64_t run_len)
 	/* 8 (count) + 8 (start) + 8 (RLE descriptor). */
 	const size_t need = SM_SIZEOF_OVERHEAD + SM_SIZEOF_OVERHEAD +
 	    sizeof(__sm_bitvec_t);
+	const size_t capacity = SM_CHUNK_MAX_CAPACITY;
+	__sm_chunk_t chunk;
 	if (need > __sm_cap(map)) {
 		return (false);
 	}
 	/* Capacity is the enclosing 2048-bit chunk window; run_len <=
 	 * SM_SMALL_MAX_BITS (1024) < SM_CHUNK_MAX_CAPACITY (2048). */
-	const size_t capacity = SM_CHUNK_MAX_CAPACITY;
 	__sm_set_chunk_count(map, 1);
 	__sm_store_idx(&map->m_data[SM_SIZEOF_OVERHEAD], 0); /* start = 0 */
-	__sm_chunk_t chunk;
 	__sm_chunk_init(&chunk,
 	    &map->m_data[SM_SIZEOF_OVERHEAD + SM_SIZEOF_OVERHEAD]);
 	chunk.m_data[0] = 0;
@@ -4333,10 +4339,13 @@ __sm_promote_run_as_rle(sm_t *map, uint64_t run_len)
 static bool
 __sm_promote(sm_t *map)
 {
-	__sm_assert(__sm_is_small(map));
 	/* Snapshot the bits; the buffer is reused for the chunk form. */
 	const size_t n = __sm_small_nwords(map);
 	uint64_t words[SM_SMALL_MAX_WORDS];
+	uint64_t run_len = 0;
+	size_t pi;
+
+	__sm_assert(__sm_is_small(map));
 	__sm_assert(n <= SM_SMALL_MAX_WORDS);
 	memcpy(words, __sm_small_words(map), n * sizeof(uint64_t));
 
@@ -4345,7 +4354,6 @@ __sm_promote(sm_t *map)
 	 * when the RLE form is no larger than the sparse form (a
 	 * word-aligned all-ones run is 24 bytes either way; a partial-tail
 	 * run is 24 RLE vs 32+ sparse). */
-	uint64_t run_len = 0;
 	if (__sm_small_is_run_from_zero(map, &run_len) &&
 	    run_len <= (uint64_t)SM_CHUNK_RLE_MAX_LENGTH) {
 		/* Sparse cost of this run: one payload word only if the run
@@ -4373,12 +4381,12 @@ __sm_promote(sm_t *map)
 	 * ENOSPC and we restore the small header. */
 	map->m_data_used = SM_SIZEOF_OVERHEAD;
 	__sm_set_chunk_count(map, 0);
-	for (size_t i = 0; i < n; i++) {
-		uint64_t bits = words[i];
+	for (pi = 0; pi < n; pi++) {
+		uint64_t bits = words[pi];
 		while (bits != 0) {
 			const int b = SM_CTZ64(bits);
+			const uint64_t idx = (uint64_t)pi * 64 + (uint64_t)b;
 			bits &= bits - 1;
-			const uint64_t idx = (uint64_t)i * 64 + (uint64_t)b;
 			if (__sm_map_set(map, idx, true, NULL) == SM_IDX_MAX) {
 				/* Out of space: restore the small form. */
 				map->m_data_used =
@@ -4402,13 +4410,28 @@ __sm_promote(sm_t *map)
 static void
 __sm_try_demote(sm_t *map)
 {
+	size_t count;
+	uint8_t *p;
+	__sm_idx_t start;
+	__sm_chunk_t chunk;
+	__sm_bitvec_t w32[SM_FLAGS_PER_INDEX];
+	int cap[SM_FLAGS_PER_INDEX];
+	size_t hi_word = 0;
+	bool any = false;
+	int iw;
+	uint64_t maxbit;
+	size_t nwords;
+	size_t small_bytes;
+	uint64_t out[SM_SMALL_MAX_WORDS];
+	size_t iw2;
+
 	if (map == NULL || __sm_is_small(map) || map->m_data == NULL) {
 		return;
 	}
 	if (map->m_data_used < SM_SIZEOF_OVERHEAD) {
 		return;
 	}
-	const size_t count = __sm_get_chunk_count(map);
+	count = __sm_get_chunk_count(map);
 	if (count == 0) {
 		/* Empty: leave as an empty chunk-mode map (size == overhead,
 		 * same as small with zero words). */
@@ -4419,34 +4442,31 @@ __sm_try_demote(sm_t *map)
 	}
 	/* Single chunk: it must start at 0 for the small form (from bit 0)
 	 * to represent it, and every index must be < SM_SMALL_MAX_BITS. */
-	uint8_t *p = __sm_get_chunk_data(map, 0);
-	const __sm_idx_t start = __sm_load_idx((const uint8_t *)p);
+	p = __sm_get_chunk_data(map, 0);
+	start = __sm_load_idx((const uint8_t *)p);
 	if (start != 0) {
 		return;
 	}
-	__sm_chunk_t chunk;
 	__sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
-	__sm_bitvec_t w32[SM_FLAGS_PER_INDEX];
-	int cap[SM_FLAGS_PER_INDEX];
 	/* An RLE chunk cannot be word-expanded by __sm_expand_sparse_chunk;
 	 * decode it as the run {0..length-1} it encodes.  A demote target
 	 * only exists when the whole set is below the small cap, so an RLE
 	 * chunk here holds a run shorter than one chunk. */
 	if (__sm_chunk_is_rle(&chunk)) {
 		const size_t length = __sm_chunk_rle_get_length(&chunk);
+		size_t bit;
 		if (length == 0 || length > SM_SMALL_MAX_BITS) {
 			return;
 		}
-		const uint64_t maxbit = (uint64_t)length - 1;
-		const size_t nwords = (size_t)(maxbit / 64) + 1;
-		const size_t small_bytes = SM_SIZEOF_OVERHEAD +
+		maxbit = (uint64_t)length - 1;
+		nwords = (size_t)(maxbit / 64) + 1;
+		small_bytes = SM_SIZEOF_OVERHEAD +
 		    nwords * sizeof(uint64_t);
 		if (small_bytes > map->m_data_used) {
 			return; /* chunk (RLE) form is smaller; keep it */
 		}
-		uint64_t out[SM_SMALL_MAX_WORDS];
 		memset(out, 0, sizeof(out));
-		for (size_t bit = 0; bit < length; bit++) {
+		for (bit = 0; bit < length; bit++) {
 			out[bit / 64] |= (uint64_t)1 << (bit % 64);
 		}
 		__sm_small_set_header(map, nwords);
@@ -4457,11 +4477,9 @@ __sm_try_demote(sm_t *map)
 	}
 	__sm_expand_sparse_chunk(&chunk, w32, cap);
 	/* Highest set bit within the chunk. */
-	size_t hi_word = 0;
-	bool any = false;
-	for (int i = 0; i < (int)SM_FLAGS_PER_INDEX; i++) {
-		if (cap[i] && w32[i] != 0) {
-			hi_word = (size_t)i;
+	for (iw = 0; iw < (int)SM_FLAGS_PER_INDEX; iw++) {
+		if (cap[iw] && w32[iw] != 0) {
+			hi_word = (size_t)iw;
 			any = true;
 		}
 	}
@@ -4471,23 +4489,22 @@ __sm_try_demote(sm_t *map)
 		__sm_set_chunk_count(map, 0);
 		return;
 	}
-	const uint64_t maxbit = (uint64_t)hi_word * 64 +
+	maxbit = (uint64_t)hi_word * 64 +
 	    (63 - (uint64_t)SM_CLZ64(w32[hi_word]));
 	if (maxbit >= SM_SMALL_MAX_BITS) {
 		return;
 	}
-	const size_t nwords = (size_t)(maxbit / 64) + 1;
-	const size_t small_bytes = SM_SIZEOF_OVERHEAD +
+	nwords = (size_t)(maxbit / 64) + 1;
+	small_bytes = SM_SIZEOF_OVERHEAD +
 	    nwords * sizeof(uint64_t);
 	if (small_bytes > map->m_data_used) {
 		return; /* chunk form is already smaller; keep it */
 	}
 	/* Build the small form from the expanded words.  small_bytes <=
 	 * m_data_used <= capacity, so it always fits. */
-	uint64_t out[SM_SMALL_MAX_WORDS];
 	memset(out, 0, sizeof(out));
-	for (size_t i = 0; i < nwords; i++) {
-		out[i] = w32[i];
+	for (iw2 = 0; iw2 < nwords; iw2++) {
+		out[iw2] = w32[iw2];
 	}
 	__sm_small_set_header(map, nwords);
 	memcpy(__sm_small_words(map), out, nwords * sizeof(uint64_t));
@@ -4505,15 +4522,16 @@ __sm_materialize(const sm_t *small)
 	const uint64_t *w = __sm_small_words(small);
 	const size_t n = __sm_small_nwords(small);
 	sm_t *m = sm_create(256);
+	size_t i;
 	if (m == NULL) {
 		return (NULL);
 	}
-	for (size_t i = 0; i < n; i++) {
+	for (i = 0; i < n; i++) {
 		uint64_t bits = w[i];
 		while (bits != 0) {
 			const int b = SM_CTZ64(bits);
-			bits &= bits - 1;
 			const uint64_t idx = (uint64_t)i * 64 + (uint64_t)b;
+			bits &= bits - 1;
 			if (sm_add_grow(&m, idx) == SM_IDX_MAX) {
 				sm_free(m);
 				return (NULL);
