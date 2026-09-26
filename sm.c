@@ -3062,6 +3062,8 @@ __sm_separate_rle_chunk(sm_t *map, __sm_chunk_sep_t *sep, const uint64_t idx,
 	__sm_chunk_t lrc;
 	uint64_t aligned_idx;
 	int i;
+	const size_t base = SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t);
+	size_t total;
 
 	__sm_assert(state == 0 || state == 1 || state == -1);
 	__sm_assert(SM_IS_CHUNK_RLE(sep->target.chunk));
@@ -3600,9 +3602,7 @@ __sm_separate_rle_chunk(sm_t *map, __sm_chunk_sep_t *sep, const uint64_t idx,
 	 * __sm_insert_data as a SIZE_MAX-ish length and tripping stack
 	 * canaries / heap corruption.
 	 */
-	const size_t base = SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t);
-	const size_t total =
-	    sep->pivot.size + sep->ex[0].size + sep->ex[1].size;
+	total = sep->pivot.size + sep->ex[0].size + sep->ex[1].size;
 	if (total < base) {
 		__sm_when_diag({
 			__sm_assert(0 &&
@@ -3695,6 +3695,11 @@ sparsemap(size_t size)
 sm_t *
 sm_create(size_t size)
 {
+	size_t data_size;
+	size_t total_size;
+	size_t padding;
+	sm_t *map;
+
 	if (size == 0) {
 		size = 1024;
 	}
@@ -3703,14 +3708,14 @@ sm_create(size_t size)
 	 * and the (low-bit-tagged) stored capacity agree exactly. */
 	size = (size + 7u) & ~(size_t)7;
 
-	const size_t data_size = size * sizeof(uint8_t);
+	data_size = size * sizeof(uint8_t);
 
 	/* Ensure that m_data is 8-byte aligned. */
-	size_t total_size = sizeof(sm_t) + data_size;
-	const size_t padding = total_size % 8 == 0 ? 0 : 8 - (total_size % 8);
+	total_size = sizeof(sm_t) + data_size;
+	padding = total_size % 8 == 0 ? 0 : 8 - (total_size % 8);
 	total_size += padding;
 
-	sm_t *map = (sm_t *)__sm_alloc_zero(total_size);
+	map = (sm_t *)__sm_alloc_zero(total_size);
 	if (map) {
 		uint8_t *data = (uint8_t *)(((uintptr_t)map + sizeof(sm_t)) &
 		    ~(uintptr_t)7);
@@ -3766,11 +3771,13 @@ sm_free(sm_t *map)
 sm_t *
 sm_owned_copy(const sm_t *map)
 {
+	size_t cap;
+	sm_t *out;
 	if (map == NULL) {
 		return (NULL);
 	}
-	const size_t cap = sm_get_capacity(map);
-	sm_t *out = sm_create(cap);
+	cap = sm_get_capacity(map);
+	out = sm_create(cap);
 	if (out == NULL) {
 		return (NULL);
 	}
@@ -3795,12 +3802,14 @@ sm_owned_copy(const sm_t *map)
 sm_t *
 sm_copy(const sm_t *other)
 {
+	size_t cap;
+	sm_t *map;
 	if (other == NULL) {
 		errno = EINVAL;
 		return (NULL);
 	}
-	const size_t cap = sm_get_capacity(other);
-	sm_t *map = sparsemap(cap);
+	cap = sm_get_capacity(other);
+	map = sparsemap(cap);
 	if (map) {
 		__sm_set_cap_kind(map, cap, SM_OWNED_CONTIGUOUS);
 		map->m_data_used = other->m_data_used;
@@ -3876,6 +3885,8 @@ sm_init(sm_t *map, uint8_t *data, const size_t size)
 void
 sm_open(sm_t *map, uint8_t *data, const size_t size)
 {
+	size_t claimed_count;
+	size_t walked_count;
 	if (map == NULL) {
 		errno = EINVAL;
 		return;
@@ -3900,8 +3911,7 @@ sm_open(sm_t *map, uint8_t *data, const size_t size)
 	/* Small-set body: the header word's top bit is set.  Its size is
 	 * fixed by the word count; don't run the chunk walk on it. */
 	if (size >= SM_SIZEOF_OVERHEAD && __sm_is_small(map)) {
-		const size_t nwords = __sm_small_nwords(map);
-		map->m_data_used =
+		const size_t nwords = __sm_small_nwords(map);		map->m_data_used =
 		    SM_SIZEOF_OVERHEAD + nwords * sizeof(uint64_t);
 		if (map->m_data_used > __sm_cap(map) || !sm_validate(map)) {
 			__sm_store_u64(&map->m_data[0], 0);
@@ -3912,9 +3922,9 @@ sm_open(sm_t *map, uint8_t *data, const size_t size)
 	/* The stored count as the buffer claims it, before __sm_get_size_impl
 	 * silently truncates it to the valid prefix.  A mismatch is an S1(e)
 	 * violation (stored count disagrees with the walk). */
-	const size_t claimed_count = __sm_get_chunk_count(map);
+	claimed_count = __sm_get_chunk_count(map);
 	map->m_data_used = __sm_get_size_impl(map);
-	const size_t walked_count = __sm_get_chunk_count(map);
+	walked_count = __sm_get_chunk_count(map);
 	/* An untrusted buffer must be structurally valid or it is replaced
 	 * with an empty (valid) map -- the same contract sm_deserialize
 	 * already enforces.  size 0 is the documented "leave it empty" call
@@ -3929,17 +3939,21 @@ sm_open(sm_t *map, uint8_t *data, const size_t size)
 sm_t *
 sm_open_copy(const uint8_t *data, size_t n, size_t slack)
 {
+	size_t cap;
+	sm_t *m;
 	if (data == NULL && n > 0)
 		return (NULL);
 	/* sm_create needs at least SM_SIZEOF_OVERHEAD bytes; bump up if the
 	 * caller asked for less. */
-	size_t cap = n + slack;
+	cap = n + slack;
 	if (cap < SM_SIZEOF_OVERHEAD)
 		cap = SM_SIZEOF_OVERHEAD;
-	sm_t *m = sm_create(cap);
+	m = sm_create(cap);
 	if (m == NULL)
 		return (NULL);
 	if (n > 0) {
+		size_t claimed_count;
+		size_t walked_count;
 		memcpy(sm_get_data(m), data, n);
 		/* Small-set body: fixed size, no chunk walk. */
 		if (n >= SM_SIZEOF_OVERHEAD && __sm_is_small(m)) {
@@ -3957,9 +3971,9 @@ sm_open_copy(const uint8_t *data, size_t n, size_t slack)
 		 * temporarily set m_data_used = capacity so the empty-map guard
 		 * in __sm_get_chunk_count doesn't short-circuit during the walk. */
 		m->m_data_used = __sm_cap(m);
-		const size_t claimed_count = __sm_get_chunk_count(m);
+		claimed_count = __sm_get_chunk_count(m);
 		m->m_data_used = __sm_get_size_impl(m);
-		const size_t walked_count = __sm_get_chunk_count(m);
+		walked_count = __sm_get_chunk_count(m);
 		/* Untrusted bytes: reject anything not structurally valid
 		 * rather than returning a half-parsed map. */
 		if (claimed_count != walked_count || !sm_validate(m)) {
@@ -4018,6 +4032,8 @@ sm_open_copy(const uint8_t *data, size_t n, size_t slack)
 sm_t *
 sm_set_data_size(sm_t *map, uint8_t *data, const size_t size)
 {
+	size_t asize;
+	size_t cur_cap;
 	if (map == NULL) {
 		return (NULL);
 	}
@@ -4035,8 +4051,8 @@ sm_set_data_size(sm_t *map, uint8_t *data, const size_t size)
 	 * 8-byte boundary so the allocated buffer and the stored (low-bit-
 	 * tagged) capacity agree exactly; __sm_set_cap_kind rounds down,
 	 * so an already-aligned size round-trips unchanged. */
-	const size_t asize = (size + 7u) & ~(size_t)7;
-	const size_t cur_cap = __sm_cap(map);
+	asize = (size + 7u) & ~(size_t)7;
+	cur_cap = __sm_cap(map);
 	switch (__sm_kind(map)) {
 	case SM_OWNED_CONTIGUOUS: {
 		if (size == cur_cap) {
