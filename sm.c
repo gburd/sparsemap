@@ -2923,8 +2923,17 @@ __sm_separate_rle_chunk(sm_t *map, __sm_chunk_sep_t *sep, const uint64_t idx,
 
 	/* Where did the pivot chunk fall within the original chunk? */
 	do {
-		if (aligned_idx == sep->target.start) {
-			/* The pivot is left aligned, there will be two chunks in total. */
+		if (aligned_idx == sep->target.start &&
+		    sep->target.length > SM_CHUNK_MAX_CAPACITY) {
+			/*
+			 * Left aligned and the run spills past this one window:
+			 * two chunks -- the pivot on the left and a shortened RLE
+			 * run on the right.  When the run instead fits within one
+			 * window (length <= SM_CHUNK_MAX_CAPACITY) there is no
+			 * right remainder; that case falls through to the
+			 * straddle branch below, which handles aligned_idx ==
+			 * start by emitting a single sparse chunk (no left chunk).
+			 */
 			sep->count = 2;
 			sep->ex[1].start = aligned_idx + SM_CHUNK_MAX_CAPACITY;
 			sep->ex[1].end = aligned_idx + sep->target.length - 1;
@@ -2935,14 +2944,40 @@ __sm_separate_rle_chunk(sm_t *map, __sm_chunk_sep_t *sep, const uint64_t idx,
 			break;
 		}
 
-		if (aligned_idx + SM_CHUNK_MAX_CAPACITY >=
-		    sep->target.start + sep->target.length) {
-			/* The pivot is right aligned, there will be two chunks in total. */
-			sep->count = 2;
+		if (aligned_idx < sep->target.start + sep->target.length &&
+		    aligned_idx + SM_CHUNK_MAX_CAPACITY >=
+		        sep->target.start + sep->target.length) {
+			/*
+			 * The pivot straddles the end of the run: its aligned
+			 * start lies inside the run, but the run ends within
+			 * this one window.  Two chunks total.  The extra
+			 * `aligned_idx < start + length` guard is what keeps
+			 * amt_over below one window: without it a pivot that
+			 * sits ENTIRELY past the run end (aligned_idx >=
+			 * start + length -- the case that belongs to the
+			 * "beyond the run" branch below) would still enter here
+			 * because MAX_CAPACITY > 0 makes the upper-bound test
+			 * trivially true, and amt_over = aligned_idx +
+			 * MAX_CAPACITY - (start + length) would exceed one
+			 * window -- driving amt_over/64*2 past 63 (shift UB) and
+			 * first_zero = MAX_CAPACITY - amt_over negative
+			 * (size underflow) on maps whose RLE capacity was
+			 * widened well past the run.
+			 */
+			sep->count = (aligned_idx > sep->target.start) ? 2 : 1;
 			/* Does our pivot extend beyond the end of the run. */
 			const uint64_t amt_over = aligned_idx +
 			    SM_CHUNK_MAX_CAPACITY -
 			    (sep->target.start + sep->target.length);
+			/*
+			 * With the straddle guard above, 0 <= amt_over <
+			 * SM_CHUNK_MAX_CAPACITY, so amt_over / 64 * 2 <= 62 and
+			 * first_zero stays in (0, MAX_CAPACITY].  Assert the
+			 * bound so a future guard change that reintroduces an
+			 * over-one-window pivot trips a test rather than shifts
+			 * by >= 64.
+			 */
+			__sm_assert(amt_over < SM_CHUNK_MAX_CAPACITY);
 			if (amt_over > 0) {
 				/* The index of the first 0 bit. */
 				const size_t first_zero =
@@ -2950,7 +2985,24 @@ __sm_separate_rle_chunk(sm_t *map, __sm_chunk_sep_t *sep, const uint64_t idx,
 				const size_t bv =
 				    first_zero / SM_BITS_PER_VECTOR;
 				/* Shorten the pivot chunk because it extends beyond the end of the run ... */
-				if (amt_over > SM_BITS_PER_VECTOR) {
+				if (amt_over >= SM_BITS_PER_VECTOR) {
+					/*
+					 * Clear the `amt_over / 64` whole ONES
+					 * vectors that fall past the run end.  `>=`
+					 * not `>`: when the run ends exactly one
+					 * vector short of the window
+					 * (amt_over == 64, a vector-boundary run
+					 * tail with amt_over % 64 == 0) that one
+					 * trailing ONES vector still has to be
+					 * cleared -- with `>` it survived, leaving a
+					 * full 64 bits set past the run end (e.g. a
+					 * run [0, 1984) kept bits 1984..2047 set).
+					 * `~0 >> (amt_over/64*2)` keeps exactly the
+					 * SM_FLAGS_PER_INDEX - amt_over/64 leading
+					 * ONES flags; the straddle guard bounds
+					 * amt_over < SM_CHUNK_MAX_CAPACITY so the
+					 * shift is always < 64.
+					 */
 					pivot_chunk.m_data[0] &=
 					    ~(__sm_bitvec_t)0 >>
 					    amt_over / SM_BITS_PER_VECTOR * 2;
@@ -3002,17 +3054,29 @@ __sm_separate_rle_chunk(sm_t *map, __sm_chunk_sep_t *sep, const uint64_t idx,
 				}
 			}
 
-			/* Move the pivot chunk over to make room for the new left chunk. */
-			memmove((uint8_t *)((uintptr_t)sep->buf +
-			            SM_SIZEOF_OVERHEAD +
-			            (sizeof(__sm_bitvec_t) * 2)),
-			    sep->buf, sep->pivot.size);
-			memset(sep->buf, 0,
-			    SM_SIZEOF_OVERHEAD + (sizeof(__sm_bitvec_t) * 2));
-			sep->pivot.p +=
-			    SM_SIZEOF_OVERHEAD + (sizeof(__sm_bitvec_t) * 2);
+			/*
+			 * Make room for the left chunk only when the pivot
+			 * actually sits to the right of the run start.  When the
+			 * pivot is left aligned (aligned_idx == start, reached via
+			 * the fall-through for a run that fits in one window) there
+			 * is no left chunk: the masked pivot is the whole result,
+			 * a single sparse chunk, and it stays at sep->buf.
+			 */
+			if (aligned_idx > sep->target.start) {
+				/* Move the pivot chunk over to make room for the new left chunk. */
+				memmove((uint8_t *)((uintptr_t)sep->buf +
+				            SM_SIZEOF_OVERHEAD +
+				            (sizeof(__sm_bitvec_t) * 2)),
+				    sep->buf, sep->pivot.size);
+				memset(sep->buf, 0,
+				    SM_SIZEOF_OVERHEAD +
+				        (sizeof(__sm_bitvec_t) * 2));
+				sep->pivot.p +=
+				    SM_SIZEOF_OVERHEAD +
+				    (sizeof(__sm_bitvec_t) * 2);
+			}
 
-			/* Re-initialize pivot_chunk after the move */
+			/* Re-initialize pivot_chunk (moved or not). */
 			__sm_chunk_init(&pivot_chunk,
 			    sep->pivot.p + SM_SIZEOF_OVERHEAD);
 
@@ -3077,22 +3141,52 @@ __sm_separate_rle_chunk(sm_t *map, __sm_chunk_sep_t *sep, const uint64_t idx,
 				sep->pivot.size = SM_SIZEOF_OVERHEAD +
 				    __sm_chunk_get_size(&pivot_chunk);
 			}
-			/* Record information necessary to construct the left chunk. */
-			sep->ex[0].start = sep->target.start;
-			sep->ex[0].end = aligned_idx - 1;
-			sep->ex[0].p = sep->buf;
-			__sm_assert(sep->ex[0].start <= sep->ex[0].end);
+			/* Record information necessary to construct the left chunk
+			 * (only when there is one; a left-aligned pivot is a single
+			 * chunk with no left remainder). */
+			if (aligned_idx > sep->target.start) {
+				sep->ex[0].start = sep->target.start;
+				sep->ex[0].end = aligned_idx - 1;
+				sep->ex[0].p = sep->buf;
+				__sm_assert(sep->ex[0].start <= sep->ex[0].end);
+			}
 			__sm_assert(sep->ex[1].p == 0);
 			break;
 		}
 
 		if (aligned_idx >= sep->target.start + sep->target.length) {
-			/* The pivot is beyond the run but within the capacity, two chunks. */
-			sep->count = 2;
-			/* Ensure the aligned chunk is fully in the range (length, capacity). */
-			if (aligned_idx + SM_CHUNK_MAX_CAPACITY <
-			    sep->target.capacity) {
-				pivot_chunk.m_data[0] = (__sm_bitvec_t)0;
+			/*
+			 * The pivot lies entirely beyond the run but within the
+			 * chunk's capacity.  The run [start, start + length) is
+			 * wholly to the left of the pivot window, so there is
+			 * never a right remainder: the result is exactly two
+			 * chunks -- the shortened RLE run on the left and the new
+			 * sparse pivot holding the toggled bit.
+			 *
+			 * This used to be split into a
+			 * `aligned_idx + MAX_CAPACITY < capacity` case plus an
+			 * "unreachable" else that asserted and then fell through
+			 * to the central three-chunk code.  That else IS
+			 * reachable on a map whose RLE capacity was widened past
+			 * roundup(start + length): when the pivot sits in the
+			 * final, partial-capacity window (aligned_idx +
+			 * MAX_CAPACITY > capacity) the fall-through built a bogus
+			 * inverted right chunk (ex[1].start = aligned_idx +
+			 * MAX_CAPACITY > ex[1].end = start + length - 1) and
+			 * corrupted the stream.  Both windows want the identical
+			 * two-chunk layout, so handle them together.
+			 */
+			sep->count = (sep->target.length > 0) ? 2 : 1;
+			pivot_chunk.m_data[0] = (__sm_bitvec_t)0;
+			/*
+			 * Make room for the left (RLE run) chunk only when the
+			 * run is non-empty.  A zero-length run (adversarial: the
+			 * writer never emits one) has no left chunk, so the pivot
+			 * is the whole result -- a single sparse chunk that stays
+			 * at sep->buf.  Without this guard ex[0] below would be
+			 * [start, start - 1], an inverted chunk.
+			 */
+			if (sep->target.length > 0) {
 				/* Move the pivot chunk over to make room for the new left chunk. */
 				memmove((uint8_t *)((uintptr_t)sep->buf +
 				            SM_SIZEOF_OVERHEAD +
@@ -3101,54 +3195,37 @@ __sm_separate_rle_chunk(sm_t *map, __sm_chunk_sep_t *sep, const uint64_t idx,
 				memset(sep->buf, 0,
 				    SM_SIZEOF_OVERHEAD +
 				        (sizeof(__sm_bitvec_t) * 2));
-				sep->pivot.p += SM_SIZEOF_OVERHEAD +
+				sep->pivot.p +=
+				    SM_SIZEOF_OVERHEAD +
 				    sizeof(__sm_bitvec_t) * 2;
+			}
 
-				/* Re-initialize pivot_chunk after the move */
-				__sm_chunk_init(&pivot_chunk,
-				    sep->pivot.p + SM_SIZEOF_OVERHEAD);
+			/* Re-initialize pivot_chunk (moved or not). */
+			__sm_chunk_init(&pivot_chunk,
+			    sep->pivot.p + SM_SIZEOF_OVERHEAD);
 
-				if (state == 1) {
-					/* Change only the flag at the position of the index to "mixed" ... */
-					const size_t vec_idx =
-					    (idx - aligned_idx) /
-					    SM_BITS_PER_VECTOR;
-					const size_t bit_pos =
-					    (idx - aligned_idx) %
-					    SM_BITS_PER_VECTOR;
-					SM_CHUNK_SET_FLAGS(
-					    pivot_chunk.m_data[0], vec_idx,
-					    SM_PAYLOAD_MIXED);
-					/* and set the bit at that index in this chunk. */
-					pivot_chunk.m_data[1] |=
-					    (__sm_bitvec_t)1 << bit_pos;
-				}
-				/* Record information necessary to construct the left chunk. */
+			if (state == 1) {
+				/* Change only the flag at the position of the index to "mixed" ... */
+				const size_t vec_idx =
+				    (idx - aligned_idx) / SM_BITS_PER_VECTOR;
+				const size_t bit_pos =
+				    (idx - aligned_idx) % SM_BITS_PER_VECTOR;
+				SM_CHUNK_SET_FLAGS(pivot_chunk.m_data[0],
+				    vec_idx, SM_PAYLOAD_MIXED);
+				/* and set the bit at that index in this chunk. */
+				pivot_chunk.m_data[1] |= (__sm_bitvec_t)1
+				    << bit_pos;
+			}
+			/* Record information necessary to construct the left chunk
+			 * (only when the run is non-empty; a zero-length run has
+			 * no left chunk). */
+			if (sep->target.length > 0) {
 				sep->ex[0].start = sep->target.start;
 				sep->ex[0].end =
 				    sep->target.start + sep->target.length - 1;
 				sep->ex[0].p = sep->buf;
-				break;
 			}
-			/*
-			 * No `else`: the "pivot window does not fit within
-			 * capacity" case is unreachable.  The RLE capacity is
-			 * never allowed to extend a full empty window past the
-			 * run's window-rounded end (see __sm_chunk_rle_capacity_
-			 * limit), so start + capacity <= roundup(start + length,
-			 * SM_CHUNK_MAX_CAPACITY).  With aligned_idx a window
-			 * multiple and aligned_idx < start + capacity, that
-			 * forces aligned_idx < start + length -- i.e. the
-			 * enclosing (A) test above is itself never true, so the
-			 * inner test is always true when reached.  Proven by the
-			 * capacity invariant plus an exhaustive state==1 sweep
-			 * (4740 state-1 separates over the full capacity/length
-			 * regime, zero counter-examples).  An assert on the
-			 * invariant guards against future capacity-policy
-			 * changes reintroducing the case.
-			 */
-			__sm_assert(aligned_idx + SM_CHUNK_MAX_CAPACITY <
-			    sep->target.capacity);
+			break;
 		}
 
 		/* The pivot's range is central, there will be three chunks in total. */
@@ -4316,12 +4393,23 @@ __sm_map_set(sm_t *map, uint64_t idx, const bool coalesce, sm_cursor_t *cur)
 	__sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
 	size_t capacity = __sm_chunk_get_capacity(&chunk);
 
-	if (capacity < SM_CHUNK_MAX_CAPACITY &&
+	if (!__sm_chunk_is_rle(&chunk) &&
+	    capacity < SM_CHUNK_MAX_CAPACITY &&
 	    idx - start < SM_CHUNK_MAX_CAPACITY) {
 		/*
 		 * Special case, we have a sparse chunk with one or more flags set to
 		 * SM_PAYLOAD_NONE which reduces the carrying capacity of the chunk. In
 		 * this case we should remove those flags and try again.
+		 *
+		 * The `!__sm_chunk_is_rle` guard is essential: an RLE chunk
+		 * legitimately reports a capacity below SM_CHUNK_MAX_CAPACITY
+		 * (sm_offset emits RLE chunks whose window-aligned capacity is
+		 * one window or less), and __sm_chunk_increase_capacity is a
+		 * sparse-only routine that would scribble over the RLE
+		 * descriptor -- corrupting the chunk, failing sm_validate, and
+		 * later overreading in sm_split/sm_maximum.  RLE chunks belong
+		 * to the RLE-set / separate path below, which handles a bit
+		 * inside, at, or past the run correctly.
 		 */
 		__sm_assert(__sm_chunk_is_rle(&chunk) == false);
 		__sm_chunk_increase_capacity(&chunk, SM_CHUNK_MAX_CAPACITY);

@@ -5,6 +5,80 @@ Notable changes per release.  The Rust port keeps its own log in
 across the C library, the Rust crate and the Python binding, so a
 release exists even where one of them is functionally unchanged.
 
+## 5.6.0
+
+A security-hardening release, from a production-readiness review that
+fuzzed every decode and mutation path with untrusted input.  No
+wire-format change (still version 2); a drop-in source swap for any
+5.5.x vendored copy.  The governing rule is now explicit: **any byte
+stream the library did not produce itself is untrusted**, whichever
+entry point it arrives through.
+
+### Security
+
+- **One definition of a valid map, enforced at every decode entry.**
+  `sm_validate` now also rejects an RLE chunk whose length exceeds its
+  capacity, a chunk start not aligned to the chunk width,
+  `start + capacity` overflowing `uint64_t`, chunks whose spans
+  overlap, and a stored chunk count that disagrees with the walk.
+  `sm_open` and `sm_open_copy` run it and reject malformed input, as
+  `sm_deserialize` already did -- previously they trusted the bytes and
+  a crafted chunk could crash a later `sm_add`.
+- **Memory safety on valid-but-adversarial maps.**  Fixed a source-side
+  over-read in `sm_split`, a non-terminating per-bit loop, a
+  destination over-write, and an out-of-range shift -- all reachable
+  from maps that pass validation.
+- **Termination and amplification.**  A 24-byte input can legitimately
+  declare a two-billion-bit run.  `sm_xor`, `sm_extract_range`,
+  `sm_hash`, the `*_cardinality` family, `sm_jaccard_index`,
+  `sm_equals`, `sm_compare` and `sm_subset_compare` were O(set bits)
+  and would hang for seconds on such input; they now work run-by-run
+  and complete in microseconds.  `sm_to_array` is inherently
+  O(cardinality) and is documented as such.
+- **One NULL-map contract.**  A NULL map is an empty, read-only map;
+  mutators return their documented failure value and set
+  `errno = EINVAL`.  Nineteen public functions previously segfaulted on
+  NULL.  Documented in `sm.h` and covered for all public functions.
+
+### Rust and Python
+
+- `SparseMap::from_bytes` uses checked arithmetic and rejects the same
+  structurally-invalid chunks the C `sm_validate` does.  Release builds
+  previously wrapped silently, producing maps that iterated out of
+  order and gave wrong set-operation results; the Python wheel
+  inherited this.  `from_bytes` now never panics and never returns a
+  corrupt map on any input, and the Python binding raises `ValueError`
+  on malformed bytes.  A `cargo-fuzz` target is committed.
+
+### Tests and tooling
+
+- A mutating libFuzzer harness (`tests/fuzz_mutate.c`) exercises the
+  write paths the read-only harness never reached.
+- The CI hegel download is verified against the `flake.nix` hashes and
+  third-party actions are pinned to commit SHAs.
+- `SECURITY.md` tracks the current release generically; `.gitignore`
+  covers profiling data, dotenv secrets, keys, coverage/review build
+  directories and fuzzer output; personal direnv hooks moved to an
+  untracked `.envrc.local`; `CONTRIBUTING.md` warns that a build
+  directory embeds the test environment.
+
+### Docs and provenance
+
+- The wire-format documentation now matches the code: the format is
+  host-endian and a cross-endian file is rejected, not byte-swapped.
+- The README credits Christoph Rupp's
+  [cruppstahl/sparsemap](https://github.com/cruppstahl/sparsemap) as
+  the origin, continued with his blessing; his copyright joins the
+  source headers.
+
+### Variants
+
+- A separate `no-rle` branch provides an RLE-free build (sparse chunks
+  only) with a small-set representation that matches or beats
+  PostgreSQL's `Bitmapset` for near-zero index sets and transitions to
+  the chunk representation as indices spread.  The RLE build on `main`
+  is unchanged and remains the default.
+
 ## 5.5.1
 
 Internal hardening.  No API or wire-format change; a drop-in source
