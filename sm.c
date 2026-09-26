@@ -9459,13 +9459,17 @@ sm_difference(const sm_t *a, const sm_t *b)
 			} else if (!a_rle && !b_rle && a_start == b_start) {
 				__sm_bitvec_t aw[32], bw[32];
 				int ac[32], bc[32];
+				__sm_bitvec_t rw[32];
+				int rc[32];
+				__sm_bitvec_t desc;
+				__sm_bitvec_t vecs[32];
+				int nvecs;
+				int i;
 				__sm_expand_sparse_chunk(&a_chunk, aw, ac);
 				__sm_expand_sparse_chunk(&b_chunk, bw, bc);
 
-				__sm_bitvec_t rw[32];
-				int rc[32];
 				__sm_words_andnot(rw, aw, bw);
-				for (int i = 0; i < (int)SM_FLAGS_PER_INDEX;
+				for (i = 0; i < (int)SM_FLAGS_PER_INDEX;
 				     i++) {
 					if (ac[i]) {
 						if (!bc[i])
@@ -9478,9 +9482,6 @@ sm_difference(const sm_t *a, const sm_t *b)
 					}
 				}
 
-				__sm_bitvec_t desc;
-				__sm_bitvec_t vecs[32];
-				int nvecs;
 				if (__sm_encode_sparse_chunk(rw, rc, &desc,
 				        vecs, &nvecs)) {
 					if (!__sm_append_sparse_chunk(&result,
@@ -9498,6 +9499,12 @@ sm_difference(const sm_t *a, const sm_t *b)
 				int ac2[SM_FLAGS_PER_INDEX],
 				    bc2[SM_FLAGS_PER_INDEX];
 				__sm_idx_t result_start;
+				__sm_bitvec_t rw2[SM_FLAGS_PER_INDEX];
+				int rc2[SM_FLAGS_PER_INDEX];
+				__sm_bitvec_t desc2;
+				__sm_bitvec_t vecs2[SM_FLAGS_PER_INDEX];
+				int nvecs2;
+				int i;
 
 				if (a_rle && !b_rle) {
 					/* a is RLE, b is sparse */
@@ -9523,17 +9530,15 @@ sm_difference(const sm_t *a, const sm_t *b)
 				} else {
 					/* Both RLE: should not reach here (handled by emit_chunk_bits path) */
 					result_start = a_start;
-					for (int i = 0;
+					for (i = 0;
 					     i < (int)SM_FLAGS_PER_INDEX; i++) {
 						aw2[i] = bw2[i] = 0;
 						ac2[i] = bc2[i] = 0;
 					}
 				}
 
-				__sm_bitvec_t rw2[SM_FLAGS_PER_INDEX];
-				int rc2[SM_FLAGS_PER_INDEX];
 				__sm_words_andnot(rw2, aw2, bw2);
-				for (int i = 0; i < (int)SM_FLAGS_PER_INDEX;
+				for (i = 0; i < (int)SM_FLAGS_PER_INDEX;
 				     i++) {
 					if (ac2[i]) {
 						if (!bc2[i])
@@ -9546,9 +9551,6 @@ sm_difference(const sm_t *a, const sm_t *b)
 					}
 				}
 
-				__sm_bitvec_t desc2;
-				__sm_bitvec_t vecs2[SM_FLAGS_PER_INDEX];
-				int nvecs2;
 				if (__sm_encode_sparse_chunk(rw2, rc2, &desc2,
 				        vecs2, &nvecs2)) {
 					if (!__sm_append_sparse_chunk(&result,
@@ -9639,6 +9641,17 @@ sm_union(const sm_t *a, const sm_t *b)
 
 	const size_t a_count = a ? __sm_get_chunk_count(a) : 0;
 	const size_t b_count = b ? __sm_get_chunk_count(b) : 0;
+	size_t cap;
+	sm_t *result;
+	uint8_t *ap;
+	uint8_t *bp;
+	size_t ai = 0, bi = 0;
+	/* Cursors track how far into each current chunk we've already emitted.
+     A value of 0 means "fresh chunk" (reset after advancing).  When a
+     chunk is partially consumed, the cursor holds the absolute bit
+     position up to which bits have been emitted. */
+	size_t a_cursor = 0;
+	size_t b_cursor = 0;
 
 	if (a_count == 0 && b_count == 0) {
 		return (NULL);
@@ -9651,25 +9664,17 @@ sm_union(const sm_t *a, const sm_t *b)
 	}
 
 	/* Allocate result with combined data size (worst case: no overlap). */
-	size_t cap = a->m_data_used + b->m_data_used;
+	cap = a->m_data_used + b->m_data_used;
 	if (cap < 1024)
 		cap = 1024;
 
-	sm_t *result = sparsemap(cap);
+	result = sparsemap(cap);
 	if (result == NULL) {
 		return (NULL);
 	}
 
-	uint8_t *ap = __sm_get_chunk_data(a, 0);
-	uint8_t *bp = __sm_get_chunk_data(b, 0);
-	size_t ai = 0, bi = 0;
-
-	/* Cursors track how far into each current chunk we've already emitted.
-     A value of 0 means "fresh chunk" (reset after advancing).  When a
-     chunk is partially consumed, the cursor holds the absolute bit
-     position up to which bits have been emitted. */
-	size_t a_cursor = 0;
-	size_t b_cursor = 0;
+	ap = __sm_get_chunk_data(a, 0);
+	bp = __sm_get_chunk_data(b, 0);
 
 	while (ai < a_count && bi < b_count) {
 		/* ---- Read chunk a metadata ---- */
