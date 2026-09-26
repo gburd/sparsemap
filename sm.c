@@ -6670,6 +6670,14 @@ __sm_offset_abs_start(uint64_t src_start, ssize_t offset, bool *neg)
 sm_t *
 sm_offset(const sm_t *map, ssize_t offset)
 {
+	size_t count;
+	size_t chunk_bytes;
+	size_t cap;
+	sm_t *result;
+	uint8_t *p;
+	size_t i;
+	__sm_emitter_t em;
+
 	__sm_check_invariants(map);
 	if (map == NULL) {
 		return (NULL);
@@ -6690,7 +6698,7 @@ sm_offset(const sm_t *map, ssize_t offset)
 		return (sm_copy(map));
 	}
 
-	const size_t count = __sm_get_chunk_count(map);
+	count = __sm_get_chunk_count(map);
 	if (count == 0) {
 		return (NULL);
 	}
@@ -6726,10 +6734,10 @@ sm_offset(const sm_t *map, ssize_t offset)
 	 * on the byte stream -- with zero headroom its memmove read one
 	 * chunk past the allocation (ASan heap-buffer-overflow).
 	 */
-	const size_t chunk_bytes = SM_SIZEOF_OVERHEAD +
+	chunk_bytes = SM_SIZEOF_OVERHEAD +
 	    sizeof(__sm_bitvec_t) * (SM_FLAGS_PER_INDEX + 1);
-	size_t cap = map->m_data_used * 2 + chunk_bytes;
-	sm_t *result = sparsemap(cap > 1024 ? cap : 1024);
+	cap = map->m_data_used * 2 + chunk_bytes;
+	result = sparsemap(cap > 1024 ? cap : 1024);
 	if (result == NULL) {
 		return (NULL);
 	}
@@ -6738,17 +6746,20 @@ sm_offset(const sm_t *map, ssize_t offset)
 	 * that several source pieces landing in the same aligned output
 	 * chunk are merged instead of appended twice.  Replaces the old
 	 * carry buffer, which only serialised the forward-overflow case. */
-	__sm_emitter_t em = { .resultp = &result, .pending = false };
+	memset(&em, 0, sizeof(em));
+	em.resultp = &result;
+	em.pending = false;
 
 	/* Walk source chunks */
-	uint8_t *p = __sm_get_chunk_data(map, 0);
+	p = __sm_get_chunk_data(map, 0);
 
-	for (size_t i = 0; i < count; i++) {
+	for (i = 0; i < count; i++) {
 		const __sm_idx_t src_start = __sm_load_idx((const uint8_t *)p);
-		p += SM_SIZEOF_OVERHEAD;
 		__sm_chunk_t chunk;
+		size_t chunk_size;
+		p += SM_SIZEOF_OVERHEAD;
 		__sm_chunk_init(&chunk, p);
-		const size_t chunk_size = __sm_chunk_get_size(&chunk);
+		chunk_size = __sm_chunk_get_size(&chunk);
 
 		if (__sm_chunk_is_rle(&chunk)) {
 			const size_t rle_len =
@@ -6906,6 +6917,16 @@ sm_offset(const sm_t *map, ssize_t offset)
          place into correct output chunk(s). */
 			__sm_bitvec_t words[32];
 			int cf[32];
+			bool neg;
+			uint64_t mag;
+			ssize_t intra_shift;
+			uint64_t out_aligned;
+			__sm_bitvec_t main_words[32] = { 0 };
+			int main_cap[32] = { 0 };
+			__sm_bitvec_t overflow_words[32] = { 0 };
+			int overflow_cap[32] = { 0 };
+			bool has_overflow = false;
+			int ow;
 			__sm_expand_sparse_chunk(&chunk, words, cf);
 
 			/* Each bit at absolute position src_start + slot*64 + bit_offset
@@ -6917,9 +6938,7 @@ sm_offset(const sm_t *map, ssize_t offset)
          If intra >= 0: right-shift within the 32-word array, overflow to carry.
          If intra < 0 (new start negative): left-shift, dropping low bits. */
 
-			bool neg;
-			const uint64_t mag =
-			    __sm_offset_abs_start(src_start, offset, &neg);
+			mag = __sm_offset_abs_start(src_start, offset, &neg);
 
 			/* Compute aligned output chunk start and intra-chunk shift.
 			 * All arithmetic is unsigned; intra_shift for the
@@ -6927,9 +6946,6 @@ sm_offset(const sm_t *map, ssize_t offset)
 			 * SM_CHUNK_MAX_CAPACITY-1), so it fits ssize_t with room to
 			 * spare.  A start below bit 0 (neg) becomes a left-shift by
 			 * `mag` bits, dropping the low bits. */
-			ssize_t intra_shift;
-			uint64_t out_aligned;
-
 			if (!neg) {
 				const uint64_t oa =
 				    __sm_get_chunk_aligned_offset((size_t)mag);
@@ -6949,24 +6965,21 @@ sm_offset(const sm_t *map, ssize_t offset)
 				intra_shift = -(ssize_t)mag;
 			}
 
-			/* Build the shifted 32-word arrays for main output chunk and overflow */
-			__sm_bitvec_t main_words[32] = { 0 };
-			int main_cap[32] = { 0 };
-			__sm_bitvec_t overflow_words[32] = { 0 };
-			int overflow_cap[32] = { 0 };
-
 			if (intra_shift >= 0) {
 				/* Right-shift by intra_shift bits */
 				size_t word_shift =
 				    (size_t)intra_shift / SM_BITS_PER_VECTOR;
 				size_t bit_rem =
 				    (size_t)intra_shift % SM_BITS_PER_VECTOR;
+				int w;
+				size_t wz;
 
-				for (int w = 31; w >= 0; w--) {
+				for (w = 31; w >= 0; w--) {
+					size_t dst;
 					if (!cf[w] && words[w] == 0)
 						continue;
 
-					size_t dst = (size_t)w + word_shift;
+					dst = (size_t)w + word_shift;
 					if (bit_rem == 0) {
 						if (dst < 32) {
 							main_words[dst] |=
@@ -6984,6 +6997,7 @@ sm_offset(const sm_t *map, ssize_t offset)
 						__sm_bitvec_t hi = words[w] >>
 						    (SM_BITS_PER_VECTOR -
 						        bit_rem);
+						size_t dst1;
 
 						if (dst < 32) {
 							main_words[dst] |= lo;
@@ -6995,7 +7009,7 @@ sm_offset(const sm_t *map, ssize_t offset)
 							    1;
 						}
 
-						size_t dst1 = dst + 1;
+						dst1 = dst + 1;
 						if (dst1 < 32) {
 							main_words[dst1] |= hi;
 							main_cap[dst1] = 1;
@@ -7009,17 +7023,18 @@ sm_offset(const sm_t *map, ssize_t offset)
 				}
 
 				/* Mark shifted-in zero slots as capacity */
-				for (size_t w = 0; w < word_shift && w < 32;
-				     w++) {
-					main_cap[w] = 1;
+				for (wz = 0; wz < word_shift && wz < 32;
+				     wz++) {
+					main_cap[wz] = 1;
 				}
 			} else {
 				/* intra_shift < 0: left-shift by |intra_shift| bits (dropping low bits) */
 				size_t drop = (size_t)(-intra_shift);
 				size_t word_drop = drop / SM_BITS_PER_VECTOR;
 				size_t bit_drop = drop % SM_BITS_PER_VECTOR;
+				size_t w;
 
-				for (size_t w = 0; w < 32; w++) {
+				for (w = 0; w < 32; w++) {
 					size_t src_w = w + word_drop;
 					if (src_w >= 32)
 						break;
@@ -7049,9 +7064,8 @@ sm_offset(const sm_t *map, ssize_t offset)
 				return (NULL);
 			}
 
-			bool has_overflow = false;
-			for (int w = 0; w < (int)SM_FLAGS_PER_INDEX; w++) {
-				if (overflow_cap[w] && overflow_words[w] != 0) {
+			for (ow = 0; ow < (int)SM_FLAGS_PER_INDEX; ow++) {
+				if (overflow_cap[ow] && overflow_words[ow] != 0) {
 					has_overflow = true;
 					break;
 				}
