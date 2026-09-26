@@ -7150,10 +7150,14 @@ __sm_chunk_next_set(const __sm_chunk_t *chunk, uint64_t start,
 	for (size_t v = 0; v < SM_FLAGS_PER_INDEX; v++) {
 		const uint64_t vec_lo = start + v * SM_BITS_PER_VECTOR;
 		const uint64_t vec_hi = vec_lo + SM_BITS_PER_VECTOR - 1;
+		const size_t flags =
+		    SM_CHUNK_GET_FLAGS(chunk->m_data[0], v);
+		__sm_bitvec_t w;
+		uint64_t skip = 0;
+		__sm_bitvec_t masked;
 		if (lower_excl != UINT64_MAX && vec_hi <= lower_excl) {
 			continue;
 		}
-		const size_t flags = SM_CHUNK_GET_FLAGS(chunk->m_data[0], v);
 		if (flags == SM_PAYLOAD_NONE || flags == SM_PAYLOAD_ZEROS) {
 			continue;
 		}
@@ -7164,15 +7168,13 @@ __sm_chunk_next_set(const __sm_chunk_t *chunk, uint64_t start,
 			return (lower_excl + 1);
 		}
 		/* SM_PAYLOAD_MIXED: scan the payload word for a 1-bit > lower_excl. */
-		const __sm_bitvec_t w =
-		    chunk->m_data[1 + __sm_chunk_get_position(chunk, v)];
-		uint64_t skip = 0;
+		w = chunk->m_data[1 + __sm_chunk_get_position(chunk, v)];
 		if (lower_excl != UINT64_MAX && lower_excl >= vec_lo) {
 			skip = lower_excl - vec_lo + 1;
 			if (skip >= SM_BITS_PER_VECTOR)
 				continue;
 		}
-		const __sm_bitvec_t masked = w & (~(__sm_bitvec_t)0 << skip);
+		masked = w & (~(__sm_bitvec_t)0 << skip);
 		if (masked == 0) {
 			continue;
 		}
@@ -7201,23 +7203,24 @@ __sm_chunk_prev_set(const __sm_chunk_t *chunk, uint64_t start,
 	for (ssize_t v = SM_FLAGS_PER_INDEX - 1; v >= 0; v--) {
 		const uint64_t vec_lo =
 		    start + (uint64_t)v * SM_BITS_PER_VECTOR;
+		const size_t flags =
+		    SM_CHUNK_GET_FLAGS(chunk->m_data[0], (size_t)v);
+		const uint64_t vec_hi = vec_lo + SM_BITS_PER_VECTOR - 1;
+		__sm_bitvec_t w;
 		if (vec_lo >= upper_excl) {
 			continue;
 		}
-		const size_t flags =
-		    SM_CHUNK_GET_FLAGS(chunk->m_data[0], (size_t)v);
 		if (flags == SM_PAYLOAD_NONE || flags == SM_PAYLOAD_ZEROS) {
 			continue;
 		}
-		const uint64_t vec_hi = vec_lo + SM_BITS_PER_VECTOR - 1;
 		if (flags == SM_PAYLOAD_ONES) {
 			return (
 			    upper_excl - 1 < vec_hi ? upper_excl - 1 : vec_hi);
 		}
 		/* SM_PAYLOAD_MIXED. */
-		__sm_bitvec_t w =
-		    chunk
-		        ->m_data[1 + __sm_chunk_get_position(chunk, (size_t)v)];
+		w = chunk
+		        ->m_data[1 +
+		            __sm_chunk_get_position(chunk, (size_t)v)];
 		if (upper_excl - 1 < vec_hi) {
 			const uint64_t bits_to_keep = upper_excl - vec_lo;
 			if (bits_to_keep == 0)
@@ -7245,14 +7248,15 @@ sm_next_member(const sm_t *map, uint64_t prev_idx, sm_cursor_t *cur)
 		const size_t n = __sm_small_nwords(map);
 		const uint64_t from = (prev_idx == SM_IDX_MAX) ? 0
 		                                               : prev_idx + 1;
+		size_t w;
+		uint64_t word;
 		if (prev_idx != SM_IDX_MAX &&
 		    prev_idx >= (uint64_t)n * 64)
 			return (SM_IDX_MAX);
-		size_t w = (size_t)(from / 64);
+		w = (size_t)(from / 64);
 		if (w >= n)
 			return (SM_IDX_MAX);
-		uint64_t word = words[w] &
-		    (~(uint64_t)0 << (from % 64));
+		word = words[w] & (~(uint64_t)0 << (from % 64));
 		for (;;) {
 			if (word != 0)
 				return ((uint64_t)w * 64 +
@@ -7263,50 +7267,59 @@ sm_next_member(const sm_t *map, uint64_t prev_idx, sm_cursor_t *cur)
 		}
 	}
 	__sm_check_invariants(map);
-	const size_t count = __sm_get_chunk_count(map);
-	if (count == 0)
-		return (SM_IDX_MAX);
+	{
+		const size_t count = __sm_get_chunk_count(map);
+		uint8_t *base;
+		uint8_t *p;
+		size_t stream_end;
+		if (count == 0)
+			return (SM_IDX_MAX);
 
-	uint8_t *base = __sm_get_chunk_data(map, 0);
-	uint8_t *p = base;
-	const size_t stream_end = map->m_data_used - SM_SIZEOF_OVERHEAD;
+		base = __sm_get_chunk_data(map, 0);
+		p = base;
+		stream_end = map->m_data_used - SM_SIZEOF_OVERHEAD;
 
-	/*
-	 * Cursor fast-path.  Sequential forward iteration
-	 *   while ((i = sm_next_member(map, i, &c)) != SM_IDX_MAX) ...
-	 * is the dominant scan-side hot path.  Without a cursor each
-	 * call walks from chunk 0 -- O(N) per call, O(N^2) per scan.
-	 * Resume from the cached chunk when prev_idx is not earlier than
-	 * that chunk's start.
-	 */
-	if (prev_idx != SM_IDX_MAX && cur != NULL &&
-	    cur->offset != SIZE_MAX && cur->offset < stream_end &&
-	    cur->start_idx <= prev_idx) {
-		p = base + cur->offset;
-	}
-
-	while ((size_t)(p - base) < stream_end) {
-		const __sm_idx_t start = __sm_load_idx((const uint8_t *)p);
-		__sm_chunk_t chunk;
-		__sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
-		const size_t cap = __sm_chunk_get_capacity(&chunk);
-		/* Skip chunks entirely below the lower bound. */
-		if (prev_idx != SM_IDX_MAX && start + cap - 1 <= prev_idx) {
-			p += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&chunk);
-			continue;
+		/*
+		 * Cursor fast-path.  Sequential forward iteration
+		 *   while ((i = sm_next_member(map, i, &c)) != SM_IDX_MAX) ...
+		 * is the dominant scan-side hot path.  Without a cursor each
+		 * call walks from chunk 0 -- O(N) per call, O(N^2) per scan.
+		 * Resume from the cached chunk when prev_idx is not earlier than
+		 * that chunk's start.
+		 */
+		if (prev_idx != SM_IDX_MAX && cur != NULL &&
+		    cur->offset != SIZE_MAX && cur->offset < stream_end &&
+		    cur->start_idx <= prev_idx) {
+			p = base + cur->offset;
 		}
-		const uint64_t hit =
-		    __sm_chunk_next_set(&chunk, start, prev_idx);
-		if (hit != SM_IDX_MAX) {
-			if (cur != NULL) {
-				cur->offset = (size_t)(p - base);
-				cur->start_idx = start;
+
+		while ((size_t)(p - base) < stream_end) {
+			const __sm_idx_t start =
+			    __sm_load_idx((const uint8_t *)p);
+			__sm_chunk_t chunk;
+			size_t cap;
+			uint64_t hit;
+			__sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
+			cap = __sm_chunk_get_capacity(&chunk);
+			/* Skip chunks entirely below the lower bound. */
+			if (prev_idx != SM_IDX_MAX &&
+			    start + cap - 1 <= prev_idx) {
+				p += SM_SIZEOF_OVERHEAD +
+				    __sm_chunk_get_size(&chunk);
+				continue;
 			}
-			return (hit);
+			hit = __sm_chunk_next_set(&chunk, start, prev_idx);
+			if (hit != SM_IDX_MAX) {
+				if (cur != NULL) {
+					cur->offset = (size_t)(p - base);
+					cur->start_idx = start;
+				}
+				return (hit);
+			}
+			p += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&chunk);
 		}
-		p += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&chunk);
+		return (SM_IDX_MAX);
 	}
-	return (SM_IDX_MAX);
 }
 
 uint64_t
@@ -7323,18 +7336,21 @@ sm_prev_member(const sm_t *map, uint64_t prev_idx, sm_cursor_t *cur)
 		 * means "from the end"). */
 		const uint64_t *words = __sm_small_words(map);
 		const size_t n = __sm_small_nwords(map);
+		uint64_t upper_excl;
+		uint64_t last;
+		size_t w;
+		uint64_t word;
 		if (n == 0)
 			return (SM_IDX_MAX);
-		const uint64_t upper_excl =
+		upper_excl =
 		    (prev_idx == SM_IDX_MAX) ? (uint64_t)n * 64 : prev_idx;
 		if (upper_excl == 0)
 			return (SM_IDX_MAX);
-		uint64_t last = upper_excl - 1;
+		last = upper_excl - 1;
 		if (last >= (uint64_t)n * 64)
 			last = (uint64_t)n * 64 - 1;
-		size_t w = (size_t)(last / 64);
-		uint64_t word = words[w] &
-		    (~(uint64_t)0 >> (63 - (last % 64)));
+		w = (size_t)(last / 64);
+		word = words[w] & (~(uint64_t)0 >> (63 - (last % 64)));
 		for (;;) {
 			if (word != 0)
 				return ((uint64_t)w * 64 +
@@ -7346,55 +7362,61 @@ sm_prev_member(const sm_t *map, uint64_t prev_idx, sm_cursor_t *cur)
 		}
 	}
 	__sm_check_invariants(map);
-	const size_t count = __sm_get_chunk_count(map);
-	if (count == 0)
-		return (SM_IDX_MAX);
-
-	/* SM_IDX_MAX as input means "start past the end". */
-	const uint64_t upper_excl =
-	    (prev_idx == SM_IDX_MAX) ? UINT64_MAX : prev_idx;
-
-	/* Walk forward to the last chunk that starts before upper_excl,
-	 * remembering each chunk so we can step back if needed. */
-	uint8_t *p = __sm_get_chunk_data(map, 0);
-	/* Track up to `count` candidate chunk pointers. */
-	uint8_t *last = NULL;
-	size_t last_idx = 0;
-	for (size_t i = 0; i < count; i++) {
-		const __sm_idx_t start = __sm_load_idx((const uint8_t *)p);
-		if (start >= upper_excl)
-			break;
-		last = p;
-		last_idx = i;
-		__sm_chunk_t tmp;
-		__sm_chunk_init(&tmp, p + SM_SIZEOF_OVERHEAD);
-		p += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&tmp);
-	}
-	if (last == NULL)
-		return (SM_IDX_MAX);
-
-	/* Step back through chunks until we find a hit. */
-	while (true) {
-		const __sm_idx_t start = __sm_load_idx((const uint8_t *)last);
-		__sm_chunk_t chunk;
-		__sm_chunk_init(&chunk, last + SM_SIZEOF_OVERHEAD);
-		const uint64_t hit =
-		    __sm_chunk_prev_set(&chunk, start, upper_excl);
-		if (hit != SM_IDX_MAX)
-			return (hit);
-		if (last_idx == 0)
-			break;
-		/* Walk forward to find the chunk preceding `last`. */
-		uint8_t *q = __sm_get_chunk_data(map, 0);
-		for (size_t j = 0; j + 1 < last_idx; j++) {
+	{
+		const size_t count = __sm_get_chunk_count(map);
+		/* SM_IDX_MAX as input means "start past the end". */
+		const uint64_t upper_excl =
+		    (prev_idx == SM_IDX_MAX) ? UINT64_MAX : prev_idx;
+		/* Walk forward to the last chunk that starts before upper_excl,
+		 * remembering each chunk so we can step back if needed. */
+		uint8_t *p = __sm_get_chunk_data(map, 0);
+		/* Track up to `count` candidate chunk pointers. */
+		uint8_t *last = NULL;
+		size_t last_idx = 0;
+		size_t i;
+		if (count == 0)
+			return (SM_IDX_MAX);
+		for (i = 0; i < count; i++) {
+			const __sm_idx_t start =
+			    __sm_load_idx((const uint8_t *)p);
 			__sm_chunk_t tmp;
-			__sm_chunk_init(&tmp, q + SM_SIZEOF_OVERHEAD);
-			q += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&tmp);
+			if (start >= upper_excl)
+				break;
+			last = p;
+			last_idx = i;
+			__sm_chunk_init(&tmp, p + SM_SIZEOF_OVERHEAD);
+			p += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&tmp);
 		}
-		last = q;
-		last_idx--;
+		if (last == NULL)
+			return (SM_IDX_MAX);
+
+		/* Step back through chunks until we find a hit. */
+		while (true) {
+			const __sm_idx_t start =
+			    __sm_load_idx((const uint8_t *)last);
+			__sm_chunk_t chunk;
+			uint64_t hit;
+			uint8_t *q;
+			size_t j;
+			__sm_chunk_init(&chunk, last + SM_SIZEOF_OVERHEAD);
+			hit = __sm_chunk_prev_set(&chunk, start, upper_excl);
+			if (hit != SM_IDX_MAX)
+				return (hit);
+			if (last_idx == 0)
+				break;
+			/* Walk forward to find the chunk preceding `last`. */
+			q = __sm_get_chunk_data(map, 0);
+			for (j = 0; j + 1 < last_idx; j++) {
+				__sm_chunk_t tmp;
+				__sm_chunk_init(&tmp, q + SM_SIZEOF_OVERHEAD);
+				q += SM_SIZEOF_OVERHEAD +
+				    __sm_chunk_get_size(&tmp);
+			}
+			last = q;
+			last_idx--;
+		}
+		return (SM_IDX_MAX);
 	}
-	return (SM_IDX_MAX);
 }
 
 bool
