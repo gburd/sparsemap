@@ -9033,21 +9033,28 @@ sm_intersection(const sm_t *a, const sm_t *b)
 		/* Read chunk a metadata */
 		const __sm_idx_t a_start = __sm_load_idx((const uint8_t *)ap);
 		__sm_chunk_t a_chunk;
-		__sm_chunk_init(&a_chunk, ap + SM_SIZEOF_OVERHEAD);
-		const bool a_rle = SM_IS_CHUNK_RLE(&a_chunk);
-		const size_t a_cap = __sm_chunk_get_capacity(&a_chunk);
-		const size_t a_size = __sm_chunk_get_size(&a_chunk);
-		const size_t a_end =
-		    (size_t)a_start + a_cap; /* one past last bit */
-
-		/* Read chunk b metadata */
+		bool a_rle;
+		size_t a_cap;
+		size_t a_size;
+		size_t a_end;
 		const __sm_idx_t b_start = __sm_load_idx((const uint8_t *)bp);
 		__sm_chunk_t b_chunk;
+		bool b_rle;
+		size_t b_cap;
+		size_t b_size;
+		size_t b_end;
+		__sm_chunk_init(&a_chunk, ap + SM_SIZEOF_OVERHEAD);
+		a_rle = SM_IS_CHUNK_RLE(&a_chunk);
+		a_cap = __sm_chunk_get_capacity(&a_chunk);
+		a_size = __sm_chunk_get_size(&a_chunk);
+		a_end = (size_t)a_start + a_cap; /* one past last bit */
+
+		/* Read chunk b metadata */
 		__sm_chunk_init(&b_chunk, bp + SM_SIZEOF_OVERHEAD);
-		const bool b_rle = SM_IS_CHUNK_RLE(&b_chunk);
-		const size_t b_cap = __sm_chunk_get_capacity(&b_chunk);
-		const size_t b_size = __sm_chunk_get_size(&b_chunk);
-		const size_t b_end = (size_t)b_start + b_cap;
+		b_rle = SM_IS_CHUNK_RLE(&b_chunk);
+		b_cap = __sm_chunk_get_capacity(&b_chunk);
+		b_size = __sm_chunk_get_size(&b_chunk);
+		b_end = (size_t)b_start + b_cap;
 
 		/* Prefetch next chunks */
 		if (ai + 1 < a_count) {
@@ -9353,11 +9360,15 @@ sm_difference(const sm_t *a, const sm_t *b)
 		size_t a_cursor;
 		uint8_t *bp_save;
 		size_t bi_save;
+		bool a_rle;
+		size_t a_cap_bits;
+		size_t a_size;
+		size_t a_end;
 		__sm_chunk_init(&a_chunk, ap + SM_SIZEOF_OVERHEAD);
-		const bool a_rle = SM_IS_CHUNK_RLE(&a_chunk);
-		const size_t a_cap_bits = __sm_chunk_get_capacity(&a_chunk);
-		const size_t a_size = __sm_chunk_get_size(&a_chunk);
-		const size_t a_end = (size_t)a_start + a_cap_bits;
+		a_rle = SM_IS_CHUNK_RLE(&a_chunk);
+		a_cap_bits = __sm_chunk_get_capacity(&a_chunk);
+		a_size = __sm_chunk_get_size(&a_chunk);
+		a_end = (size_t)a_start + a_cap_bits;
 
 		/* Prefetch next a chunk */
 		if (ai + 1 < a_count) {
@@ -9387,12 +9398,15 @@ sm_difference(const sm_t *a, const sm_t *b)
 			const __sm_idx_t b_start =
 			    __sm_load_idx((const uint8_t *)bp);
 			__sm_chunk_t b_chunk;
+			bool b_rle;
+			size_t b_cap_bits;
+			size_t b_size;
+			size_t b_end;
 			__sm_chunk_init(&b_chunk, bp + SM_SIZEOF_OVERHEAD);
-			const bool b_rle = SM_IS_CHUNK_RLE(&b_chunk);
-			const size_t b_cap_bits =
-			    __sm_chunk_get_capacity(&b_chunk);
-			const size_t b_size = __sm_chunk_get_size(&b_chunk);
-			const size_t b_end = (size_t)b_start + b_cap_bits;
+			b_rle = SM_IS_CHUNK_RLE(&b_chunk);
+			b_cap_bits = __sm_chunk_get_capacity(&b_chunk);
+			b_size = __sm_chunk_get_size(&b_chunk);
+			b_end = (size_t)b_start + b_cap_bits;
 
 			/* b is past a: no more overlaps for this a chunk */
 			if (a_end <= (size_t)b_start)
@@ -9695,24 +9709,32 @@ sm_union(const sm_t *a, const sm_t *b)
 		/* ---- Read chunk a metadata ---- */
 		const __sm_idx_t a_start = __sm_load_idx((const uint8_t *)ap);
 		__sm_chunk_t a_chunk;
+		bool a_rle;
+		size_t a_cap_bits;
+		size_t a_size;
+		size_t a_end;
+		const __sm_idx_t b_start = __sm_load_idx((const uint8_t *)bp);
+		__sm_chunk_t b_chunk;
+		bool b_rle;
+		size_t b_cap_bits;
+		size_t b_size;
+		size_t b_end;
 		__sm_chunk_init(&a_chunk, ap + SM_SIZEOF_OVERHEAD);
-		const bool a_rle = SM_IS_CHUNK_RLE(&a_chunk);
-		const size_t a_cap_bits = __sm_chunk_get_capacity(&a_chunk);
-		const size_t a_size = __sm_chunk_get_size(&a_chunk);
-		const size_t a_end = (size_t)a_start + a_cap_bits;
+		a_rle = SM_IS_CHUNK_RLE(&a_chunk);
+		a_cap_bits = __sm_chunk_get_capacity(&a_chunk);
+		a_size = __sm_chunk_get_size(&a_chunk);
+		a_end = (size_t)a_start + a_cap_bits;
 
 		/* Ensure cursor is at least at chunk start. */
 		if (a_cursor < (size_t)a_start)
 			a_cursor = (size_t)a_start;
 
 		/* ---- Read chunk b metadata ---- */
-		const __sm_idx_t b_start = __sm_load_idx((const uint8_t *)bp);
-		__sm_chunk_t b_chunk;
 		__sm_chunk_init(&b_chunk, bp + SM_SIZEOF_OVERHEAD);
-		const bool b_rle = SM_IS_CHUNK_RLE(&b_chunk);
-		const size_t b_cap_bits = __sm_chunk_get_capacity(&b_chunk);
-		const size_t b_size = __sm_chunk_get_size(&b_chunk);
-		const size_t b_end = (size_t)b_start + b_cap_bits;
+		b_rle = SM_IS_CHUNK_RLE(&b_chunk);
+		b_cap_bits = __sm_chunk_get_capacity(&b_chunk);
+		b_size = __sm_chunk_get_size(&b_chunk);
+		b_end = (size_t)b_start + b_cap_bits;
 
 		if (b_cursor < (size_t)b_start)
 			b_cursor = (size_t)b_start;
@@ -10013,8 +10035,9 @@ sm_union(const sm_t *a, const sm_t *b)
 	while (ai < a_count) {
 		const __sm_idx_t start = __sm_load_idx((const uint8_t *)ap);
 		__sm_chunk_t c;
+		size_t sz;
 		__sm_chunk_init(&c, ap + SM_SIZEOF_OVERHEAD);
-		const size_t sz = __sm_chunk_get_size(&c);
+		sz = __sm_chunk_get_size(&c);
 		if (a_cursor > 0 && a_cursor > (size_t)start) {
 			/* Partially consumed: emit only remaining bits. */
 			const bool rle = SM_IS_CHUNK_RLE(&c);
@@ -10033,8 +10056,9 @@ sm_union(const sm_t *a, const sm_t *b)
 	while (bi < b_count) {
 		const __sm_idx_t start = __sm_load_idx((const uint8_t *)bp);
 		__sm_chunk_t c;
+		size_t sz;
 		__sm_chunk_init(&c, bp + SM_SIZEOF_OVERHEAD);
-		const size_t sz = __sm_chunk_get_size(&c);
+		sz = __sm_chunk_get_size(&c);
 		if (b_cursor > 0 && b_cursor > (size_t)start) {
 			const bool rle = SM_IS_CHUNK_RLE(&c);
 			const size_t cap_bits = __sm_chunk_get_capacity(&c);
