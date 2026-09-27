@@ -5,6 +5,41 @@ Notable changes per release.  The Rust port keeps its own log in
 across the C library, the Rust crate and the Python binding, so a
 release exists even where one of them is functionally unchanged.
 
+## 5.7.0 (no-rle variant)
+
+The RLE-free variant of sparsemap: sparse chunks only, no run-length
+encoding anywhere in the source.  Adds the small-set representation and
+tracks the mainline hardening.  Wire format version 2; a stream this
+build produces is readable by the mainline build and vice-versa for
+same-endian data.
+
+### Added
+
+- **Small-set mode.**  A map whose largest index is below 1024 is stored
+  as a bare `uint64` word array from bit 0 (PostgreSQL `Bitmapset`
+  layout) behind the same 8-byte header the chunk form uses, so a
+  near-zero set ties `Bitmapset` (16 bytes for `{0}` or `{0..63}`, 24
+  for `{5,70}`) instead of paying per-chunk overhead.  Promotes to
+  sparse chunk mode above the cap, demotes on shrink; every public API
+  works in either mode.
+
+### Removed
+
+- **All run-length-encoding code, including RLE detection.**  There is
+  no `SM_RLE_*`, no `__sm_chunk_is_rle`, and no RLE concept in the
+  reader.  Every chunk is sparse; a foreign stream carrying the old
+  run-length descriptor pattern is read as an ordinary sparse chunk and
+  bounded by structural validation (no over-read, no crash).
+- The vestigial `chunks_reserved` / `bits_reserved` fields (always 0)
+  are gone from `sm_stats_t`.
+
+### Changed
+
+- `sm.c` and `sm.h` compile with zero warnings under the strict flag set
+  (`-Wall -Wextra -Wpedantic -std=c17 -Wconversion -Wsign-conversion
+  -Wc90-c99-compat` and the rest).  Declarations hoisted to block scope,
+  `UINT64_C`/`INT64_C` literals, explicit sign-conversion casts.
+
 ## 5.5.1
 
 Internal hardening.  No API or wire-format change; a drop-in source
