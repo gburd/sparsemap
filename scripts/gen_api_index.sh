@@ -52,7 +52,7 @@ gen() {
 		}
 		next
 	}
-	' sm.h | sort -u > /tmp/.api_rows.$$
+	' sm.h  | LC_ALL=C sort -u > /tmp/.api_rows.$$
 
 	printf '| Function | Summary |\n|----------|---------|\n'
 	cat /tmp/.api_rows.$$
@@ -64,7 +64,7 @@ gen() {
 		sed -n 's/^} \(sm_[A-Za-z0-9_]*\);.*/\1|type/p' sm.h
 		sed -n 's/^typedef [^(]* \(sm_[A-Za-z0-9_]*\);.*/\1|type/p' sm.h
 		sed -n 's/^#define \(SM_[A-Z0-9_]*\)[ \t(].*/\1|macro/p' sm.h
-	} | sort -u | while IFS='|' read -r n k; do
+	} | LC_ALL=C sort -u | while IFS='|' read -r n k; do
 		printf '| `%s` | %s |\n' "$n" "$k"
 	done
 
