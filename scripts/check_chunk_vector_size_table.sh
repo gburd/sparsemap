@@ -15,7 +15,7 @@ regen=$(python3 scripts/gen_chunk_vector_size_table.py \
         | tr -s ' ,' ',' \
         | sed 's/^,*//; s/,*$//')
 
-inlined=$(awk '/static int lookup\[\] = \{/,/};/' sm.c \
+inlined=$(awk '/static (const size_t|int) lookup\[\] = \{/,/};/' sm.c \
           | tr -dc '0-9, ' \
           | tr -s ' ,' ',' \
           | sed 's/^,*//; s/,*$//')
