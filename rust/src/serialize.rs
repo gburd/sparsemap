@@ -63,7 +63,7 @@ const RLE_MAX_SPAN: u64 = 0x7FFF_FFFF; // 31-bit cap/len fields
 /// does emit it for near-zero sets.
 const SMALL_FLAG: u64 = 1 << 63;
 const SMALL_WMASK: u64 = (1 << 32) - 1;
-/// Hard cap on the word count, mirroring C's SM_SMALL_MAX_WORDS (16).
+/// Hard cap on the word count, mirroring C's `SM_SMALL_MAX_WORDS` (16).
 const SMALL_MAX_WORDS: u64 = 16;
 
 /// Error returned by [`SparseMap::from_bytes`] for malformed input.
@@ -158,6 +158,10 @@ impl SparseMap {
     ///
     /// Returns a [`DecodeError`] for any malformed input rather than
     /// panicking; arbitrary bytes are safe to feed in.
+    // A decoder is a single coherent state machine over the wire
+    // header + chunk stream; splitting it only to satisfy the line
+    // count would scatter the format contract across helpers.
+    #[allow(clippy::too_many_lines)]
     pub fn from_bytes(buf: &[u8]) -> Result<SparseMap, DecodeError> {
         if buf.len() < HEADER_LEN + OVERHEAD {
             return Err(DecodeError::TooShort);
@@ -203,7 +207,7 @@ impl SparseMap {
                 let base = (w as u64) * 64;
                 let mut bits = word;
                 while bits != 0 {
-                    let b = bits.trailing_zeros() as u64;
+                    let b = u64::from(bits.trailing_zeros());
                     bits &= bits - 1;
                     map.insert(base + b);
                 }

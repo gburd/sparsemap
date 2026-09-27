@@ -176,9 +176,8 @@ fn shift_extreme_offsets_are_overflow_safe() {
     // +i64::MAX: only bits whose value + i64::MAX <= u64::MAX survive.
     let up = m.shifted(i64::MAX);
     for b in &m {
-        match b.checked_add(i64::MAX as u64) {
-            Some(s) => assert!(up.contains(s)),
-            None => {} // dropped
+        if let Some(s) = b.checked_add(i64::MAX as u64) {
+            assert!(up.contains(s)); // bits that overflow are dropped
         }
     }
     assert_eq!(up.cardinality(), [0u64, 5, 100_000].len() as u64);
@@ -188,10 +187,7 @@ fn shift_extreme_offsets_are_overflow_safe() {
     let dn = m.shifted(i64::MIN);
     // Only u64::MAX-10 survives i64::MIN if it is >= |i64::MIN|.
     for b in &m {
-        match b.checked_sub(i64::MIN.unsigned_abs()) {
-            Some(s) => assert!(dn.contains(s)),
-            None => {}
-        }
+        if let Some(s) = b.checked_sub(i64::MIN.unsigned_abs()) { assert!(dn.contains(s)) }
     }
 
     // +2^62 on small bits: every bit shifts cleanly (no overflow).

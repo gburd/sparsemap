@@ -258,7 +258,7 @@ fn shift_at_word_boundaries() {
             .iter()
             .filter_map(|&b| {
                 if off >= 0 {
-                    b.checked_add(off as u64)
+                    b.checked_add(off.unsigned_abs())
                 } else {
                     b.checked_sub(off.unsigned_abs())
                 }

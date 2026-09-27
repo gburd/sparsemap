@@ -74,22 +74,22 @@ const OFFSET_RUN: &[u8] = &[
 
 // --- small-mode streams (header byte out[6] set, body top bit set) ---
 
-/// C `sm_serialize` output for the SMALL_ZERO set (1 bits, 32 bytes, small-mode).
+/// C `sm_serialize` output for the `SMALL_ZERO` set (1 bits, 32 bytes, small-mode).
 const SMALL_ZERO: &[u8] = &[
     115, 109, 49, 48, 2, 1, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 128, 1, 0, 0, 0, 0,
     0, 0, 0,
 ];
-/// C `sm_serialize` output for the SMALL_WORD0 set (4 bits, 32 bytes, small-mode).
+/// C `sm_serialize` output for the `SMALL_WORD0` set (4 bits, 32 bytes, small-mode).
 const SMALL_WORD0: &[u8] = &[
     115, 109, 49, 48, 2, 1, 1, 0, 4, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 128, 35, 0, 0, 0, 0,
     0, 0, 128,
 ];
-/// C `sm_serialize` output for the SMALL_FULLWORD set (64 bits, 32 bytes, small-mode).
+/// C `sm_serialize` output for the `SMALL_FULLWORD` set (64 bits, 32 bytes, small-mode).
 const SMALL_FULLWORD: &[u8] = &[
     115, 109, 49, 48, 2, 1, 1, 0, 64, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 128, 255, 255, 255,
     255, 255, 255, 255, 255,
 ];
-/// C `sm_serialize` output for the SMALL_TWOWORDS set (2 bits, 40 bytes, small-mode).
+/// C `sm_serialize` output for the `SMALL_TWOWORDS` set (2 bits, 40 bytes, small-mode).
 const SMALL_TWOWORDS: &[u8] = &[
     115, 109, 49, 48, 2, 1, 1, 0, 2, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 128, 32, 0, 0, 0, 0,
     0, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0,
@@ -104,7 +104,7 @@ const SMALL_SCATTER: &[u8] = &[
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 128, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 128,
 ];
 /// C `sm_serialize` output for {0} built empty-then-single (1 bit, 32 bytes,
-/// small-mode).  Byte-identical to SMALL_ZERO -- proves that a map churned
+/// small-mode).  Byte-identical to `SMALL_ZERO` -- proves that a map churned
 /// through insert/remove back to a single low bit serializes canonically.
 const SMALL_EMPTYTHENSINGLE: &[u8] = &[
     115, 109, 49, 48, 2, 1, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 128, 1, 0, 0, 0, 0,
@@ -254,7 +254,7 @@ fn c_rle_run_2048_4095() {
 fn c_mixed_lowrun_highsparse() {
     check(
         MIXED_LOWRUN_HIGHSPARSE,
-        &set((0..=1200).chain([50000, 50003, 123456])),
+        &set((0..=1200).chain([50000, 50003, 123_456])),
     );
 }
 
