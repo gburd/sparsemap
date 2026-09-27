@@ -5,6 +5,62 @@ Notable changes per release.  The Rust port keeps its own log in
 across the C library, the Rust crate and the Python binding, so a
 release exists even where one of them is functionally unchanged.
 
+## 5.7.0
+
+Adds a small-set representation that matches or beats PostgreSQL's
+`Bitmapset` for near-zero index sets, plus two correctness fixes found
+while qualifying it and a warning-clean pass under a strict compiler
+flag set.  No wire-format change (still version 2, mutually readable
+with 5.6.x); a drop-in source swap for any 5.6.x vendored copy.
+
+### Added
+
+- **Small-set mode.**  A map whose largest index is below a small cap
+  (1024 bits) is stored as a bare `uint64` word array from bit 0 --
+  exactly PostgreSQL's `Bitmapset` layout -- behind the same 8-byte
+  header the chunk form uses (the header's top bit selects the mode, so
+  it costs no extra bytes).  For near-zero sets this ties `Bitmapset`
+  (`{0}` and `{0..63}` are 16 bytes, `{5,70}` is 24) instead of paying
+  sparsemap's per-chunk addressing overhead, while the chunk form still
+  wins once indices spread.  The promote decision is RLE-aware: a dense
+  low run compresses to a single ~24-byte RLE chunk rather than the
+  flat form, so runs, sparse scatter and wide spreads each land in the
+  smallest of the three encodings.  The map promotes to chunk mode when
+  an index exceeds the cap and demotes back on shrink; every public API
+  works transparently in either mode.  The RLE-free `no-rle` variant
+  carries the same small-set mode over sparse chunks only.
+
+### Fixed
+
+- **`sm_equals` / `sm_hash` / `sm_compare` on equal-but-differently-built
+  maps.**  The run iterator decomposed runs per chunk and did not
+  coalesce a run ending at a chunk boundary with the run beginning at
+  the next chunk.  A contiguous range stored across a seam (as
+  `sm_union` of split halves produces) decomposed differently from the
+  same set built by one `sm_add_range`, so two logically-equal maps
+  compared unequal and hashed differently.  The iterator now yields a
+  canonical, maximal run decomposition.
+- **`sm_split` could emit an invalid map.**  Splitting a source whose
+  moved half contains a gap between two runs produced a map with the
+  correct cardinality but a mis-structured chunk stream that failed
+  `sm_validate`.  Both halves are now always valid for any split point.
+- **`sm_offset` signed-integer overflow.**  A large `|offset|` near
+  `SSIZE_MAX` overflowed a signed intermediate even when the final
+  position was in range; the shift arithmetic is now well-defined and
+  correct (the positive case is computed in `uint64_t`).
+- A crafted length-1 RLE chunk whose sole bit is removed no longer
+  reports a full-capacity run.
+
+### Changed
+
+- `sm.c` and `sm.h` compile with **zero warnings** under a strict flag
+  set (`-Wall -Wextra -Wpedantic -std=c17` plus `-Wconversion`,
+  `-Wsign-conversion`, `-Wc90-c99-compat`, `-Wshadow`, `-Wcast-align`,
+  `-Wformat=2`, `-Wdouble-promotion` and the rest).  Declarations are
+  hoisted to block scope (KNF style), `ULL`/`LL` literals use
+  `UINT64_C`/`INT64_C`, and sign conversions are explicit.  No behavior
+  change.
+
 ## 5.6.0
 
 A security-hardening release, from a production-readiness review that

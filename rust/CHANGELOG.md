@@ -4,6 +4,32 @@ All notable changes to the Rust `sparsemap` crate are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com), and
 the crate follows [SemVer](https://semver.org).
 
+## [5.7.0] - 2026-09-26
+
+Matches the C library at 5.7.0, which adds a small-set representation
+(Bitmapset-competitive near-zero footprint).  The Rust crate models a
+map as a `BTreeMap`, so the small-set form is a C-serialization concern;
+this release makes the Rust decoder read it.
+
+### Added
+
+- `from_bytes` decodes the C library's **small-set** wire form (a flat
+  word array selected by the header flag) in addition to the chunk and
+  RLE-chunk forms, so a map serialized by the C library at 5.7.0 --
+  including a near-zero set stored in small mode -- round-trips through
+  the Rust port.  The Python binding inherits this.
+- Wire-compatibility fixtures covering C small-mode and RLE-chunk
+  streams (both read directions), and a bitmapset-inspired corner-case
+  parity suite.
+
+### Note
+
+The embedded C source is synced to the C 5.7.0 release, so the crate's
+wire-compat harness and any C build from this branch carry the
+run-iterator / `sm_split` / `sm_offset` fixes and the zero-warning
+cleanup.  Wire format unchanged (version 2); C and Rust remain mutually
+readable for same-endian streams.
+
 ## [5.6.0] - 2026-09-25
 
 A security-hardening release, matching the C library at 5.6.0.  This is
