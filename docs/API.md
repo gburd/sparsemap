@@ -175,30 +175,30 @@ header itself.
 
 | Function | Summary |
 |----------|---------|
+| `sm_add()` | Set the bit at \a idx to 1. |
 | `sm_add_grow()` | Add a bit, growing the map's buffer geometrically if needed. |
 | `sm_add_grow_cursor()` | Like sm_add_grow(), but threads a caller-owned cursor. |
 | `sm_add_many()` | Add N indices from an array. |
 | `sm_add_many_grow()` | Add N indices, growing the buffer as needed. |
 | `sm_add_range()` | Set every bit in `[lo, hi)`. |
-| `sm_add()` | Set the bit at \a idx to 1. |
-| `sm_andnot()` | Synonym for sm_difference (logical AND-NOT: bits in a but not b). */ |
 | `sm_and()` | Synonym for sm_intersection (logical AND). */ |
+| `sm_andnot()` | Synonym for sm_difference (logical AND-NOT: bits in a but not b). */ |
 | `sm_assign()` | Set or clear the bit at \a idx. |
 | `sm_capacity_remaining()` | Estimate remaining buffer capacity as a percentage. |
 | `sm_cardinality()` | Count the total number of set bits (cardinality). |
 | `sm_clear()` | Reset the map to empty without freeing memory. |
 | `sm_compare()` | Three-way compare for ordering bitmaps. |
+| `sm_contains()` | Test whether the bit at \a idx is set. |
 | `sm_contains_cached()` | Test a bit using a caller-owned 8-way MRU chunk cache. |
 | `sm_contains_many()` | Test many bits in one left-to-right sweep (batched). |
-| `sm_contains()` | Test whether the bit at \a idx is set. |
 | `sm_copy()` | Create a deep copy of \a other. |
 | `sm_create()` | Allocate a heap-managed sparsemap with an internal buffer. |
 | `sm_create_from_array()` | Create a sparsemap from an array of indices. |
 | `sm_create_from_range()` | Create a sparsemap containing every bit in `[lo, hi)`. |
 | `sm_create_singleton()` | Create a sparsemap containing exactly the bit at `idx`. |
 | `sm_deserialize()` | Deserialize a previously-serialized buffer into a fresh map. |
-| `sm_difference_cardinality()` | Compute |a \ b| without allocating the difference. */ |
 | `sm_difference()` | Create a new sparsemap containing bits set in \a a but not in \a b. |
+| `sm_difference_cardinality()` | Compute |a \ b| without allocating the difference. */ |
 | `sm_difference_inplace()` | In-place difference: `dst := dst \ src`. |
 | `sm_equals()` | Test bit-set equality of two sparsemaps. |
 | `sm_extract_range()` | Extract a range of bits as a new sparsemap. |
@@ -210,8 +210,8 @@ header itself.
 | `sm_get_size()` | Return the number of buffer bytes currently in use. |
 | `sm_hash()` | Stable content-based hash of the bit set. |
 | `sm_init()` | Initialize a caller-allocated sm_t with a buffer. |
-| `sm_intersection_cardinality()` | Compute the cardinality of (a intersect b) without allocating it. */ |
 | `sm_intersection()` | Create a new sparsemap containing bits set in both \a a and \a b. |
+| `sm_intersection_cardinality()` | Compute the cardinality of (a intersect b) without allocating it. */ |
 | `sm_intersection_inplace()` | In-place intersection: `dst := dst INT src`. |
 | `sm_is_empty()` | Test whether a sparsemap is empty (has no set bits). |
 | `sm_is_subset()` | Test whether \a a's bits are a subset of \a b's bits. |
@@ -241,8 +241,8 @@ header itself.
 | `sm_remove_range()` | Clear every bit in `[lo, hi)`. |
 | `sm_scan()` | Invoke a callback for every set bit in the map. |
 | `sm_select()` | Find the position of the \a n'th matching bit (0-based). |
-| `sm_serialized_size()` | Compute the buffer size needed to serialize \a map. |
 | `sm_serialize()` | Serialize \a map into \a out (`sm_serialized_size` bytes). |
+| `sm_serialized_size()` | Compute the buffer size needed to serialize \a map. |
 | `sm_set_allocator()` | Set the process-wide allocator hooks. |
 | `sm_set_data_size()` | Resize the data buffer. |
 | `sm_shrink_to_fit()` | Realloc the data buffer down to exactly `m_data_used` bytes. |
@@ -252,14 +252,14 @@ header itself.
 | `sm_statistics()` | Fill an sm_stats_t with introspection data. */ |
 | `sm_subset_compare()` | Classify the subset relationship between \a a and \a b. |
 | `sm_to_array()` | Materialize all set bits as a uint64_t array. |
-| `sm_union_cardinality()` | Compute the cardinality of (a union b) without allocating it. */ |
 | `sm_union()` | Create a new sparsemap containing bits set in either \a a or \a b. |
+| `sm_union_cardinality()` | Compute the cardinality of (a union b) without allocating it. */ |
 | `sm_union_inplace()` | In-place union: `dst := dst U src`. |
 | `sm_validate()` | Runtime self-check of a sparsemap's internal consistency. |
 | `sm_wrap()` | Allocate a sm_t that wraps a caller-provided buffer. |
+| `sm_xor()` | Symmetric difference: bits set in exactly one of \a a, \a b. |
 | `sm_xor_cardinality()` | XOR cardinality without allocation. |
 | `sm_xor_inplace()` | In-place symmetric difference: `dst := dst XOR src`. |
-| `sm_xor()` | Symmetric difference: bits set in exactly one of \a a, \a b. |
 
 ### Types and macros
 
@@ -267,26 +267,26 @@ header itself.
 |------|------|
 | `SM_ALIGNAS` | macro |
 | `SM_ALIGNED` | macro |
-| `sm_allocator_t` | type |
 | `SM_CACHE_WAYS` | macro |
-| `SM__CAT2` | macro |
-| `SM__CAT` | macro |
 | `SM_CURSOR_CACHED_INIT` | macro |
-| `sm_cursor_cached_t` | type |
 | `SM_CURSOR_INIT` | macro |
-| `sm_cursor_t` | type |
 | `SM_FOUND` | macro |
 | `SM_IDX_MAX` | macro |
-| `sm_locator_t` | type |
-| `sm_membership_t` | type |
 | `SM_NOT_FOUND` | macro |
-| `SM__P` | macro |
-| `sm_stats_t` | type |
-| `sm_subset_relation_t` | type |
-| `sm_t` | type |
 | `SM_VERSION_MAJOR` | macro |
 | `SM_VERSION_MINOR` | macro |
 | `SM_VERSION_PATCH` | macro |
 | `SM_VERSION_STRING` | macro |
+| `SM__CAT2` | macro |
+| `SM__CAT` | macro |
+| `SM__P` | macro |
+| `sm_allocator_t` | type |
+| `sm_cursor_cached_t` | type |
+| `sm_cursor_t` | type |
+| `sm_locator_t` | type |
+| `sm_membership_t` | type |
+| `sm_stats_t` | type |
+| `sm_subset_relation_t` | type |
+| `sm_t` | type |
 
 <!-- END GENERATED API INDEX -->
