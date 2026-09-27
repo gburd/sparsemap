@@ -158,7 +158,7 @@ main(void)
 		CHECK(!sm_equals(x, y));
 		CHECK(sm_hash(x) != sm_hash(y));
 		CHECK(sm_compare(x, y) != 0);
-		CHECK(sm_subset_compare(x, y) == SM_REL_SUBSET_B); /* y ⊂ x */
+		CHECK(sm_subset_compare(x, y) == SM_REL_SUBSET_B); /* y is a subset of x */
 		sm_free(x);
 		sm_free(y);
 	}
