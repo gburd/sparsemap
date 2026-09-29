@@ -937,6 +937,47 @@ __sm_set_kind(sm_t *m, uint8_t kind)
 	m->m_capacity = (m->m_capacity & ~(size_t)7) | (kind & 7u);
 }
 
+/* -------------------------------------------------------------------
+ * Lazy cardinality cache (runtime-only; see the struct comment in sm.h)
+ *
+ * m_card_plus1 caches sm_cardinality() biased by one so that the
+ * all-zero state means "unknown": 0 = invalid, otherwise the cached
+ * count is (m_card_plus1 - 1).  The cache is derived purely from
+ * m_data, so an invalid cache is always safe -- the next query just
+ * recomputes it.  Every membership-changing path calls
+ * __sm_card_invalidate(); sm_cardinality fills it on the first query
+ * after a mutation.  Never serialized, never sent to the wire.
+ * ------------------------------------------------------------------- */
+
+static inline void
+__sm_card_invalidate(sm_t *m)
+{
+	if (m != NULL)
+		m->m_card_plus1 = 0;
+}
+
+static inline bool
+__sm_card_is_valid(const sm_t *m)
+{
+	return (m->m_card_plus1 != 0);
+}
+
+static inline size_t
+__sm_card_get(const sm_t *m)
+{
+	return (m->m_card_plus1 - 1u);
+}
+
+static inline void
+__sm_card_store(sm_t *m, size_t count)
+{
+	/* count + 1 cannot wrap in practice (count <= SM_IDX_MAX bits), but
+	 * guard: a would-be-wrapping count simply stays uncached. */
+	if (m != NULL && count != SIZE_MAX)
+		m->m_card_plus1 = count + 1u;
+}
+
+
 /*
  * Internal-invariant check.  No-op in production builds; under
  * SPARSEMAP_TESTING / SPARSEMAP_DIAGNOSTIC it asserts:
@@ -3676,6 +3717,7 @@ sm_clear(sm_t *map)
 	memset(map->m_data, 0, __sm_cap(map));
 	map->m_data_used = SM_SIZEOF_OVERHEAD;
 	__sm_set_chunk_count(map, 0);
+	__sm_card_invalidate(map);
 }
 
 /**
@@ -3852,6 +3894,7 @@ sm_wrap(uint8_t *data, const size_t size)
 		map->m_data = data;
 		map->m_data_used = 0;
 		__sm_set_cap_kind(map, size, SM_WRAPPED);
+		__sm_card_invalidate(map);
 	}
 	return (map);
 }
@@ -3876,6 +3919,7 @@ sm_init(sm_t *map, uint8_t *data, const size_t size)
 	map->m_data = data;
 	map->m_data_used = 0;
 	__sm_set_cap_kind(map, size, SM_WRAPPED);
+	__sm_card_invalidate(map);
 	/*
 	 * Caller-allocated struct + caller-allocated buffer.  The buffer is
 	 * not owned by the library; sm_set_data_size will treat any
@@ -3906,6 +3950,7 @@ sm_open(sm_t *map, uint8_t *data, const size_t size)
 		return;
 	}
 	map->m_data = data;
+	__sm_card_invalidate(map);
 	/*
 	 * Set m_capacity and a temporary m_data_used = capacity *before*
 	 * calling __sm_get_size_impl.  __sm_get_size_impl walks chunks via
@@ -4920,6 +4965,7 @@ sm_remove(sm_t *map, const uint64_t idx)
 		errno = EINVAL;
 		return (SM_IDX_MAX);
 	}
+	__sm_card_invalidate(map);
 	if (__sm_is_small(map)) {
 		const size_t w = (size_t)(idx / 64);
 		if (w < __sm_small_nwords(map)) {
@@ -5349,6 +5395,8 @@ __sm_add_dispatch(sm_t *map, uint64_t idx, sm_cursor_t *cur)
 	const bool empty_chunk = !small &&
 	    (map->m_data_used < SM_SIZEOF_OVERHEAD ||
 	        __sm_get_chunk_count(map) == 0);
+
+	__sm_card_invalidate(map);
 
 	if ((small || empty_chunk) && idx < SM_SMALL_MAX_BITS) {
 		uint64_t rc;
@@ -5801,9 +5849,17 @@ sm_get_size(sm_t *map)
 size_t
 sm_cardinality(sm_t *map)
 {
-	if (map != NULL && __sm_is_small(map))
-		return ((size_t)__sm_small_cardinality(map));
-	return (sm_rank(map, 0, SM_IDX_MAX, true));
+	size_t count;
+	if (map == NULL)
+		return (sm_rank(map, 0, SM_IDX_MAX, true));
+	if (__sm_card_is_valid(map))
+		return (__sm_card_get(map));
+	if (__sm_is_small(map))
+		count = (size_t)__sm_small_cardinality(map);
+	else
+		count = sm_rank(map, 0, SM_IDX_MAX, true);
+	__sm_card_store(map, count);
+	return (count);
 }
 
 /* -------------------------------------------------------------------
@@ -8265,6 +8321,11 @@ sm_add_range(sm_t *map, uint64_t lo, uint64_t hi)
 	}
 	memcpy(map->m_data, r->m_data, result_size);
 	map->m_data_used = result_size;
+	/* Membership changed: the run-emitter path swaps the buffer in place
+	 * (it does NOT route through __sm_add_dispatch or __sm_replace_buffer,
+	 * which are the other invalidation points), so invalidate the lazy
+	 * cardinality cache here. */
+	__sm_card_invalidate(map);
 	sm_free(r);
 	/* Keep a near-zero result in small mode (footprint parity with the
 	 * old loop, whose per-bit sm_add demotes). */
@@ -8758,6 +8819,7 @@ __sm_replace_buffer(sm_t *dst, sm_t *result)
 	}
 	memcpy(dst->m_data, result->m_data, result_size);
 	dst->m_data_used = result_size;
+	__sm_card_invalidate(dst);
 	sm_free(result);
 	__sm_try_demote(dst);
 	return (dst);
@@ -10301,6 +10363,8 @@ sm_split(sm_t *map, uint64_t idx, sm_t *other)
 		errno = EINVAL;
 		return (SM_IDX_MAX);
 	}
+	__sm_card_invalidate(map);
+	__sm_card_invalidate(other);
 	/* Split walks raw chunks; give it a chunk-mode map and an empty
 	 * chunk-mode destination.  Promote in place (within capacity) if
 	 * `map` is small; the destination is cleared to chunk-empty. */
@@ -10317,7 +10381,7 @@ sm_split(sm_t *map, uint64_t idx, sm_t *other)
 	__sm_check_invariants(other);
 	count = __sm_get_chunk_count(map);
 
-	__sm_assert(sm_cardinality(other) == 0);
+	__sm_assert(sm_rank(other, 0, SM_IDX_MAX, true) == 0);
 
 	/*
 	 * According to the API when idx is SM_IDX_MAX the client is
