@@ -8079,17 +8079,196 @@ sm_to_array(const sm_t *map, uint64_t *out, size_t *n_out)
  * hashing and ordering, destructive iteration
  * ------------------------------------------------------------------- */
 
+/*
+ * add_range fast path: OR the literal run [lo, hi) into an existing
+ * map's run stream and re-emit, instead of touching every bit.
+ *
+ * The old body was `for (i = lo; i < hi; i++) sm_add(map, i)`, which is
+ * O(hi - lo) -- a [0, 1e6) add cost ~14 ms even though the result is a
+ * single 24-byte RLE run.  Here add_range is `map = union(map, [lo,hi))`:
+ * we merge the map's existing (ascending, maximal) runs with the single
+ * literal run using interval-union semantics, then feed each merged run
+ * to the same ordered emitter set-ops already use (__sm_add_run_grow ->
+ * __sm_emit_run), which lays whole output chunks as RLE and only touches
+ * the sub-chunk head/tail bit-by-bit.  Cost is O(existing_chunks +
+ * run_chunks), and a giant run stays a ~24-byte RLE map.
+ *
+ * The emitter demands runs delivered ascending and non-overlapping, so
+ * the interval merge below coalesces the literal run against the map's
+ * runs (and against each other across the seam) before emitting.
+ *
+ * Contract preserved from the old loop: the map is written in place and
+ * does NOT relocate (sm_add_range returns bool, so a relocated struct
+ * pointer could not reach the caller).  If the merged result does not
+ * fit the map's current buffer, we fail with errno = ENOSPC -- exactly
+ * as the old per-bit loop's sm_add did on a too-small SM_OWNED_CONTIGUOUS
+ * map.
+ */
 bool
 sm_add_range(sm_t *map, uint64_t lo, uint64_t hi)
 {
-	uint64_t i;
+	__sm_emitter_t em;
+	__sm_run_iter_t it;
+	sm_t *r;
+	size_t cap;
+	size_t result_size;
+	uint64_t rlo = 0, rhi = 0;
+	bool have_run;
+	/* Pending merged run being accumulated (interval union). */
+	uint64_t cur_lo = 0, cur_hi = 0;
+	bool have_cur = false;
+	/* Track whether the whole merged result is a single run and, if so,
+	 * its span -- so a run within one chunk starting at a chunk boundary
+	 * can be laid down as a compact RLE chunk (matching the old per-bit
+	 * loop's small-mode->__sm_promote_run_as_rle footprint) instead of
+	 * the emitter's sparse encoding, which never RLEs a sub-chunk run. */
+	size_t nemitted = 0;
+	uint64_t first_lo = 0, first_hi = 0;
+	/* The single literal run [lo, hi), consumed once when the ascending
+	 * merge reaches its position. */
+	bool lit_pending;
+
 	if (map == NULL || lo >= hi)
 		return (lo >= hi); /* empty range = OK */
-	for (i = lo; i < hi; i++) {
-		if (sm_add(map, i) == SM_IDX_MAX) {
+	lit_pending = true;
+
+	__sm_check_invariants(map);
+
+	/* Result capacity upper bound: the map's current encoding plus the
+	 * new run's worst-case chunk footprint.  A run spanning K output
+	 * chunks needs at most K * (SM_SIZEOF_OVERHEAD + one descriptor +
+	 * two vectors); RLE collapses most of that, so this is generous. */
+	cap = sm_get_size(map) + 128;
+	if (cap < 1024)
+		cap = 1024;
+	r = sm_create(cap);
+	if (r == NULL)
+		return (false);
+
+	memset(&em, 0, sizeof(em));
+	em.resultp = &r;
+	__sm_run_iter_init(&it, map);
+	have_run = __sm_run_next(&it, &rlo, &rhi);
+
+	/*
+	 * Ascending interval-union merge of the map's runs with the single
+	 * literal run.  At each step pick the next-starting interval among
+	 * {current map run, literal run}, then either extend the pending
+	 * merged run (overlap or abut) or flush it and start a new one.
+	 */
+	for (;;) {
+		uint64_t nlo, nhi;
+		bool take_lit;
+		if (!have_run && !lit_pending)
+			break;
+		if (have_run && lit_pending)
+			take_lit = (lo <= rlo);
+		else
+			take_lit = lit_pending;
+		if (take_lit) {
+			nlo = lo;
+			nhi = hi;
+			lit_pending = false;
+		} else {
+			nlo = rlo;
+			nhi = rhi;
+			have_run = __sm_run_next(&it, &rlo, &rhi);
+		}
+		if (!have_cur) {
+			cur_lo = nlo;
+			cur_hi = nhi;
+			have_cur = true;
+		} else if (nlo <= cur_hi) {
+			/* Overlap or abut: extend. */
+			if (nhi > cur_hi)
+				cur_hi = nhi;
+		} else {
+			/* Gap: flush the pending run and open a new one. */
+			if (nemitted == 0) {
+				first_lo = cur_lo;
+				first_hi = cur_hi;
+			}
+			nemitted++;
+			if (!__sm_add_run_grow(&em, cur_lo, cur_hi)) {
+				sm_free(r);
+				return (false);
+			}
+			cur_lo = nlo;
+			cur_hi = nhi;
+		}
+	}
+	if (have_cur) {
+		if (nemitted == 0) {
+			first_lo = cur_lo;
+			first_hi = cur_hi;
+		}
+		nemitted++;
+		if (!__sm_add_run_grow(&em, cur_lo, cur_hi)) {
+			sm_free(r);
 			return (false);
 		}
 	}
+	if (!__sm_emit_flush(&em)) {
+		sm_free(r);
+		return (false);
+	}
+	r = *em.resultp;
+	__sm_coalesce_map(r);
+
+	/*
+	 * Footprint parity with the old loop: a single run that starts on a
+	 * chunk boundary but does not fill the chunk (0 < span < 2048) is
+	 * emitted by __sm_emit_run as a sparse chunk (the emitter must not
+	 * advertise RLE capacity it cannot fill, since a later source could
+	 * land in that chunk -- but here the map is complete, so that concern
+	 * does not apply).  The old loop routed such a run through
+	 * __sm_promote_run_as_rle and got a 24-byte RLE chunk.  Reproduce it:
+	 * if the whole result is one run [first_lo, first_hi) that lives in a
+	 * single chunk aligned to its start, replace the buffer with one RLE
+	 * chunk.  Multi-chunk runs already went out with an RLE body.
+	 */
+	if (nemitted == 1 &&
+	    (first_lo % SM_CHUNK_MAX_CAPACITY) == 0 &&
+	    (first_hi - first_lo) < SM_CHUNK_MAX_CAPACITY) {
+		__sm_chunk_t chunk;
+		const __sm_idx_t cstart = (__sm_idx_t)first_lo;
+		const size_t run_len = (size_t)(first_hi - first_lo);
+		const size_t need = SM_SIZEOF_OVERHEAD + SM_SIZEOF_OVERHEAD +
+		    sizeof(__sm_bitvec_t);
+		if (need <= __sm_cap(r)) {
+			__sm_set_chunk_count(r, 1);
+			__sm_store_idx(&r->m_data[SM_SIZEOF_OVERHEAD], cstart);
+			__sm_chunk_init(&chunk,
+			    &r->m_data[SM_SIZEOF_OVERHEAD +
+			        SM_SIZEOF_OVERHEAD]);
+			chunk.m_data[0] = 0;
+			__sm_chunk_set_rle(&chunk);
+			__sm_chunk_rle_set_capacity(&chunk,
+			    SM_CHUNK_MAX_CAPACITY);
+			__sm_chunk_rle_set_length(&chunk, run_len);
+			r->m_data_used = need;
+		}
+	}
+
+	/*
+	 * Copy the merged result into the map's existing buffer in place.
+	 * Do NOT use __sm_replace_buffer here: it grows via sm_set_data_size,
+	 * which relocates an SM_OWNED_CONTIGUOUS struct and returns a new
+	 * pointer that sm_add_range cannot hand back.  Refuse (ENOSPC) if the
+	 * result does not fit, matching the old loop's sm_add behaviour.
+	 */
+	result_size = r->m_data_used;
+	if (result_size > __sm_cap(map)) {
+		sm_free(r);
+		errno = ENOSPC;
+		return (false);
+	}
+	memcpy(map->m_data, r->m_data, result_size);
+	map->m_data_used = result_size;
+	sm_free(r);
+	/* Keep a near-zero result in small mode (footprint parity with the
+	 * old loop, whose per-bit sm_add demotes). */
+	__sm_try_demote(map);
 	return (true);
 }
 
