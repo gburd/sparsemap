@@ -214,9 +214,32 @@ typedef SSIZE_T ssize_t;
  * one address space without colliding at link time.  Only C
  * identifiers that become linker symbols (the public functions) and
  * the public type names are renamed; compile-time macros
- * (SM_IDX_MAX, the SM_VERSION_* values, enum constants) are
- * unaffected because they never reach the linker.  The serialized
- * wire format does not change.
+ * (SM_IDX_MAX, SM_FOUND, SM_NOT_FOUND, SM_CURSOR_INIT,
+ * SM_CURSOR_CACHED_INIT, SM_CACHE_WAYS, the SM_VERSION_* values, and
+ * the enum constants) are NOT renamed and keep their canonical
+ * spelling.  This is a hard limitation of the C preprocessor, not a
+ * policy choice: functions are prefixed by rewriting the reference at
+ * the call site (#define sm_add SM__P(sm_add)) because the definition
+ * emits the prefixed name as an actual linker symbol.  A value macro
+ * has no such definition site -- reaching it under a prefixed spelling
+ * would require a #define whose NAME is <PREFIX>SM_IDX_MAX, and the
+ * preprocessor cannot form a macro name by token-pasting in a #define
+ * name position (only the replacement list is pasted).  A prefixed
+ * value macro therefore has to be spelled out literally, which needs
+ * the prefix token known when this header is authored -- impossible
+ * for an arbitrary caller-chosen SPARSEMAP_PREFIX.  A consumer that
+ * wants prefixed macro spellings can add them itself, since it knows
+ * its own prefix literally, e.g.:
+ *
+ *	#define myapp_SM_IDX_MAX  SM_IDX_MAX
+ *	#define myapp_SM_FOUND(x) SM_FOUND(x)
+ *
+ * The compile toggles SM_EXPOSE_STRUCT and SM_INTERNAL are likewise
+ * not prefixed: they are read by this header's own #ifdefs, so a
+ * prefixed spelling would only work if the header also tested the
+ * prefixed name -- which again requires a literal, not-arbitrary
+ * prefix.  Keep defining them under their canonical names.  The
+ * serialized wire format does not change.
  */
 #ifdef SPARSEMAP_PREFIX
 #define SM__CAT2(a, b) a##b
