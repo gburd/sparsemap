@@ -6,8 +6,7 @@ checklist for syncing to 3.0.0.
 
 The library is now exactly two files: `sm.h` (public API) and `sm.c`
 (implementation, with the portability shims folded in).  Vendoring is
-a two-file copy; `contrib/pg_tre_sync.sh` and
-`contrib/postgres_undo_sync.sh` automate it.
+a two-file copy; `contrib/pg_tre_sync.sh` automates it for pg_tre.
 
 ## Source-level breaking changes
 

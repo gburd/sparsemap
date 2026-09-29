@@ -1,7 +1,6 @@
 # sparsemap
 
-[![CI](https://codeberg.org/gregburd/sparsemap/actions/workflows/ci.yml/badge.svg)](https://codeberg.org/gregburd/sparsemap/actions)
-[![Pages](https://codeberg.org/gregburd/sparsemap/actions/workflows/pages.yml/badge.svg)](https://gregburd.codeberg.page/sparsemap/)
+[![CI](https://codeberg.org/gregburd/sparsemap/badges/workflows/ci.yml/badge.svg)](https://codeberg.org/gregburd/sparsemap/actions?workflow=ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 A sparse, compressed bitmap library for C.  Optimized for workloads
@@ -32,6 +31,19 @@ chunk it picks one of two encodings depending on the local pattern:
   (all-zero or all-one) take zero payload.
 - **RLE encoding** stores a single 64-bit descriptor for a contiguous
   run of set bits.  A 2-billion-bit run takes 8 bytes.
+
+And, for sets that hug the low end of the universe, a third mode
+sits below the chunk layer entirely:
+
+- **Small-set mode** stores a bare `uint64` word array from bit 0 --
+  exactly PostgreSQL's `Bitmapset` layout -- behind the same 8-byte
+  header the chunk form uses, so a near-zero set carries none of the
+  per-chunk addressing overhead.  `{0}` and `{0..63}` are 16 bytes,
+  matching `Bitmapset`; `{5, 70}` is 24.  A map stays in small mode
+  while its largest index is below a small cap (1024 bits) and
+  **transitions automatically to chunk mode** when an index grows past
+  it, then **demotes back** when removals bring the set back down.  The
+  switch is invisible to every public function and to the wire format.
 
 Best case: 16 KB of consecutive set bits in 8 bytes.  Worst case
 (random bits): identical to a raw bitmap plus 8 bytes of overhead.
@@ -98,8 +110,11 @@ sm_free(map);
   thread safety, version lockstep) and what is actually open.
 - **[man/sparsemap.3](man/sparsemap.3)** — Unix manual page.
 
-API docs (Doxygen) are published to
-**[gregburd.codeberg.page/sparsemap/](https://gregburd.codeberg.page/sparsemap/)**.
+The full documentation set lives under [docs/](docs/) in the
+repository and renders on the code host.  Generated Doxygen API docs
+are not currently hosted; build them locally with `doxygen docs/Doxyfile`
+(or enable Codeberg Pages, which `.forgejo/workflows/pages.yml` is set
+up to deploy to a `pages` branch).
 
 ## Build options
 
@@ -117,11 +132,12 @@ Sparsemap is vendored by:
 
 - **[pg_tre](https://github.com/pg-tre/pg_tre)** — PostgreSQL trigram
   search extension.
-- **[postgres/undo](https://github.com/EnterpriseDB/postgres-undo)** —
-  EnterpriseDB's PostgreSQL undo-log fork.
+- **pg_fts** — a PostgreSQL full-text-search extension.
+- **pg_weave** — a PostgreSQL extension using sparsemap for its
+  posting/TID sets.
 
-`contrib/pg_tre_sync.sh` and `contrib/postgres_undo_sync.sh` keep the
-vendored copies in sync with upstream.
+`contrib/pg_tre_sync.sh` keeps the pg_tre vendored copy in sync with
+upstream.
 
 ### Vendoring and symbol prefixing
 
@@ -259,67 +275,35 @@ source-level breaks, all mechanical:
 The serialized wire format is **unchanged**: 4.x bytes deserialize
 under 5.0.
 
-## SIMD: a settled decision, not a roadmap item
+## SIMD
 
-Sparsemap is scalar-only by design, and intends to stay that way.
-No hand-written AVX or NEON intrinsics, nothing target-specific:
-the same source compiles unchanged on x86_64, ARM, RISC-V, s390x
-and SPARC.  Single-file vendoring and cross-platform
-reproducibility outrank per-architecture peak performance for the
-consumer profile (PostgreSQL extensions, embedded indexers, undo
-logs).
+The set-operation inner loops use hand-written SIMD for the 32-word
+chunk kernels, selected at **compile time**: AVX2 (`_mm256_*`) when
+`__AVX2__` is defined, SSE2 (`_mm_*`) when `__SSE2__` is, and a plain
+scalar loop otherwise.  `sm_union`, `sm_intersection`, and
+`sm_difference` route their per-chunk `or` / `and` / `andnot` through
+`__sm_words_or` / `_and` / `_andnot`.  There is no runtime CPU
+dispatch and no target-feature flag: the compiler picks the tier from
+the target it is already building for, so `-O2` gets scalar, `-O3
+-march=native` (or any build that defines `__AVX2__`/`__SSE2__`) gets
+vectorized, and the same source still compiles unchanged on ARM,
+RISC-V, s390x and SPARC via the scalar `#else` path.
 
-Two measurements back this up rather than leaving it a matter of
-taste:
+This is deliberately the smallest useful step: it needs **no
+wire-format change** and no second build system flag, and it leaves the
+allocator hooks (`sm_set_allocator`) a minimal `malloc`/`realloc`/`free`
+triple, matching CRoaring's `roaring_init_memory_hook`.
 
-- The compiler already vectorizes the inner loops that matter.
-  Building with `-O3 -march=native` auto-vectorizes five loops in
-  `sm.c` with no source change (`gcc -fopt-info-vec`).
-- The payoff is small.  Against `-O2`, `-O3 -march=native` moves
-  `sm_union` by roughly 6-13% on the microbenchmark (random/random
-  153.2 -> 144.6 us median; random/dense 39.5 -> 34.4 us).  That is
-  the same order as the gather overhead any hand-written kernel
-  would have to pay back first.
-
-So a consumer who wants vectorization can have most of the
-available win today by compiling with their own `-march`, without
-sparsemap growing a second code path, runtime CPU dispatch, or
-target-feature flags in every downstream build system.
-
-The allocator hooks (`sm_set_allocator`) are deliberately a minimal
-`malloc`/`realloc`/`free` triple, matching CRoaring's
-`roaring_init_memory_hook`.  If a future SIMD effort ever needs
-aligned allocation it can add an aligned-alloc hook then; the
-current API carries no speculative slots.
-
-### What it would take, if a profile ever justified it
-
-Kept here so the analysis does not have to be redone, not as
-planned work.  **Neither tier is scheduled.**
-
-Tier 1, no wire-format change: identify contiguous runs of MIXED
-bitvecs (length >= ~4) while walking chunks, gather them into an
-aligned scratch buffer, run vectorized popcount for
-`sm_cardinality` or `vpand`/`vpor`/`vpxor` for the set operations,
-fall back to the scalar loop otherwise.  Roughly 500 lines of
-intrinsics, runtime dispatch via `__attribute__((target("avx2")))`
-plus a `cpuid` probe, one aligned scratch buffer per inner-loop
-call.  Realistic gain 1.5-3x on dense (mostly-MIXED) maps, near
-zero on sparse maps because the gather overhead eats the win.
-
-Tier 2, wire-format extension: add a payload type storing N
-contiguous bitvecs aligned to 32 bytes with a length prefix, so
-SIMD runs directly on the serialized bytes with no gather.  The
-2-bit flag space is full (00/01/10/11 all assigned), so it needs an
-escape encoding in the chunk header.  Roughly 1500 lines, a codec
-rewrite, deserialize backward-compatibility work and a consumer
-wire-format migration.  Realistic gain 4-6x on dense maps.
-
-If a real workload ever pins `sm_cardinality` or set-op throughput
-as a measured bottleneck, Tier 1 is the right answer -- small,
-contained, no wire-format change.  Tier 2 is a CRoaring-shaped
-rewrite and probably the wrong tool for sparsemap's niche.  Open an
-issue with profile data.
+Beyond this, a wire-format extension (a payload type storing N
+contiguous 32-byte-aligned bitvecs so SIMD runs directly on the
+serialized bytes with no gather) was analysed and **is not planned** --
+the 2-bit flag space is full (00/01/10/11 all assigned), so it would
+need an escape encoding, a codec rewrite, deserialize
+backward-compatibility work and a consumer wire-format migration for a
+4-6x gain on dense maps only.  That is a CRoaring-shaped rewrite and
+probably the wrong tool for sparsemap's niche.  If a real workload
+pins set-op throughput as a measured bottleneck, open an issue with
+profile data.
 
 ## License
 

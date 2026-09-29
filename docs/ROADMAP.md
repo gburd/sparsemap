@@ -26,10 +26,14 @@ Python binding wraps the Rust crate.
 These are closed.  Reopening any of them needs new evidence, not a
 preference.
 
-- **Scalar only, no SIMD.**  See the SIMD section of `README.md` for the
-  measurements.  `-O3 -march=native` already auto-vectorizes five loops
-  and buys only ~6-13% on set operations, which is the same order as the
-  gather overhead a hand-written kernel would have to repay first.
+- **Compile-time SIMD for the set-op kernels.**  `sm_union` /
+  `sm_intersection` / `sm_difference` use hand-written AVX2/SSE2
+  intrinsics for the 32-word chunk loops, selected by `__AVX2__` /
+  `__SSE2__` at compile time with a scalar `#else` fallback (so ARM /
+  RISC-V / s390x / SPARC still build unchanged).  No runtime dispatch,
+  no wire-format change.  A wire-format SIMD extension (aligned
+  contiguous-bitvec payloads) was analysed and is **not planned** — see
+  the SIMD section of `README.md`.
 - **Not thread-safe, and not becoming so.**  Concurrent readers of an
   unmutated map are fine; mutation needs external synchronisation.  The
   `experiment/thread-safe` branch is a 2024 archive.
