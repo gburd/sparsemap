@@ -33,6 +33,7 @@ struct sparsemap {
   size_t m_capacity;  /* (capacity & ~7) bytes; low 3 bits = lineage */
   size_t m_data_used;
   uint8_t *m_data;
+  size_t m_card_plus1; /* runtime-only lazy cardinality cache; not serialized */
 };
 
 struct user_data {
