@@ -3020,11 +3020,28 @@ __sm_coalesce_map(sm_t *map)
 	uint8_t *p = __sm_get_chunk_data(map, offset);
 
 	while (count > 1) {
-		const __sm_idx_t start = __sm_load_idx((const uint8_t *)p);
+		__sm_idx_t start;
 		size_t chunk_size;
 		size_t before;
 		size_t amt;
 		size_t after;
+		/*
+		 * The stored chunk count is the only bound on this walk, but a
+		 * coalesce shrinks m_data_used (via __sm_remove_data) while the
+		 * count can transiently over-report the chunks actually present
+		 * in the buffer (seen when sm_add_range feeds an emitter-built
+		 * map through here: count > real chunks, so p walked off the
+		 * end -- ASan heap-buffer-overflow in __sm_load_idx).  The
+		 * buffer's true extent is m_data_used; stop when p reaches it
+		 * regardless of the count.  A chunk needs at least the index
+		 * word plus one descriptor word, so anything short of that is
+		 * past the data.
+		 */
+		if ((size_t)(p - map->m_data) + SM_SIZEOF_OVERHEAD +
+		        SM_SIZEOF_OVERHEAD > map->m_data_used) {
+			break;
+		}
+		start = __sm_load_idx((const uint8_t *)p);
 		__sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
 		chunk_size = __sm_chunk_get_size(&chunk);
 		if (count > 1) {
