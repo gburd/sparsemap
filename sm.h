@@ -430,19 +430,33 @@ void sm_set_allocator(sm_allocator_t a);
  * one place so the embedded-copy use case cannot drift from the
  * library's own definition.
  *
- * sm_t is three machine words.  The allocation-lineage tag (how
+ * sm_t is four machine words.  The allocation-lineage tag (how
  * m_data was provisioned) is folded into the low bits of m_capacity:
  * capacity is always rounded up to an 8-byte boundary, so its low 3
  * bits are free.  Use the internal __sm_cap() / __sm_kind() accessors
  * rather than touching m_capacity directly.  There is no per-map
  * allocator and no stored cursor; reads accelerate through a
- * caller-owned sm_cursor_t (see below).  Nothing here is serialized.
+ * caller-owned sm_cursor_t (see below).
+ *
+ * m_card_plus1 is a RUNTIME-ONLY lazy cache of sm_cardinality(): it is
+ * NOT serialized and NOT copied to the wire.  It is stored biased by
+ * one so that the all-zero state (a calloc'd or zeroed struct) reads as
+ * "unknown": 0 == cache invalid, otherwise the cached count is
+ * (m_card_plus1 - 1).  Every membership-changing operation invalidates
+ * it (sets it to 0); sm_cardinality recomputes it via the chunk walk on
+ * the first query after a mutation and caches the result.  Because the
+ * value is derived purely from m_data, a fresh map with an invalid
+ * cache is always correct.  This is the ONLY field that is not part of
+ * the serialized state; sizeof(sm_t) grows from 24 to 32 bytes.
  */
 #if defined(SM_INTERNAL) || defined(SM_EXPOSE_STRUCT)
 struct SM_ALIGNED(8) sparsemap {
-	size_t m_capacity;  /* (capacity & ~7) bytes; low 3 bits = lineage */
-	size_t m_data_used; /* used size of m_data, in bytes */
-	uint8_t *m_data;    /* the serialized bitmap data */
+	size_t m_capacity;   /* (capacity & ~7) bytes; low 3 bits = lineage */
+	size_t m_data_used;  /* used size of m_data, in bytes */
+	uint8_t *m_data;     /* the serialized bitmap data */
+	size_t m_card_plus1; /* runtime-only lazy cardinality cache, biased
+	                      * by one: 0 = unknown, else count + 1.  Never
+	                      * serialized. */
 };
 #endif
 
