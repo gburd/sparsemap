@@ -5,6 +5,18 @@ Notable changes per release.  The Rust port keeps its own log in
 across the C library, the Rust crate and the Python binding, so a
 release exists even where one of them is functionally unchanged.
 
+## 5.8.0 (no-rle variant)
+
+Performance release, matching the mainline 5.8.0: `sm_add_range` emits
+runs instead of looping per bit, `sm_cardinality` is O(1) via a lazy
+cached runtime-only field, and bulk `sm_add_many` merges runs in one
+pass.  Wire format unchanged (version 2); `sizeof(struct sparsemap)`
+grows 24->32 (the runtime-only count field, never serialized), so a C
+consumer embedding `sm_t` by value must recompile against the new
+`sm.h`.  The mainline `__sm_coalesce_map` over-read fix is a no-op here
+(this variant's coalesce is a stub -- adjacent all-ones sparse chunks
+need no merging).  Still zero run-length-encoding code.
+
 ## 5.7.0 (no-rle variant)
 
 The RLE-free variant of sparsemap: sparse chunks only, no run-length
