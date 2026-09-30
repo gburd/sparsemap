@@ -4,6 +4,23 @@ All notable changes to the Rust `sparsemap` crate are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com), and
 the crate follows [SemVer](https://semver.org).
 
+## [5.8.0] - 2026-09-30
+
+Matches the C library at 5.8.0, a performance release for the C side
+(faster `sm_add_range`, O(1) `sm_cardinality`, bulk `sm_add_many`, a
+coalesce over-read fix).  The Rust crate models a map as a `BTreeMap`,
+so those C hot-path changes don't alter Rust behaviour; this release
+syncs the embedded C source so the crate's C build, wire-compat
+harness, and any vendored C from this branch carry the fixes.
+
+### Changed
+
+- Embedded C library updated to 5.8.0.  Wire format unchanged (version
+  2); C<->Rust wire compatibility re-verified in both directions.  The
+  C `sizeof(struct sparsemap)` grew 24->32 (a runtime-only field, never
+  serialized) -- this affects only C consumers that embed `sm_t` by
+  value, not the Rust crate or the wire format.
+
 ## [5.7.0] - 2026-09-26
 
 Matches the C library at 5.7.0, which adds a small-set representation

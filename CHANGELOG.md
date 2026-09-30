@@ -5,6 +5,64 @@ Notable changes per release.  The Rust port keeps its own log in
 across the C library, the Rust crate and the Python binding, so a
 release exists even where one of them is functionally unchanged.
 
+## 5.8.0
+
+A performance release from an all-APIs benchmark against CRoaring and
+PostgreSQL `Bitmapset`/`TIDBitmap`.  Three hot paths that were the main
+weaknesses are now orders of magnitude faster, reusing the existing run
+emitter and a lazy cache.  **The wire format is unchanged (still
+version 2, byte-identical to 5.7.x).**  There is one ABI change:
+`sizeof(struct sparsemap)` grows from 24 to 32 bytes (a new runtime-only
+field, never serialized) -- a consumer that embeds `sm_t` **by value**
+must recompile against the new `sm.h`; on-disk data is unaffected.
+
+### Performance
+
+- **`sm_add_range` is O(runs), not O(bits).**  It routed each bit
+  through `sm_add`; it now emits the run through the same run merger the
+  set operations use.  `sm_add_range(m, 0, 10_000_000)` drops from ~140
+  ms to ~1 us, and the result stays the same compact map (a solid run
+  is still 24 bytes).
+- **`sm_cardinality` is O(1).**  It walked every chunk popcounting on
+  each call (linear, up to ~4 ms on a million-element map).  The count
+  is now cached lazily in a runtime-only field, invalidated on any
+  mutation and recomputed on first read -- so `sm_cardinality` and the
+  operations built on it (`*_cardinality`, `sm_jaccard_index`, the
+  `sm_equals` fast path) are constant-time.  This is the 24->32 byte
+  field above; it is never written to the wire.
+- **Bulk `sm_add_many` / `sm_add_many_grow` merge, not insert.**  They
+  sort the input into runs and interval-union-merge them in one pass via
+  the run emitter.  The pathological case -- inserting a batch of sparse
+  bits into an already-large map -- drops from tens of seconds to
+  milliseconds (a 50k-into-50k-chunk build measured ~36 s -> ~13 ms);
+  ascending appends, already amortized, are modestly faster too.
+
+### Fixed
+
+- **`__sm_coalesce_map` heap over-read.**  The coalesce walk was bounded
+  by the stored chunk count, but a coalesce shrinks `m_data_used` while
+  the count can transiently over-report, so the walk pointer could read
+  one chunk past the buffer (results were correct; the read was
+  undefined behaviour, caught by AddressSanitizer via the new
+  `sm_add_range` path).  The walk is now bounded by `m_data_used`.  This
+  is shared code every set operation routes through.
+
+### Docs
+
+- The `SPARSEMAP_PREFIX` documentation now explains that value macros
+  (`SM_IDX_MAX`, `SM_CURSOR_INIT`, ...) cannot be renamed by the
+  preprocessor for a caller-chosen prefix -- the C preprocessor cannot
+  form a macro name by token-pasting in a `#define` name position -- and
+  gives the one-line consumer-side alias as the escape hatch.
+
+### Variants
+
+- All three variants ship these changes: the RLE build (`main`), the
+  Rust crate + Python binding (`ports/rust`), and the RLE-free `no-rle`
+  branch.  (The `no-rle` `__sm_coalesce_map` is a no-op stub -- adjacent
+  all-ones sparse chunks need no merging -- so it never had the
+  over-read; the fix is a no-op there.)
+
 ## 5.7.0
 
 Adds a small-set representation that matches or beats PostgreSQL's
