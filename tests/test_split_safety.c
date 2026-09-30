@@ -339,6 +339,107 @@ main(void)
 		}
 	}
 
+	/* -----------------------------------------------------------------
+	 * BUG2 regression: sm_split of a map with a GAP between two runs
+	 * used to emit an INVALID moved half.  A|B = [0,3000) + [6000,8000)
+	 * stores the low dense run as an RLE chunk; splitting at 1500 lands
+	 * inside that RLE run, so sm_split separates the RLE and recurses.
+	 * A header double-count in the RLE separation's knit-back inserted
+	 * the expansion one word too far right, half-overwriting the next
+	 * chunk's start index -- the moved half had the correct cardinality
+	 * but a garbage, unaligned chunk start (sm_validate == 0).  Also
+	 * covers the in-gap and everything-moves partitions the same fix
+	 * touched.  Pre-fix: sm_validate(o) == 0. --------------------------- */
+	{
+		sm_t *m = sm_create(1 << 20);
+		CHECK(m != NULL);
+		for (uint64_t i = 0; i < 3000; i++)
+			CHECK(sm_add_grow(&m, i) == i);
+		for (uint64_t i = 6000; i < 8000; i++)
+			CHECK(sm_add_grow(&m, i) == i);
+		CHECK(sm_validate(m));
+
+		sm_t *o = sm_create(1 << 20);
+		CHECK(o != NULL);
+		CHECK(sm_split(m, 1500, o) != SM_IDX_MAX);
+
+		/* BOTH halves valid. */
+		CHECK(sm_validate(m));
+		CHECK(sm_validate(o));
+		/* Documented partition: m keeps [start, idx), o gets
+		 * [idx, end] at the SAME absolute positions. */
+		CHECK(sm_cardinality(m) == 1500);  /* [0, 1500) */
+		CHECK(sm_cardinality(o) == 3500);  /* [1500,3000) + [6000,8000) */
+		for (uint64_t i = 0; i < 8500; i++) {
+			bool lo = i < 3000 || (i >= 6000 && i < 8000);
+			bool want_m = lo && i < 1500;
+			bool want_o = lo && i >= 1500;
+			CHECK(sm_contains(m, i, NULL) == want_m);
+			CHECK(sm_contains(o, i, NULL) == want_o);
+		}
+		/* Round-trip: the two halves re-union to the original. */
+		sm_t *u = sm_union(m, o);
+		CHECK(u != NULL);
+		CHECK(sm_cardinality(u) == 5000);
+		sm_free(u);
+		sm_free(m);
+		sm_free(o);
+	}
+
+	/* Split at a point that lands in a GAP between two chunks: the run
+	 * just below the split must stay in `map`, not move to `other`. */
+	{
+		sm_t *m = sm_create(1 << 18);
+		CHECK(m != NULL);
+		/* run in chunk window 1, run in chunk window 6 */
+		CHECK(sm_add_range(m, 2100, 3100));
+		CHECK(sm_add_range(m, 13000, 14000));
+		CHECK(sm_validate(m));
+		sm_t *o = sm_create(1 << 18);
+		CHECK(o != NULL);
+		CHECK(sm_split(m, 5502, o) != SM_IDX_MAX); /* 5502 is in a gap */
+		CHECK(sm_validate(m));
+		CHECK(sm_validate(o));
+		CHECK(sm_cardinality(m) == 1000); /* [2100,3100) stays */
+		CHECK(sm_cardinality(o) == 1000); /* [13000,14000) moves */
+		CHECK(sm_contains(m, 2100, NULL));
+		CHECK(!sm_contains(o, 2100, NULL));
+		CHECK(sm_contains(o, 13000, NULL));
+		sm_free(m);
+		sm_free(o);
+	}
+
+	/* -----------------------------------------------------------------
+	 * BUG3 regression: removing the sole bit of a length-1 RLE run.
+	 * A hand-crafted length-1 RLE chunk passes sm_validate; sm_remove of
+	 * its only bit used to set the RLE length to 0, and a length-0 RLE
+	 * descriptor reads as a FULL-CAPACITY run -- so the cardinality
+	 * jumped to the stored capacity (2048) instead of dropping to 0.
+	 * The fix removes the chunk outright when the last bit of a length-1
+	 * run is cleared.  Pre-fix: sm_cardinality == 2048 after remove. --- */
+	{
+		const uint64_t cap = 2048, len = 1;
+		uint64_t count = 1, start = 0;
+		uint64_t desc = ((uint64_t)1 << 62) /* SM_RLE_FLAGS */
+		    | (cap << 31) | len;
+		uint8_t body[24];
+		memcpy(body + 0, &count, 8);
+		memcpy(body + 8, &start, 8);
+		memcpy(body + 16, &desc, 8);
+
+		sm_t *m = sm_open_copy(body, sizeof body, 64);
+		CHECK(m != NULL);
+		CHECK(sm_validate(m));
+		CHECK(sm_cardinality(m) == 1);
+		CHECK(sm_contains(m, 0, NULL));
+
+		CHECK(sm_remove(m, 0) != SM_IDX_MAX);
+		CHECK(sm_cardinality(m) == 0);   /* NOT 2048 */
+		CHECK(!sm_contains(m, 0, NULL));
+		CHECK(sm_validate(m));
+		sm_free(m);
+	}
+
 	printf("test_split_safety: S3 sm_split memory safety OK\n");
 	return (0);
 }

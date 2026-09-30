@@ -50,6 +50,11 @@ void print_bits(char *name, uint64_t value);
 
 void bitmap_from_uint32(sm_t *map, uint32_t number);
 void sm_bitmap_from_uint64(sm_t *map, int offset, uint64_t number);
+/* Set bits of `number` at absolute base `base`: bit i of `number` maps
+ * to map index base + i.  A base >= SM_SMALL_MAX_BITS forces chunk mode,
+ * so the same 64-bit pattern exercises the chunk codec instead of the
+ * small-set flat form. */
+void sm_bitmap_from_uint64_at(sm_t *map, uint64_t base, uint64_t number);
 uint32_t rank_uint64(uint64_t number, int n, int p);
 int whats_set_uint64(uint64_t number, int bitPositions[64]);
 
