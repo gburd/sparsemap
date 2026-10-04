@@ -191,6 +191,34 @@ main(void)
 	arr[0] = 0; /* silence -Wmaybe-uninitialized; n==0 reads nothing */
 	run("empty", arr, 0, NULL, 0);
 
+	/*
+	 * Minimal n>=2 and chunk-boundary pairs.  These are the smallest
+	 * inputs that enter the bulk coalesce/union/emit path, and are
+	 * exactly the shapes a downstream port (PostgreSQL sbm) found an
+	 * infinite loop on while random/large scenarios masked it.  The
+	 * run() helper's "bulk == per-element sm_add_grow == oracle"
+	 * cross-check is the property that catches a non-terminating or
+	 * wrong emitter here; a hang shows up as the test never returning.
+	 * SM_CHUNK_MAX_CAPACITY is 2048, so 2047/2048 straddle a chunk
+	 * boundary and 2048/2049 open on one.
+	 */
+	{
+		uint64_t two[2] = { 1, 2 };		/* same word */
+		uint64_t gap[2] = { 1, 2048 };		/* different chunks */
+		uint64_t cross[2] = { 2047, 2048 };	/* straddle chunk boundary */
+		uint64_t aligned[2] = { 2048, 2049 };	/* open on a boundary */
+		uint64_t three[3] = { 1, 2, 3 };	/* consecutive -> one run */
+		uint64_t dup2[2] = { 42, 42 };		/* duplicate pair */
+		uint64_t wordedge[3] = { 63, 64, 65 };	/* 64-bit word boundary */
+		run("pair-same-word", two, 2, NULL, 0);
+		run("pair-two-chunks", gap, 2, NULL, 0);
+		run("pair-straddle-chunk", cross, 2, NULL, 0);
+		run("pair-chunk-aligned", aligned, 2, NULL, 0);
+		run("triple-consecutive", three, 3, NULL, 0);
+		run("pair-duplicate", dup2, 2, NULL, 0);
+		run("triple-word-edge", wordedge, 3, NULL, 0);
+	}
+
 	/* single element small / chunk / at the 1024 boundary */
 	arr[0] = 7;
 	run("single-small", arr, 1, NULL, 0);
