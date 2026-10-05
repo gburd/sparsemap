@@ -4,6 +4,21 @@ All notable changes to the Rust `sparsemap` crate are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com), and
 the crate follows [SemVer](https://semver.org).
 
+## [5.8.1] - 2026-10-05
+
+Matches the C library at 5.8.1, two bug fixes in the C sparse-chunk code
+(a `sm_add_many`/`sm_create_from_array` use-after-free on an owned map
+that must grow, and an `sm_validate` gap on a sparse descriptor whose
+data slots exceed capacity).  The Rust crate models a map as a
+`BTreeMap` and is not itself affected; this release syncs the embedded C
+source so the crate's C build and wire-compat harness carry the fixes.
+
+### Changed
+
+- Embedded C library updated to 5.8.1.  Wire format unchanged (version
+  2); C<->Rust compatibility re-verified both directions.  No change to
+  the Rust or Python API.
+
 ## [5.8.0] - 2026-09-30
 
 Matches the C library at 5.8.0, a performance release for the C side
