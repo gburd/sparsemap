@@ -5,6 +5,16 @@ Notable changes per release.  The Rust port keeps its own log in
 across the C library, the Rust crate and the Python binding, so a
 release exists even where one of them is functionally unchanged.
 
+## 5.8.1 (no-rle variant)
+
+Two bug fixes matching the mainline 5.8.1, both in the shared
+sparse-chunk code: a `sm_add_many`/`sm_create_from_array` use-after-free
+on an owned map that must grow, and an `sm_validate` gap that accepted a
+sparse descriptor whose data-bearing slots exceed the chunk's capacity
+(the slot-indexed and capacity-bounded readers then disagreed).
+`sm_validate` now rejects such a chunk.  No API/ABI/wire change
+(`sm_t` still 32, wire version 2).  Still zero run-length-encoding code.
+
 ## 5.8.0 (no-rle variant)
 
 Performance release, matching the mainline 5.8.0: `sm_add_range` emits
