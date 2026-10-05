@@ -5,6 +5,57 @@ Notable changes per release.  The Rust port keeps its own log in
 across the C library, the Rust crate and the Python binding, so a
 release exists even where one of them is functionally unchanged.
 
+## 5.8.1
+
+Two bug fixes from a downstream consumer's (pg_weave) property testing.
+No API, ABI, or wire-format change: `sizeof(struct sparsemap)` is
+unchanged (32), the wire format is still version 2 and byte-identical,
+and this is a drop-in source swap for any 5.8.0 vendored copy.
+
+### Fixed
+
+- **`sm_add_many` / `sm_create_from_array` use-after-free (memory
+  safety).**  `sm_add_many` on an owned (`sm_create`'d) map that had to
+  grow routed through `__sm_replace_buffer` -> `sm_set_data_size`, which
+  reallocs the whole contiguous block (the `sm_t` included), freeing the
+  caller's pointer -- yet `sm_add_many` returned `false`, whose
+  documented meaning is "unchanged, retry with `sm_add_many_grow`", so a
+  caller holding the now-freed pointer had a use-after-free.
+  `sm_create_from_array` made it unconditional for inputs larger than its
+  1 KiB seed: it then `sm_free`'d the stale pointer (a double free) and
+  returned `NULL`, leaking the correct result.  `sm_add_many` now keeps
+  its no-relocate contract -- on an owned map whose result would not fit
+  the existing capacity it frees the scratch result and returns `false`
+  leaving the caller's map valid and unchanged -- and
+  `sm_create_from_array` uses the growing `sm_add_many_grow`.  Only the
+  owned-must-grow path (previously the faulty one) changes behaviour.
+- **`sm_validate` accepted a sparse descriptor the readers disagreed
+  on.**  A sparse chunk's descriptor is 32 two-bit flags; a
+  `SM_PAYLOAD_NONE` flag reduces the chunk's capacity.  `sm_validate`
+  did not check that every data-bearing flag (`ONES`/`MIXED`) fits within
+  that reduced capacity, so a crafted or corrupt buffer could place a
+  data slot above the capacity: `sm_cardinality`/`sm_rank` (slot-indexed)
+  counted it while `sm_contains`/`sm_next_member` (capacity-bounded)
+  did not -- the two reader families answered inconsistently, and a
+  single-byte flip could make a 2000-member map validate as claiming
+  hundreds of millions.  `sm_validate` now rejects a sparse chunk whose
+  highest `ONES`/`MIXED` slot extends past its capacity.  The encoder
+  never writes such a chunk (verified against the full test suite and a
+  randomized set-operation stress: tens of thousands of real outputs,
+  zero false rejections), so no sparsemap-written buffer is affected.
+  (Note: `NONE` legitimately appears interleaved among data slots in
+  encoder output; the invariant is a capacity bound, not a flag-ordering
+  rule.)
+
+### Tests
+
+- `tests/test_add_many_owned.c` -- the owned-grow path returns `false`
+  with the caller's map intact, `sm_create_from_array` is
+  AddressSanitizer-clean on inputs that exceed the seed capacity.
+- `tests/test_validate_descriptor.c` -- every interior data-slot-past-
+  capacity corruption is rejected, and for every buffer `sm_validate`
+  accepts, `sm_cardinality` equals an `sm_next_member` walk.
+
 ## 5.8.0
 
 A performance release from an all-APIs benchmark against CRoaring and
