@@ -139,6 +139,8 @@ executable('sparsemap_soak',
 # libFuzzer harness for the deserialization path.  Requires clang
 # with -fsanitize=fuzzer support.  Disabled by default; enable with
 #   meson setup builddir-fuzz -Dfuzz=enabled
+# The library itself is then built with -fsanitize=fuzzer-no-link (see
+# the top-level meson.build) so the fuzzers get coverage of sm.c.
 fuzz_opt = get_option('fuzz')
 if fuzz_opt.allowed()
   if cc.get_id() != 'clang'

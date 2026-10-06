@@ -32,8 +32,25 @@ if get_option('diagnostic')
   add_project_arguments('-DSPARSEMAP_DIAGNOSTIC=1', language : 'c')
 endif
 
+# -Dfuzz: instrument the library too, not only the harnesses; an
+# uninstrumented sm.c gave libFuzzer no coverage signal (~11 edges, all
+# in the harness).  Consumers get the sanitizer runtime through
+# libsparsemap_dep; the shared library cannot link with --no-undefined
+# because clang does not link that runtime into shared objects.
+lib_c_args = []
+lib_link_args = []
+lib_overrides = []
+if get_option('fuzz').allowed() and cc.get_id() == 'clang'
+  lib_c_args = ['-fsanitize=fuzzer-no-link,address,undefined']
+  lib_link_args = ['-fsanitize=address,undefined']
+  lib_overrides = ['b_lundef=false']
+endif
+
 libsparsemap = both_libraries('sparsemap',
   'sm.c',
+  c_args : lib_c_args,
+  link_args : lib_link_args,
+  override_options : lib_overrides,
   include_directories : inc,
   install : true,
   version : meson.project_version(),
@@ -42,6 +59,7 @@ libsparsemap = both_libraries('sparsemap',
 
 libsparsemap_dep = declare_dependency(
   link_with : libsparsemap.get_static_lib(),
+  link_args : lib_link_args,
   include_directories : inc,
 )
 
