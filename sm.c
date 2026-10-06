@@ -10074,7 +10074,11 @@ sm_difference(const sm_t *a, const sm_t *b)
 						return (NULL);
 					}
 				}
-				a_cursor = ov_end;
+				/* A sparse a was expanded and emitted whole, so
+				 * it is consumed even when b's run ends inside it;
+				 * stopping at ov_end re-emitted a's tail at the
+				 * same start (two chunks, one start). */
+				a_cursor = a_rle ? ov_end : a_end;
 			}
 
 			/* Advance b if it ends within or at a's boundary */
@@ -10501,8 +10505,14 @@ sm_union(const sm_t *a, const sm_t *b)
 						goto fail;
 				}
 
-				a_cursor = ov_end;
-				b_cursor = ov_end;
+				/* The sparse side was expanded and emitted whole,
+				 * so it is consumed even when the other side's
+				 * run ends inside it.  Advancing it only to ov_end
+				 * re-emitted its tail later at the same start:
+				 * two chunks with one start, sm_validate false,
+				 * the tail counted twice. */
+				a_cursor = a_rle ? ov_end : a_end;
+				b_cursor = b_rle ? ov_end : b_end;
 				if (a_cursor >= a_end) {
 					ap += SM_SIZEOF_OVERHEAD + a_size;
 					ai++;
