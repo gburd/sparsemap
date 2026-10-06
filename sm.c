@@ -507,6 +507,13 @@ enum __SM_CHUNK_INFO {
 	SM_NEEDS_TO_SHRINK = 2
 };
 
+/* Check (f) in sm_validate finds the highest data-bearing slot by masking
+ * the HIGH bit of every flag (0xAAAA...).  That is only right while ONES
+ * and MIXED are exactly the two flags with the high bit set. */
+_Static_assert((SM_PAYLOAD_ONES & 2) != 0 && (SM_PAYLOAD_MIXED & 2) != 0 &&
+    (SM_PAYLOAD_NONE & 2) == 0 && (SM_PAYLOAD_ZEROS & 2) == 0,
+    "check (f) in sm_validate relies on the flag encoding");
+
 /* Used when separating an RLE chunk into 2-3 chunks */
 typedef struct {
 	struct {
@@ -9145,24 +9152,28 @@ sm_validate(const sm_t *map)
 		 * capacity), so reject any crafted buffer that violates this --
 		 * it is the one sparse shape sm_validate used to accept while
 		 * the readers answered inconsistently.  NONE in slot 31 is the
-		 * RLE marker and is handled by the RLE path above. */
+		 * RLE marker and is handled by the RLE path above.
+		 *
+		 * Slot s occupies descriptor bits 2s+1:2s, and ONES (2#11) and
+		 * MIXED (2#10) are exactly the flags whose HIGH bit is set (the
+		 * _Static_assert after the SM_PAYLOAD_* enum pins this).  So
+		 * hi = desc & 0xAAAA... has bit 2s+1 set iff slot s carries
+		 * data; hi == 0 means no data slot (accept); otherwise the top
+		 * set bit 63 - clz(hi) is odd, = 2s+1 for the highest data slot
+		 * s, and halving it gives s (0..31, so (s+1)*64 cannot
+		 * overflow).  One mask and one count-leading-zeros per chunk:
+		 * the 5.8.1 form scanned all 32 slots and cost ~75% of
+		 * sm_open_copy on real maps.  SM_CLZ64 is undefined at 0, hence
+		 * the hi != 0 guard. */
 		if (!__sm_chunk_is_rle(&chunk)) {
-			const __sm_bitvec_t desc = chunk.m_data[0];
-			size_t slot;
-			int highest_data = -1;
-			for (slot = 0; slot < SM_FLAGS_PER_INDEX; slot++) {
-				const size_t fl =
-				    (size_t)((desc >> (slot * 2)) &
-				        SM_FLAG_MASK);
-				if (fl == SM_PAYLOAD_ONES ||
-				    fl == SM_PAYLOAD_MIXED) {
-					highest_data = (int)slot;
-				}
-			}
-			if (highest_data >= 0 &&
-			    ((size_t)(highest_data + 1) *
-			            (size_t)SM_BITS_PER_VECTOR) > capacity) {
-				return (false);
+			const __sm_bitvec_t hi = chunk.m_data[0] &
+			    (__sm_bitvec_t)0xAAAAAAAAAAAAAAAAULL;
+			if (hi != 0) {
+				const size_t highest_data =
+				    (size_t)(63 - SM_CLZ64(hi)) / 2;
+				if ((highest_data + 1) *
+				        (size_t)SM_BITS_PER_VECTOR > capacity)
+					return (false);
 			}
 		}
 		/* (c) [start, start + capacity) must not extend past the
