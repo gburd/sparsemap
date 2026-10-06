@@ -2261,8 +2261,8 @@ static ssize_t
 __sm_get_chunk_offset(const sm_t *map, const uint64_t idx, sm_cursor_t *cur)
 {
 	const size_t count = __sm_get_chunk_count(map);
-	uint8_t *base = __sm_get_chunk_data(map, 0);
-	uint8_t *p = base;
+	uint8_t *base;
+	uint8_t *p;
 	/* Offsets returned here are relative to `base` (the first chunk);
 	 * m_data_used is relative to m_data and includes the
 	 * SM_SIZEOF_OVERHEAD chunk-count header, so the chunk stream
@@ -2282,6 +2282,9 @@ __sm_get_chunk_offset(const sm_t *map, const uint64_t idx, sm_cursor_t *cur)
 	if (count == 0) {
 		return (-1);
 	}
+	/* Only now: m_data may be NULL for an empty sm_wrap(NULL, 0) map. */
+	base = __sm_get_chunk_data(map, 0);
+	p = base;
 
 	/*
 	 * Cursor fast-path.  If the caller passed a valid cursor whose
@@ -3738,10 +3741,16 @@ sm_clear(sm_t *map)
 	if (map == NULL) {
 		return;
 	}
+	__sm_card_invalidate(map);
+	/* A buffer too short for the chunk-count header (0..7 bytes, or
+	 * NULL) is the empty map with m_data_used == 0: write nothing. */
+	if (SM_UNLIKELY(__sm_cap(map) < SM_SIZEOF_OVERHEAD)) {
+		map->m_data_used = 0;
+		return;
+	}
 	memset(map->m_data, 0, __sm_cap(map));
 	map->m_data_used = SM_SIZEOF_OVERHEAD;
 	__sm_set_chunk_count(map, 0);
-	__sm_card_invalidate(map);
 }
 
 /**
@@ -3893,7 +3902,9 @@ sm_copy(const sm_t *other)
 	if (map) {
 		__sm_set_cap_kind(map, cap, SM_OWNED_CONTIGUOUS);
 		map->m_data_used = other->m_data_used;
-		memcpy(map->m_data, other->m_data, cap);
+		if (cap > 0) {
+			memcpy(map->m_data, other->m_data, cap);
+		}
 	}
 	return (map);
 }
@@ -3990,10 +4001,18 @@ sm_open(sm_t *map, uint8_t *data, const size_t size)
 	 * struct + buffer; lineage matches sm_init (SM_WRAPPED).
 	 */
 	__sm_set_cap_kind(map, size, SM_WRAPPED);
+	/* Too short to hold the chunk-count header (size 0..7, including
+	 * sm_open(m, NULL, 0)): the empty map.  Read and write nothing --
+	 * __sm_cap rounds the size down to 0, but the walk below would
+	 * still load an 8-byte header past the caller's buffer. */
+	if (SM_UNLIKELY(size < SM_SIZEOF_OVERHEAD)) {
+		map->m_data_used = 0;
+		return;
+	}
 	map->m_data_used = __sm_cap(map);
 	/* Small-set body: the header word's top bit is set.  Its size is
 	 * fixed by the word count; don't run the chunk walk on it. */
-	if (size >= SM_SIZEOF_OVERHEAD && __sm_is_small(map)) {
+	if (__sm_is_small(map)) {
 		const size_t nwords = __sm_small_nwords(map);		map->m_data_used =
 		    SM_SIZEOF_OVERHEAD + nwords * sizeof(uint64_t);
 		if (map->m_data_used > __sm_cap(map) || !sm_validate(map)) {
@@ -4010,10 +4029,8 @@ sm_open(sm_t *map, uint8_t *data, const size_t size)
 	walked_count = __sm_get_chunk_count(map);
 	/* An untrusted buffer must be structurally valid or it is replaced
 	 * with an empty (valid) map -- the same contract sm_deserialize
-	 * already enforces.  size 0 is the documented "leave it empty" call
-	 * (sm_init/sm_wrap of a fresh buffer), so don't validate that. */
-	if (size >= SM_SIZEOF_OVERHEAD &&
-	    (claimed_count != walked_count || !sm_validate(map))) {
+	 * already enforces. */
+	if (claimed_count != walked_count || !sm_validate(map)) {
 		__sm_store_u64(&map->m_data[0], 0);
 		map->m_data_used = SM_SIZEOF_OVERHEAD;
 	}
@@ -5843,6 +5860,11 @@ sm_get_size(sm_t *map)
 {
 	if (map == NULL)
 		return (0);
+	/* No room for the chunk-count header (a 0..7-byte buffer): report
+	 * the empty-map size, but never record it in m_data_used -- that
+	 * would make later readers trust a header the buffer cannot hold. */
+	if (SM_UNLIKELY(__sm_cap(map) < SM_SIZEOF_OVERHEAD))
+		return (SM_SIZEOF_OVERHEAD);
 	/* Small-set mode: the stored m_data_used is authoritative; the
 	 * chunk-walking size recompute must not run on a small body. */
 	if (__sm_is_small(map))
@@ -7492,13 +7514,14 @@ sm_prev_member(const sm_t *map, uint64_t prev_idx, sm_cursor_t *cur)
 		    (prev_idx == SM_IDX_MAX) ? UINT64_MAX : prev_idx;
 		/* Walk forward to the last chunk that starts before upper_excl,
 		 * remembering each chunk so we can step back if needed. */
-		uint8_t *p = __sm_get_chunk_data(map, 0);
+		uint8_t *p;
 		/* Track up to `count` candidate chunk pointers. */
 		uint8_t *last = NULL;
 		size_t last_idx = 0;
 		size_t i;
 		if (count == 0)
 			return (SM_IDX_MAX);
+		p = __sm_get_chunk_data(map, 0);
 		for (i = 0; i < count; i++) {
 			const __sm_idx_t start =
 			    __sm_load_idx((const uint8_t *)p);
@@ -10964,8 +10987,8 @@ sm_select(sm_t *map, uint64_t n, bool value)
 		uint8_t *p;
 		size_t i;
 
-		if (count == 0 && value == false) {
-			return (n);
+		if (count == 0) {
+			return (value ? SM_IDX_MAX : n);
 		}
 
 		p = __sm_get_chunk_data(map, 0);
