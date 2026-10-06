@@ -189,6 +189,22 @@ main(void)
 		sm_free(m);
 	}
 
+	/* sm_validate's chunk loop loaded a chunk's start before checking
+	 * that the chunk lies inside m_data_used.  On a library-owned map
+	 * whose count claims a chunk the bytes do not hold -- sm_create(8),
+	 * count = 1 written into sm_get_data(), no sm_open -- that read 8
+	 * bytes past the allocation (ASan heap-buffer-overflow).  It must
+	 * just reject. */
+	{
+		sm_t *m = sm_create(8);
+		const uint64_t one = 1;
+		CHECK(m != NULL);
+		CHECK(sm_get_capacity(m) == 8 && sm_get_size(m) == 8);
+		memcpy(sm_get_data(m), &one, 8);
+		CHECK(!sm_validate(m));
+		sm_free(m);
+	}
+
 	printf("test_validate: S1 invariants OK\n");
 	return (0);
 }

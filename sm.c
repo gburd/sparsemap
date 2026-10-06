@@ -9134,14 +9134,17 @@ sm_validate(const sm_t *map)
 	p = __sm_get_chunk_data(map, 0);
 	end = map->m_data + map->m_data_used;
 	for (i = 0; i < count; i++) {
-		const __sm_idx_t start = __sm_load_idx((const uint8_t *)p);
+		__sm_idx_t start;
 		__sm_chunk_t chunk;
 		size_t chunk_size;
 		size_t capacity;
 		uint64_t chunk_end;
+		/* Bounds first: the start is the chunk's first 8 bytes, and a
+		 * count that over-claims puts them past m_data_used. */
 		if (p + SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) > end) {
 			return (false);
 		}
+		start = __sm_load_idx((const uint8_t *)p);
 		if (!first && start <= prev_start) {
 			return (false);
 		}
