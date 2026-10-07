@@ -2417,12 +2417,6 @@ __sm_small_set_header(sm_t *map, size_t nwords)
 	    SM_SMALL_FLAG | (uint64_t)nwords);
 }
 
-/* Byte footprint of the small form holding indices up to maxbit. */
-static inline size_t
-__sm_small_bytes_for(uint64_t maxbit)
-{
-	return (SM_SIZEOF_OVERHEAD + (size_t)(maxbit / 64 + 1) * sizeof(uint64_t));
-}
 
 /* True if idx is set in a small-mode map. */
 static bool
@@ -9688,9 +9682,32 @@ __sm_emit_chunk_bits(sm_t **resultp, const __sm_chunk_t *chunk, bool is_rle,
 		const size_t emit_start = from > set_start ? from : set_start;
 		const size_t emit_end = to < set_end ? to : set_end;
 		if (emit_start < emit_end) {
-			const size_t emit_len = emit_end - emit_start;
-			return (__sm_append_rle_chunk(resultp,
-			    (__sm_idx_t)emit_start, emit_len, emit_len));
+			/*
+			 * The clipped run [emit_start, emit_end) must be laid
+			 * down as proper, chunk-aligned output chunk(s): a chunk
+			 * start has to be a multiple of SM_CHUNK_MAX_CAPACITY.
+			 * Appending the raw emit_start as an RLE chunk start was
+			 * the 5.8.1 misalignment bug -- it produced a map whose
+			 * membership was correct but which failed sm_validate,
+			 * and for a long clip it emitted one over-length RLE
+			 * chunk spanning many 2048 windows.  Route the run
+			 * through the same ordered emitter the other set ops use
+			 * (__sm_emit_run), which splits the run at chunk
+			 * boundaries, anchors each output chunk at its aligned
+			 * floor, and forwards the sub-chunk head/tail to the
+			 * words path.  A fresh emitter per call is correct: the
+			 * difference sweep appends output chunks in ascending,
+			 * non-overlapping order, so flushing here before
+			 * returning never collides with a later append.
+			 */
+			__sm_emitter_t em;
+			memset(&em, 0, sizeof(em));
+			em.resultp = resultp;
+			if (!__sm_emit_run(&em, (uint64_t)emit_start,
+			        (uint64_t)emit_end)) {
+				return (false);
+			}
+			return (__sm_emit_flush(&em));
 		}
 		return (true);
 	}
