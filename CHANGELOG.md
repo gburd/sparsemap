@@ -5,6 +5,37 @@ Notable changes per release.  The Rust port keeps its own log in
 across the C library, the Rust crate and the Python binding, so a
 release exists even where one of them is functionally unchanged.
 
+## 5.8.2
+
+One bug fix, found by fuzzing on FreeBSD/arm64.  No API, ABI, or
+wire-format change (`sizeof(struct sparsemap)` unchanged, wire still
+version 2); a drop-in source swap for any 5.8.x vendored copy.
+
+### Fixed
+
+- **`sm_difference` could emit a structurally invalid map.**  When the
+  difference clipped a run-length-encoded chunk to a sub-range whose
+  start is not chunk-aligned (e.g. `{[10000,20000)} \ {[10000,13794)}`),
+  `__sm_emit_chunk_bits` appended an output chunk anchored at the raw
+  clipped start (13794) rather than the chunk-aligned floor.  The result
+  had **correct membership** but failed `sm_validate`, so a consumer that
+  validates a difference result would reject a logically-correct answer;
+  a long clip also produced a single over-length RLE chunk spanning many
+  chunk windows.  The clipped run is now emitted through the same
+  chunk-aligned run emitter the other set operations use, so every
+  output chunk starts on a 2048-bit boundary and splits across windows
+  correctly.  Only `sm_difference`'s clipped-RLE path was affected
+  (`sm_union`/`sm_intersection`/`sm_xor` already used the aligned
+  emitter); the sparse (non-clipped) path is byte-for-byte unchanged.
+  Membership is identical before and after -- only the chunk framing is
+  corrected.
+
+### Other
+
+- Removed a dead static helper (`__sm_small_bytes_for`) that clang 21
+  flagged as unused; `sm.c`/`sm.h` are warning-clean under the strict
+  flag set on clang 21 as well as gcc.
+
 ## 5.8.1
 
 Two bug fixes from a downstream consumer's (pg_weave) property testing.

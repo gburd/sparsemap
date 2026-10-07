@@ -4,6 +4,16 @@ All notable changes to the Rust `sparsemap` crate are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com), and
 the crate follows [SemVer](https://semver.org).
 
+## [5.8.2] - 2026-10-06
+
+Matches the C library at 5.8.2, a one-fix patch (an `sm_difference`
+clipped-RLE path emitted a structurally invalid, unaligned chunk start;
+membership was correct but `sm_validate` rejected it).  The Rust crate
+models a map as a `BTreeMap` and is not itself affected; this release
+syncs the embedded C source so the crate's C build and wire-compat
+harness carry the fix.  Wire format unchanged (version 2); C<->Rust
+compatibility re-verified both directions.
+
 ## [5.8.1] - 2026-10-05
 
 Matches the C library at 5.8.1, two bug fixes in the C sparse-chunk code
