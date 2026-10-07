@@ -5,6 +5,17 @@ Notable changes per release.  The Rust port keeps its own log in
 across the C library, the Rust crate and the Python binding, so a
 release exists even where one of them is functionally unchanged.
 
+## 5.8.2 (no-rle variant)
+
+Matches the mainline 5.8.2.  The mainline fix (an `sm_difference`
+clipped-RLE path emitting an unaligned chunk start) does NOT affect the
+RLE-free build -- its `__sm_emit_chunk_bits` is sparse-only and already
+anchors every output chunk at the aligned start, so the minimal
+reproducer validates on this variant unchanged.  The regression test
+(`tests/test_difference_align.c`) is added here too to lock that in.  A
+dead helper clang 21 flagged as unused was removed.  No API/ABI/wire
+change; still zero run-length-encoding code.
+
 ## 5.8.1 (no-rle variant)
 
 Two bug fixes matching the mainline 5.8.1, both in the shared
