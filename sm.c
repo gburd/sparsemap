@@ -1978,12 +1978,6 @@ __sm_small_set_header(sm_t *map, size_t nwords)
 	    SM_SMALL_FLAG | (uint64_t)nwords);
 }
 
-/* Byte footprint of the small form holding indices up to maxbit. */
-static inline size_t
-__sm_small_bytes_for(uint64_t maxbit)
-{
-	return (SM_SIZEOF_OVERHEAD + (size_t)(maxbit / 64 + 1) * sizeof(uint64_t));
-}
 
 /* True if idx is set in a small-mode map. */
 static bool
