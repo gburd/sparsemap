@@ -8,7 +8,7 @@ release exists even where one of them is functionally unchanged.
 ## 5.8.2
 
 A performance fix for 5.8.1's validator, two pre-existing memory-safety
-fixes found while qualifying it, a set-operation encoding fix, and a
+fixes found while qualifying it, set-operation encoding fixes, and a
 fuzz-build fix.  No API, ABI or wire-format change: `sizeof(struct
 sparsemap)` is unchanged (32), the wire format is still version 2 and
 byte-identical, and this is a drop-in source swap for any 5.8.x vendored
@@ -76,6 +76,23 @@ variant stay at 5.8.1 for now and do not yet carry these changes.
   the run `[0, 164)` and `c` has bits in `[0, 2048)`.  The sparse side is
   now consumed by that emit.  Present in 5.8.0 and 5.8.1.  Membership
   answers (`sm_contains`) were already correct.
+- **Set operations wrote RLE chunks at unaligned starts and with
+  unaligned capacities.**  A run clipped by `sm_difference` (and the
+  both-RLE paths of `sm_union` and `sm_intersection`) went out as one
+  RLE chunk at the clip point with capacity == length.
+  `sm_difference([10000, 20000), [10000, 13794))` returned a chunk
+  starting at 13794, and `sm_difference([0, 5000), [0, 100))` one at
+  100.  Check (b) in `sm_validate` requires starts that are multiples of
+  2048, so it returned false and `sm_open_copy` / `sm_deserialize`
+  rejected a serialized copy.  An unaligned capacity, such as `[0, 2149)`
+  stored as capacity 2149, let a later `sm_add` in `[2149, 4096)` insert
+  a sparse chunk at 2048, inside the run's span (check (d), overlap).  A
+  clipped run is now split at chunk boundaries: whole chunks as RLE, and
+  a sub-chunk head or tail as a sparse chunk merged into any output
+  already in that window, the way `sm_xor` and `sm_offset` already
+  emit.  Present in 5.8.0 and 5.8.1.  Membership answers were already
+  correct.  `sm_difference` of two large RLE+sparse maps is about 4 %
+  slower (24.4 ms vs 23.4 ms); `sm_union` is unchanged.
 
 ### Build
 
@@ -89,24 +106,6 @@ variant stay at 5.8.1 for now and do not yet carry these changes.
   `tests/fuzz-corpus`, `fuzz_deserialize` now reaches 1793 edges (3.7 M
   executions) and `fuzz_mutate` 4642 (1.9 M), with 0 crashes.  Builds
   without `-Dfuzz` are unchanged.
-
-### Known issues
-
-Found by the same randomized set-operation differential and still open
-in 5.8.2 (also present in 5.8.0 and 5.8.1).  In both, membership is
-right but the encoding is not canonical, so `sm_validate` returns false;
-`sm_open_copy` / `sm_deserialize` will then reject a serialized copy:
-
-- **`sm_difference` of two runs can emit an RLE chunk at an unaligned
-  start.**  `sm_difference([0, 5000), [0, 100))` returns one RLE chunk
-  starting at 100.  Check (b) requires chunk starts to be multiples of
-  2048.
-- **`sm_add` after a set operation can add a chunk inside an RLE
-  chunk's span.**  Set operations write an RLE chunk with capacity ==
-  length, e.g. `[0, 2149)` as capacity 2149, where `sm_add_range` would
-  write capacity 4096.  A later `sm_add` of an index in `[2149, 4096)`
-  then inserts a sparse chunk at 2048, which lies inside the RLE chunk's
-  span `[0, 2149)` and fails check (d), overlap.
 
 ### Tests
 
@@ -122,6 +121,14 @@ right but the encoding is not canonical, so `sm_validate` returns false;
   bases) against a sparse chunk sharing its start, for union,
   intersection, difference and xor in both operand orders.  Each result
   is checked against a bit-array model; 60 failures on 5.8.1.
+  It also pins the reported unaligned-start cases, checks `sm_add`
+  into the gap after a difference, and runs a randomized union /
+  intersection / difference / xor differential.  That differential is
+  3 seeds x 4000 iterations over operands built from runs (some >= 2048
+  bits and crossing chunk boundaries, some starting at 0) plus sparse
+  bits.  Every result is checked for validity and exact membership,
+  then used as an operand and after `sm_add`.  Without the unaligned-RLE
+  fix above it reports 3040 failing checks; with it, 0.
 
 ## 5.8.1
 
