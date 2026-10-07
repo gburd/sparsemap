@@ -5,6 +5,124 @@ Notable changes per release.  The Rust port keeps its own log in
 across the C library, the Rust crate and the Python binding, so a
 release exists even where one of them is functionally unchanged.
 
+## 5.8.2
+
+A performance fix for 5.8.1's validator, two pre-existing memory-safety
+fixes found while qualifying it, a set-operation encoding fix, and a
+fuzz-build fix.  No API, ABI or wire-format change: `sizeof(struct
+sparsemap)` is unchanged (32), the wire format is still version 2 and
+byte-identical, and this is a drop-in source swap for any 5.8.x vendored
+copy.  This release is the C library only.  The Rust crate and Python
+binding (`ports/rust`, which embeds `sm.c`) and the RLE-free `no-rle`
+variant stay at 5.8.1 for now and do not yet carry these changes.
+
+### Performance
+
+- **Check (f) in `sm_validate` is O(1) per chunk; 5.8.0 decode speed is
+  back.**  5.8.1's descriptor-shape check (a sparse chunk's highest
+  `ONES`/`MIXED` slot must fit its capacity) looped over all 32 slots of
+  every chunk on every `sm_open`, `sm_open_copy` and `sm_deserialize`.
+  `ONES` (`0b11`) and `MIXED` (`0b10`) are exactly the flags with the
+  high bit set, so the highest data-bearing slot is the top set bit of
+  `desc & 0xAAAA...AAAA`, halved: one mask and one count-leading-zeros.
+  A `_Static_assert` pins the flag encoding this relies on.  Accept and
+  reject behaviour is unchanged.  This was checked exhaustively over all
+  2^32 high-bit patterns x 34 capacity classes (146 028 888 064
+  comparisons, 0 mismatches) and on 825 664 corrupted real maps, which
+  5.8.1 and 5.8.2 accept or reject identically through `sm_validate`,
+  `sm_open_copy` and `sm_deserialize`.  Median of 15 alternating rounds
+  pinned to one CPU (Xeon 8488C, gcc 12 `-O2`):
+
+  | map (chunks) | `sm_open_copy` 5.8.0 | 5.8.1 | 5.8.2 |
+  |---|---|---|---|
+  | sparse (20 000) | 683.5 us | 1195 us (+74.8 %) | 699.3 us (+2.3 %) |
+  | dense (4 000) | 136.6 us | 238.8 us (+74.8 %) | 139.7 us (+2.3 %) |
+  | mixed (49 042) | 1690 us | 2946 us (+74.3 %) | 1731 us (+2.4 %) |
+  | RLE (2 000 runs) | 10.12 us | 10.12 us | 8.79 us (-13.2 %) |
+
+  `sm_validate` alone goes from +179 % to +5.5 % over 5.8.0 on sparse
+  maps; that is (f) now doing real work at O(1) per chunk.  RLE-only
+  maps never reach (f).  Their 5.8.2 speed-up appeared with the
+  short-buffer fix below, which changes `sm_create`/`sm_clear`, and was
+  not investigated further; do not count on it.
+
+### Fixed
+
+- **`sm_open` / `sm_init` with a buffer shorter than the 8-byte header
+  (memory safety).**  A size of 0..7 rounds down to capacity 0, yet
+  `sm_open` still read the 8-byte chunk-count header (an 8-byte
+  heap-buffer-overflow READ), and `sm_init` wrote it (an 8-byte
+  overflow WRITE).  For size 0, `sm_open` also left `m_data_used = 8`, so
+  a later `sm_cardinality` walked a header the caller never supplied.
+  `sm_wrap(NULL, 0)` + `sm_open(m, NULL, 0)` dereferenced NULL.  Such a
+  buffer is now the empty map: `m_data_used = 0`, and nothing is read or
+  written.  The fix also covers three readers (`sm_contains` via the
+  chunk locator, `sm_prev_member`, `sm_select`) and `sm_copy`, which
+  formed or copied from `m_data + 8` before checking for an empty map;
+  that is undefined behaviour when `m_data` is NULL.  `sm_open_copy` and
+  `sm_deserialize` over-allocate and were not affected.  Present since
+  at least 5.8.0.
+- **`sm_validate` read a chunk's start before its bounds check.**  A
+  stored chunk count that over-claims made the chunk loop load 8 bytes
+  past `m_data_used` before rejecting.  The public decoders' slack hid
+  it; it was reachable by writing a bad count into a library-owned map
+  and calling `sm_validate` directly.  The load now follows the check.
+- **`sm_union` / `sm_difference` emitted two chunks with one start.**
+  When an RLE chunk ended inside a sparse chunk that shares its start,
+  the merge emitted the whole sparse chunk combined with the run, then
+  emitted the sparse chunk's tail again at the same start.  The result
+  failed `sm_validate` and `sm_cardinality` counted the tail twice; for
+  example `sm_union(sm_intersection(a, b), c)` where the intersection is
+  the run `[0, 164)` and `c` has bits in `[0, 2048)`.  The sparse side is
+  now consumed by that emit.  Present in 5.8.0 and 5.8.1.  Membership
+  answers (`sm_contains`) were already correct.
+
+### Build
+
+- **`-Dfuzz=enabled` now instruments the library, not just the
+  harnesses.**  `libsparsemap.a` was built without coverage or
+  sanitizers (0 `__sanitizer_cov` / `__asan` relocations), so libFuzzer
+  saw only the harness: coverage stalled at 11 edges (`fuzz_deserialize`)
+  and 21 (`fuzz_mutate`).  With fuzz enabled, clang compiles `sm.c` with
+  `-fsanitize=fuzzer-no-link,address,undefined`, which adds 4138
+  `__sanitizer_cov` relocations.  In 10-minute runs from
+  `tests/fuzz-corpus`, `fuzz_deserialize` now reaches 1793 edges (3.7 M
+  executions) and `fuzz_mutate` 4642 (1.9 M), with 0 crashes.  Builds
+  without `-Dfuzz` are unchanged.
+
+### Known issues
+
+Found by the same randomized set-operation differential and still open
+in 5.8.2 (also present in 5.8.0 and 5.8.1).  In both, membership is
+right but the encoding is not canonical, so `sm_validate` returns false;
+`sm_open_copy` / `sm_deserialize` will then reject a serialized copy:
+
+- **`sm_difference` of two runs can emit an RLE chunk at an unaligned
+  start.**  `sm_difference([0, 5000), [0, 100))` returns one RLE chunk
+  starting at 100.  Check (b) requires chunk starts to be multiples of
+  2048.
+- **`sm_add` after a set operation can add a chunk inside an RLE
+  chunk's span.**  Set operations write an RLE chunk with capacity ==
+  length, e.g. `[0, 2149)` as capacity 2149, where `sm_add_range` would
+  write capacity 4096.  A later `sm_add` of an index in `[2149, 4096)`
+  then inserts a sparse chunk at 2048, which lies inside the RLE chunk's
+  span `[0, 2149)` and fails check (d), overlap.
+
+### Tests
+
+- `tests/test_open_short.c` -- `sm_wrap` + `sm_open` and `sm_init` on
+  exact-size buffers of 0..8 bytes and on NULL: the map is empty to
+  every reader, serializes as the empty map, refuses `sm_add` with
+  `ENOSPC`, and none of the caller's bytes are touched.  It fails under
+  AddressSanitizer on 5.8.1.
+- `tests/test_validate.c` -- a library-owned map whose header claims
+  one chunk it does not hold must be rejected without an out-of-bounds
+  read.
+- `tests/test_setop_rle_sparse.c` -- a run (lengths 1..2100 at three
+  bases) against a sparse chunk sharing its start, for union,
+  intersection, difference and xor in both operand orders.  Each result
+  is checked against a bit-array model; 60 failures on 5.8.1.
+
 ## 5.8.1
 
 Two bug fixes from a downstream consumer's (pg_weave) property testing.
