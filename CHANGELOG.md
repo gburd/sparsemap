@@ -5,6 +5,20 @@ Notable changes per release.  The Rust port keeps its own log in
 across the C library, the Rust crate and the Python binding, so a
 release exists even where one of them is functionally unchanged.
 
+## 5.8.3 (no-rle variant)
+
+Matches the mainline 5.8.3.  The fixes that apply to the RLE-free build:
+`sm_open` / `sm_init` with a buffer shorter than the 8-byte header is
+now the empty map (it read and wrote past the caller's buffer); the
+small-set word array is accessed alignment-safely, so a misaligned
+caller buffer is no longer undefined behaviour; and `sm_validate`'s
+descriptor-capacity check is O(1) per chunk.  The mainline's RLE set-op
+fixes (double-counted tail, unaligned RLE emit) do not apply -- this
+build has no RLE chunks and was verified clean on those shapes; their
+regression tests are included to keep it that way.  `sm_validate`
+already bounds-checked before loading a chunk start here.  No
+API/ABI/wire change; still zero run-length-encoding code.
+
 ## 5.8.2 (no-rle variant)
 
 Matches the mainline 5.8.2.  The mainline fix (an `sm_difference`
