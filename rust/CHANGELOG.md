@@ -4,6 +4,17 @@ All notable changes to the Rust `sparsemap` crate are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com), and
 the crate follows [SemVer](https://semver.org).
 
+## [5.8.3] - 2026-10-15
+
+Matches the C library at 5.8.3: four C set-operation / validator /
+open-path fixes contributed by pg_fts and pg_tre, an O(1) validator
+check, and an alignment fix for small-set mode on a misaligned caller
+buffer.  The Rust crate models a map as a `BTreeMap` and is not itself
+affected; this release syncs the embedded C source so the crate's C
+build and wire-compat harness carry the fixes.  Wire format unchanged
+(version 2, byte-identical to 5.8.2); C<->Rust compatibility re-verified
+in both directions.
+
 ## [5.8.2] - 2026-10-06
 
 Matches the C library at 5.8.2, a one-fix patch (an `sm_difference`
