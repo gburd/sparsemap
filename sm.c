@@ -1972,10 +1972,22 @@ __sm_small_nwords(const sm_t *map)
 	return ((size_t)(__sm_load_u64(&map->m_data[0]) & SM_SMALL_WMASK));
 }
 
-static inline uint64_t *
+/*
+ * The small-set word array starts 8 bytes into m_data.  m_data is
+ * 8-aligned for library-owned maps, but sm_wrap/sm_init/sm_open accept
+ * a caller buffer that may be arbitrarily aligned (sm.h documents that
+ * this works, with a speed cost on some cpus).  So the words are typed
+ * __sm_bitvec_unaligned_t -- like every chunk descriptor -- and the
+ * compiler emits alignment-safe loads/stores instead of trapping on a
+ * strict-alignment cpu or tripping UBSan.  Same codegen on x86_64 and
+ * aarch64; a plain `uint64_t *` here was undefined behaviour on a
+ * misaligned buffer.
+ */
+static inline __sm_bitvec_unaligned_t *
 __sm_small_words(const sm_t *map)
 {
-	return ((uint64_t *)&map->m_data[SM_SIZEOF_OVERHEAD]);
+	return ((__sm_bitvec_unaligned_t *)(void *)&map->m_data[
+	    SM_SIZEOF_OVERHEAD]);
 }
 
 static inline void
@@ -2002,7 +2014,7 @@ static uint64_t
 __sm_small_cardinality(const sm_t *map)
 {
 	size_t i;
-	const uint64_t *w = __sm_small_words(map);
+	const __sm_bitvec_unaligned_t *w = __sm_small_words(map);
 	const size_t n = __sm_small_nwords(map);
 	uint64_t c = 0;
 	for (i = 0; i < n; i++) {
@@ -2015,7 +2027,7 @@ static bool
 __sm_small_is_empty(const sm_t *map)
 {
 	size_t i;
-	const uint64_t *w = __sm_small_words(map);
+	const __sm_bitvec_unaligned_t *w = __sm_small_words(map);
 	const size_t n = __sm_small_nwords(map);
 	for (i = 0; i < n; i++) {
 		if (w[i] != 0) {
@@ -2029,7 +2041,7 @@ static uint64_t
 __sm_small_minimum(const sm_t *map)
 {
 	size_t i;
-	const uint64_t *w = __sm_small_words(map);
+	const __sm_bitvec_unaligned_t *w = __sm_small_words(map);
 	const size_t n = __sm_small_nwords(map);
 	for (i = 0; i < n; i++) {
 		if (w[i] != 0) {
@@ -2043,7 +2055,7 @@ static uint64_t
 __sm_small_maximum(const sm_t *map)
 {
 	size_t i;
-	const uint64_t *w = __sm_small_words(map);
+	const __sm_bitvec_unaligned_t *w = __sm_small_words(map);
 	const size_t n = __sm_small_nwords(map);
 	for (i = n; i-- > 0;) {
 		if (w[i] != 0) {
@@ -2777,7 +2789,7 @@ static size_t
 __sm_small_chunk_bytes(const sm_t *map)
 {
 	size_t i;
-	const uint64_t *w = __sm_small_words(map);
+	const __sm_bitvec_unaligned_t *w = __sm_small_words(map);
 	const size_t n = __sm_small_nwords(map);
 	size_t mixed = 0;
 	for (i = 0; i < n; i++) {
@@ -2951,7 +2963,7 @@ static sm_t *
 __sm_materialize(const sm_t *small)
 {
 	size_t i;
-	const uint64_t *w = __sm_small_words(small);
+	const __sm_bitvec_unaligned_t *w = __sm_small_words(small);
 	const size_t n = __sm_small_nwords(small);
 	sm_t *m = sm_create(256);
 	if (m == NULL) {
@@ -3269,7 +3281,7 @@ sm_remove(sm_t *map, const uint64_t idx)
 		const size_t w = (size_t)(idx / 64);
 		if (w < __sm_small_nwords(map)) {
 			size_t n;
-			uint64_t * words;
+			__sm_bitvec_unaligned_t *words;
 			__sm_small_words(map)[w] &=
 			    ~((uint64_t)1 << (idx % 64));
 			/* Shrink the trailing all-zero words so the footprint
@@ -3561,7 +3573,7 @@ __sm_small_add(sm_t *map, uint64_t idx)
 	const size_t w = (size_t)(idx / 64);
 	size_t n = __sm_small_nwords(map);
 	if (w >= n) {
-		uint64_t * words;
+		__sm_bitvec_unaligned_t *words;
 		size_t i;
 		const size_t need = SM_SIZEOF_OVERHEAD +
 		    (w + 1) * sizeof(uint64_t);
@@ -4257,10 +4269,13 @@ static inline void
 __sm_words_or(__sm_bitvec_t dst[32], const __sm_bitvec_t a[32],
     const __sm_bitvec_t b[32])
 {
-	for (int i = 0; i < 32; i += 4) {
-		__m256i va = _mm256_loadu_si256((const __m256i *)&a[i]);
-		__m256i vb = _mm256_loadu_si256((const __m256i *)&b[i]);
-		_mm256_storeu_si256((__m256i *)&dst[i],
+	int i;
+	for (i = 0; i < 32; i += 4) {
+		__m256i va = _mm256_loadu_si256(
+		    (const __m256i *)(const void *)&a[i]);
+		__m256i vb = _mm256_loadu_si256(
+		    (const __m256i *)(const void *)&b[i]);
+		_mm256_storeu_si256((__m256i *)(void *)&dst[i],
 		    _mm256_or_si256(va, vb));
 	}
 }
@@ -4269,10 +4284,13 @@ static inline void
 __sm_words_and(__sm_bitvec_t dst[32], const __sm_bitvec_t a[32],
     const __sm_bitvec_t b[32])
 {
-	for (int i = 0; i < 32; i += 4) {
-		__m256i va = _mm256_loadu_si256((const __m256i *)&a[i]);
-		__m256i vb = _mm256_loadu_si256((const __m256i *)&b[i]);
-		_mm256_storeu_si256((__m256i *)&dst[i],
+	int i;
+	for (i = 0; i < 32; i += 4) {
+		__m256i va = _mm256_loadu_si256(
+		    (const __m256i *)(const void *)&a[i]);
+		__m256i vb = _mm256_loadu_si256(
+		    (const __m256i *)(const void *)&b[i]);
+		_mm256_storeu_si256((__m256i *)(void *)&dst[i],
 		    _mm256_and_si256(va, vb));
 	}
 }
@@ -4282,10 +4300,13 @@ __sm_words_andnot(__sm_bitvec_t dst[32], const __sm_bitvec_t a[32],
     const __sm_bitvec_t b[32])
 {
 	/* dst = a & ~b */
-	for (int i = 0; i < 32; i += 4) {
-		__m256i va = _mm256_loadu_si256((const __m256i *)&a[i]);
-		__m256i vb = _mm256_loadu_si256((const __m256i *)&b[i]);
-		_mm256_storeu_si256((__m256i *)&dst[i],
+	int i;
+	for (i = 0; i < 32; i += 4) {
+		__m256i va = _mm256_loadu_si256(
+		    (const __m256i *)(const void *)&a[i]);
+		__m256i vb = _mm256_loadu_si256(
+		    (const __m256i *)(const void *)&b[i]);
+		_mm256_storeu_si256((__m256i *)(void *)&dst[i],
 		    _mm256_andnot_si256(vb, va));
 	}
 }
@@ -4299,9 +4320,12 @@ __sm_words_or(__sm_bitvec_t dst[32], const __sm_bitvec_t a[32],
 {
 	int i;
 	for (i = 0; i < 32; i += 2) {
-		__m128i va = _mm_loadu_si128((const __m128i *)&a[i]);
-		__m128i vb = _mm_loadu_si128((const __m128i *)&b[i]);
-		_mm_storeu_si128((__m128i *)&dst[i], _mm_or_si128(va, vb));
+		__m128i va = _mm_loadu_si128(
+		    (const __m128i *)(const void *)&a[i]);
+		__m128i vb = _mm_loadu_si128(
+		    (const __m128i *)(const void *)&b[i]);
+		_mm_storeu_si128((__m128i *)(void *)&dst[i],
+		    _mm_or_si128(va, vb));
 	}
 }
 
@@ -4311,9 +4335,12 @@ __sm_words_and(__sm_bitvec_t dst[32], const __sm_bitvec_t a[32],
 {
 	int i;
 	for (i = 0; i < 32; i += 2) {
-		__m128i va = _mm_loadu_si128((const __m128i *)&a[i]);
-		__m128i vb = _mm_loadu_si128((const __m128i *)&b[i]);
-		_mm_storeu_si128((__m128i *)&dst[i], _mm_and_si128(va, vb));
+		__m128i va = _mm_loadu_si128(
+		    (const __m128i *)(const void *)&a[i]);
+		__m128i vb = _mm_loadu_si128(
+		    (const __m128i *)(const void *)&b[i]);
+		_mm_storeu_si128((__m128i *)(void *)&dst[i],
+		    _mm_and_si128(va, vb));
 	}
 }
 
@@ -4324,9 +4351,12 @@ __sm_words_andnot(__sm_bitvec_t dst[32], const __sm_bitvec_t a[32],
 	int i;
 	/* dst = a & ~b */
 	for (i = 0; i < 32; i += 2) {
-		__m128i va = _mm_loadu_si128((const __m128i *)&a[i]);
-		__m128i vb = _mm_loadu_si128((const __m128i *)&b[i]);
-		_mm_storeu_si128((__m128i *)&dst[i], _mm_andnot_si128(vb, va));
+		__m128i va = _mm_loadu_si128(
+		    (const __m128i *)(const void *)&a[i]);
+		__m128i vb = _mm_loadu_si128(
+		    (const __m128i *)(const void *)&b[i]);
+		_mm_storeu_si128((__m128i *)(void *)&dst[i],
+		    _mm_andnot_si128(vb, va));
 	}
 }
 
@@ -5123,7 +5153,7 @@ sm_next_member(const sm_t *map, uint64_t prev_idx, sm_cursor_t *cur)
 		uint64_t word;
 		/* First set bit strictly greater than prev_idx (SM_IDX_MAX
 		 * means "from the start"). */
-		const uint64_t *words = __sm_small_words(map);
+		const __sm_bitvec_unaligned_t *words = __sm_small_words(map);
 		const size_t n = __sm_small_nwords(map);
 		const uint64_t from = (prev_idx == SM_IDX_MAX) ? 0
 		                                               : prev_idx + 1;
@@ -5214,7 +5244,7 @@ sm_prev_member(const sm_t *map, uint64_t prev_idx, sm_cursor_t *cur)
 		uint64_t word;
 		/* Highest set bit strictly less than prev_idx (SM_IDX_MAX
 		 * means "from the end"). */
-		const uint64_t *words = __sm_small_words(map);
+		const __sm_bitvec_unaligned_t *words = __sm_small_words(map);
 		const size_t n = __sm_small_nwords(map);
 		if (n == 0)
 			return (SM_IDX_MAX);
@@ -5430,7 +5460,7 @@ __sm_run_iter_init(__sm_run_iter_t *it, const sm_t *map)
 		 * leave count == 0 so __sm_run_next just drains it.  A small
 		 * map spans < SM_SMALL_MAX_BITS (<= 1024) bits, whose worst
 		 * case (alternating) is 512 runs -- well within the buffer. */
-		const uint64_t *w = __sm_small_words(map);
+		const __sm_bitvec_unaligned_t *w = __sm_small_words(map);
 		const size_t n = __sm_small_nwords(map);
 		it->count = 0;
 		it->nruns = 0;
