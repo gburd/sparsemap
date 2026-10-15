@@ -5,6 +5,65 @@ Notable changes per release.  The Rust port keeps its own log in
 across the C library, the Rust crate and the Python binding, so a
 release exists even where one of them is functionally unchanged.
 
+## 5.8.3
+
+Four correctness and memory-safety fixes contributed by pg_fts / pg_tre
+(found by pg_tre's set-operation differential), one validator speedup,
+and an alignment fix found with clang on riscv64.  No API, ABI, or
+wire-format change: `sizeof(struct sparsemap)` is unchanged, the wire
+format is still version 2, and serialized output is byte-identical to
+5.8.2.  A drop-in source swap for any 5.8.x vendored copy.
+
+### Fixed
+
+- **`sm_union` / `sm_difference` double-counted bits.**  Where an RLE
+  chunk overlapped a sparse chunk, the sparse chunk was expanded,
+  combined with the run and emitted once -- but its cursor advanced only
+  to the end of the overlap, so when the run ended inside the sparse
+  chunk its tail was emitted a second time at the same start.  The
+  result had two chunks with one start: `sm_validate` returned false and
+  `sm_cardinality` counted the tail twice (e.g. `sm_union(sm_intersection
+  (a, b), c)` with an RLE `[0, 164)` intersection reported 168 members
+  for a 166-member set).
+- **`sm_union` / `sm_intersection` emitted unaligned RLE chunks.**  The
+  same defect 5.8.2 fixed in `sm_difference`, at the RLE emit sites in
+  these two operations: a run clipped to a non-chunk-aligned start was
+  appended at that start.  Runs now go out as chunk-aligned chunks.
+- **`sm_validate` read 8 bytes past the buffer** when a chunk count
+  over-claimed: it loaded a chunk's start before checking that the chunk
+  header fit.  The load now follows the bounds check.
+- **`sm_open` / `sm_init` with a buffer shorter than the 8-byte header**
+  read (and `sm_init` wrote) the chunk-count header past the caller's
+  buffer, and `sm_open(m, NULL, 0)` dereferenced NULL.  Such a buffer is
+  now the empty map; nothing is read or written.
+- **Small-set mode on a misaligned caller buffer was undefined
+  behaviour.**  `sm_wrap` / `sm_init` / `sm_open` accept a caller buffer
+  of any alignment, but the small-set word array was accessed through a
+  plain `uint64_t *`.  clang's `-fsanitize=alignment` reports it at the
+  first `sm_add`, and a strict-alignment cpu without misaligned-access
+  emulation would trap.  The words are now accessed through the same
+  alignment-safe type the chunk descriptors already use (identical code
+  on x86_64 and aarch64).
+
+### Changed
+
+- `sm_validate`'s descriptor-capacity check is O(1) per chunk (a mask
+  and a count-leading-zeros) instead of a 32-slot scan, with a
+  `_Static_assert` pinning the flag encoding it relies on.
+  Accept/reject behaviour is identical (checked over 160 million
+  descriptor x capacity combinations).
+- `sm.c` is warning-clean under clang `-Wcast-align` and gcc
+  `-Wcast-align=strict` in all three SIMD tiers (scalar, SSE2, AVX2);
+  the SSE2/AVX2 `loadu`/`storeu` casts are annotated, with no codegen
+  change.
+
+### Tests
+
+- `tests/test_setop_rle_sparse.c`, `tests/test_open_short.c`,
+  `tests/test_misaligned_buffer.c` (buffer offsets 0..7 under
+  `-fsanitize=alignment`), and a count-overclaim case in
+  `tests/test_validate.c`.
+
 ## 5.8.2
 
 One bug fix, found by fuzzing on FreeBSD/arm64.  No API, ABI, or
