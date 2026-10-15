@@ -504,6 +504,13 @@ enum __SM_CHUNK_INFO {
 	SM_NEEDS_TO_SHRINK = 2
 };
 
+/* Check (f) in sm_validate finds the highest data-bearing slot by masking
+ * the HIGH bit of every flag (0xAAAA...).  That is only right while ONES
+ * and MIXED are exactly the two flags with the high bit set. */
+_Static_assert((SM_PAYLOAD_ONES & 2) != 0 && (SM_PAYLOAD_MIXED & 2) != 0 &&
+    (SM_PAYLOAD_NONE & 2) == 0 && (SM_PAYLOAD_ZEROS & 2) == 0,
+    "check (f) in sm_validate relies on the flag encoding");
+
 /*
  * SM_ENOUGH_SPACE: if growing m_data_used by `need` bytes would push
  * past m_capacity, return SM_IDX_MAX with errno=ENOSPC.
@@ -2220,10 +2227,16 @@ sm_clear(sm_t *map)
 	if (map == NULL) {
 		return;
 	}
+	__sm_card_invalidate(map);
+	/* A buffer too short for the chunk-count header (0..7 bytes, or
+	 * NULL) is the empty map with m_data_used == 0: write nothing. */
+	if (SM_UNLIKELY(__sm_cap(map) < SM_SIZEOF_OVERHEAD)) {
+		map->m_data_used = 0;
+		return;
+	}
 	memset(map->m_data, 0, __sm_cap(map));
 	map->m_data_used = SM_SIZEOF_OVERHEAD;
 	__sm_set_chunk_count(map, 0);
-	__sm_card_invalidate(map);
 }
 
 /**
@@ -2374,7 +2387,9 @@ sm_copy(const sm_t *other)
 	if (map) {
 		__sm_set_cap_kind(map, cap, SM_OWNED_CONTIGUOUS);
 		map->m_data_used = other->m_data_used;
-		memcpy(map->m_data, other->m_data, cap);
+		if (cap > 0) {
+			memcpy(map->m_data, other->m_data, cap);
+		}
 	}
 	return (map);
 }
@@ -2471,10 +2486,18 @@ sm_open(sm_t *map, uint8_t *data, const size_t size)
 	 * struct + buffer; lineage matches sm_init (SM_WRAPPED).
 	 */
 	__sm_set_cap_kind(map, size, SM_WRAPPED);
+	/* Too short to hold the chunk-count header (size 0..7, including
+	 * sm_open(m, NULL, 0)): the empty map.  Read and write nothing --
+	 * __sm_cap rounds the size down to 0, but the walk below would
+	 * still load an 8-byte header past the caller's buffer. */
+	if (SM_UNLIKELY(size < SM_SIZEOF_OVERHEAD)) {
+		map->m_data_used = 0;
+		return;
+	}
 	map->m_data_used = __sm_cap(map);
 	/* Small-set body: the header word's top bit is set.  Its size is
 	 * fixed by the word count; don't run the chunk walk on it. */
-	if (size >= SM_SIZEOF_OVERHEAD && __sm_is_small(map)) {
+	if (__sm_is_small(map)) {
 		const size_t nwords = __sm_small_nwords(map);
 		map->m_data_used =
 		    SM_SIZEOF_OVERHEAD + nwords * sizeof(uint64_t);
@@ -2494,8 +2517,7 @@ sm_open(sm_t *map, uint8_t *data, const size_t size)
 	 * with an empty (valid) map -- the same contract sm_deserialize
 	 * already enforces.  size 0 is the documented "leave it empty" call
 	 * (sm_init/sm_wrap of a fresh buffer), so don't validate that. */
-	if (size >= SM_SIZEOF_OVERHEAD &&
-	    (claimed_count != walked_count || !sm_validate(map))) {
+	if (claimed_count != walked_count || !sm_validate(map)) {
 		__sm_store_u64(&map->m_data[0], 0);
 		map->m_data_used = SM_SIZEOF_OVERHEAD;
 	}
@@ -3996,6 +4018,11 @@ sm_get_size(sm_t *map)
 {
 	if (map == NULL)
 		return (0);
+	/* No room for the chunk-count header (a 0..7-byte buffer): report
+	 * the empty-map size, but never record it in m_data_used -- that
+	 * would make later readers trust a header the buffer cannot hold. */
+	if (SM_UNLIKELY(__sm_cap(map) < SM_SIZEOF_OVERHEAD))
+		return (SM_SIZEOF_OVERHEAD);
 	/* Small-set mode: the stored m_data_used is authoritative; the
 	 * chunk-walking size recompute must not run on a small body. */
 	if (__sm_is_small(map))
@@ -6826,24 +6853,28 @@ sm_validate(const sm_t *map)
 		 * 31 (the sibling variant reserves bits 63:62 == 01 there)
 		 * simply means that highest vector is unused and is not
 		 * data-bearing, so it is accepted when the real data still
-		 * fits. */
+		 * fits.
+		 *
+		 * Slot s occupies descriptor bits 2s+1:2s, and ONES (2#11) and
+		 * MIXED (2#10) are exactly the flags whose HIGH bit is set (the
+		 * _Static_assert after the SM_PAYLOAD_* enum pins this).  So
+		 * hi = desc & 0xAAAA... has bit 2s+1 set iff slot s carries
+		 * data; hi == 0 means no data slot (accept); otherwise the top
+		 * set bit 63 - clz(hi) is odd, = 2s+1 for the highest data slot
+		 * s, and halving it gives s (0..31, so (s+1)*64 cannot
+		 * overflow).  One mask and one count-leading-zeros per chunk:
+		 * the 5.8.1 form scanned all 32 slots and cost ~75% of
+		 * sm_open_copy on real maps.  SM_CLZ64 is undefined at 0, hence
+		 * the hi != 0 guard. */
 		{
-			const __sm_bitvec_t desc = chunk.m_data[0];
-			size_t slot;
-			int highest_data = -1;
-			for (slot = 0; slot < SM_FLAGS_PER_INDEX; slot++) {
-				const size_t fl =
-				    (size_t)((desc >> (slot * 2)) &
-				        SM_FLAG_MASK);
-				if (fl == SM_PAYLOAD_ONES ||
-				    fl == SM_PAYLOAD_MIXED) {
-					highest_data = (int)slot;
-				}
-			}
-			if (highest_data >= 0 &&
-			    ((size_t)(highest_data + 1) *
-			            (size_t)SM_BITS_PER_VECTOR) > capacity) {
-				return (false);
+			const __sm_bitvec_t hi = chunk.m_data[0] &
+			    (__sm_bitvec_t)UINT64_C(0xAAAAAAAAAAAAAAAA);
+			if (hi != 0) {
+				const size_t highest_data =
+				    (size_t)(63 - SM_CLZ64(hi)) / 2;
+				if ((highest_data + 1) *
+				        (size_t)SM_BITS_PER_VECTOR > capacity)
+					return (false);
 			}
 		}
 		/* (c) [start, start + capacity) must not extend past the
@@ -8104,8 +8135,8 @@ sm_select(sm_t *map, uint64_t n, bool value)
 	__sm_assert(sm_get_size(map) >= SM_SIZEOF_OVERHEAD);
 	count = __sm_get_chunk_count(map);
 
-	if (count == 0 && value == false) {
-		return (n);
+	if (count == 0) {
+		return (value ? SM_IDX_MAX : n);
 	}
 
 	p = __sm_get_chunk_data(map, 0);
