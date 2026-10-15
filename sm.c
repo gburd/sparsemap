@@ -9362,7 +9362,7 @@ sm_validate(const sm_t *map)
 		 * the hi != 0 guard. */
 		if (!__sm_chunk_is_rle(&chunk)) {
 			const __sm_bitvec_t hi = chunk.m_data[0] &
-			    (__sm_bitvec_t)0xAAAAAAAAAAAAAAAAULL;
+			    (__sm_bitvec_t)UINT64_C(0xAAAAAAAAAAAAAAAA);
 			if (hi != 0) {
 				const size_t highest_data =
 				    (size_t)(63 - SM_CLZ64(hi)) / 2;
