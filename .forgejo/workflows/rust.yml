@@ -49,6 +49,8 @@ jobs:
           rustup default stable
       - name: C reads Rust-produced buffers
         run: sh ci/wire_compat.sh
+      - name: Rust reads C-produced buffers
+        run: sh ci/wire_c2rust.sh
 
   msrv:
     runs-on: codeberg-small
