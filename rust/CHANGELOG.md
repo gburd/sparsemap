@@ -4,6 +4,17 @@ All notable changes to the Rust `sparsemap` crate are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com), and
 the crate follows [SemVer](https://semver.org).
 
+## [5.8.4] - 2026-11-02
+
+Matches the C library at 5.8.4: the embedded C source gets pg_fts's
+cursor fix (an ascending `sm_contains` pass over a sparse map no longer
+re-walks the chunk list from the start for each lookup in a gap) and a
+clamp on an internal byte move that read 8 bytes past an exactly-full
+buffer during `sm_add_range`.  The Rust crate models a map as a
+`BTreeMap` and is not itself affected.  Wire format unchanged (version
+2, byte-identical to 5.8.3); C<->Rust compatibility re-verified in both
+directions.
+
 ## [5.8.3] - 2026-10-15
 
 Matches the C library at 5.8.3: four C set-operation / validator /
