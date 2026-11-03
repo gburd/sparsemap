@@ -28,7 +28,7 @@ source swap for any 5.8.x vendored copy.
   cached chunk's left neighbour (the cursor already records it in
   `prev_offset`), after checking that the neighbour ends exactly where the
   cached chunk begins.  100,000 ascending gap lookups over 20,000 chunks:
-  2,960 ms -> 3.8 ms (pg_fts's vendored copy, c6id.metal).  Answers are
+  2,960 ms -> 3.8 ms (pg_fts's vendored copy, x86_64).  Answers are
   unchanged for any index and any cursor; no API, ABI or wire-format
   change.
 - **`sm_add_range` read 8 bytes past its scratch buffer** (5.8.0-5.8.3).
@@ -46,7 +46,7 @@ source swap for any 5.8.x vendored copy.
 - `tests/test_cursor_gap.c`: cursor answers equal cursor-free ones
   (ascending with repeats, and arbitrary order) on sparse, clustered and
   run-length maps, and a ceiling on 100,000 ascending gap lookups.  On
-  Debian 13 x86_64 (c6id.metal, gcc): the meson suite passes 28/28 in a
+  Debian 13 x86_64 with gcc, the meson suite passes 28/28 in a
   release build and 28/28 under ASan+UBSan; the new test's gap pass takes
   2.5 ms, and against 5.8.3's `sm.c` it fails at 2,087 ms.
 - `tests/test_remove_tail.c`: a minimised 19-range `sm_add_range`
