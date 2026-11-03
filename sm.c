@@ -2629,9 +2629,20 @@ static void
 __sm_remove_data(sm_t *map, const size_t offset, const size_t gap_size)
 {
 	uint8_t *p;
+	size_t len;
 	__sm_assert(map->m_data_used >= gap_size);
 	p = __sm_get_chunk_data(map, offset);
-	memmove(p, p + gap_size, map->m_data_used - offset - gap_size);
+	/* `offset` is chunk-data-relative; whether m_data_used counts the
+	 * header depends on how the map was opened (see SM_ENOUGH_SPACE).
+	 * When it does, this length runs SM_SIZEOF_OVERHEAD past the used
+	 * end -- past the allocation if the buffer is exactly full, as
+	 * sm_add_range's scratch map is when it is coalesced (5.8.0-5.8.3).
+	 * Clamp to the buffer: that never cuts real data in either
+	 * convention, since it all lies within the capacity. */
+	len = map->m_data_used - offset - gap_size;
+	if (SM_SIZEOF_OVERHEAD + offset + gap_size + len > __sm_cap(map))
+		len = __sm_cap(map) - SM_SIZEOF_OVERHEAD - offset - gap_size;
+	memmove(p, p + gap_size, len);
 	map->m_data_used -= gap_size;
 }
 
