@@ -5,6 +5,17 @@ Notable changes per release.  The Rust port keeps its own log in
 across the C library, the Rust crate and the Python binding, so a
 release exists even where one of them is functionally unchanged.
 
+## 5.8.4 (no-rle variant)
+
+Matches the mainline 5.8.4.  pg_fts's cursor fix applies here unchanged:
+an ascending `sm_contains` pass with one cursor over a sparse map no
+longer re-walks the chunk list from the start for each lookup that falls
+in the gap before the cached chunk (100,000 such lookups over 20,000
+chunks: 3,052 ms -> 3.4 ms).  The mainline's `sm_add_range` over-read
+needs a chunk-merging pass this build doesn't have, so no public path
+reached it here; the internal byte move it came from is clamped all the
+same.  No API/ABI/wire change; still zero run-length-encoding code.
+
 ## 5.8.3 (no-rle variant)
 
 Matches the mainline 5.8.3.  The fixes that apply to the RLE-free build:
