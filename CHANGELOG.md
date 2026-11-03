@@ -5,7 +5,13 @@ Notable changes per release.  The Rust port keeps its own log in
 across the C library, the Rust crate and the Python binding, so a
 release exists even where one of them is functionally unchanged.
 
-## Unreleased
+## 5.8.4
+
+A cursor performance fix contributed by pg_fts, and an out-of-bounds
+read found while verifying it.  No API, ABI, or wire-format change:
+`sizeof(struct sparsemap)` is unchanged, the wire format is still
+version 2, and serialized output is byte-identical to 5.8.3.  A drop-in
+source swap for any 5.8.x vendored copy.
 
 ### Fixed
 
@@ -25,6 +31,15 @@ release exists even where one of them is functionally unchanged.
   2,960 ms -> 3.8 ms (pg_fts's vendored copy, c6id.metal).  Answers are
   unchanged for any index and any cursor; no API, ABI or wire-format
   change.
+- **`sm_add_range` read 8 bytes past its scratch buffer** (5.8.0-5.8.3).
+  The internal helper that closes a gap in a map's byte stream sized its
+  move from a length that counts the 8-byte chunk-count header, so every
+  removal read 8 bytes past the used end, and past the allocation when
+  the buffer was exactly full.  `sm_add_range` builds its result in a
+  scratch map grown to an exact fit, then merges adjacent chunks in it,
+  which removes bytes: AddressSanitizer reported a heap-buffer-overflow
+  READ there.  The bytes read always landed past the new used end, so
+  results were never wrong.  The move is now clamped to the buffer.
 
 ### Tests
 
@@ -34,6 +49,9 @@ release exists even where one of them is functionally unchanged.
   Debian 13 x86_64 (c6id.metal, gcc): the meson suite passes 28/28 in a
   release build and 28/28 under ASan+UBSan; the new test's gap pass takes
   2.5 ms, and against 5.8.3's `sm.c` it fails at 2,087 ms.
+- `tests/test_remove_tail.c`: a minimised 19-range `sm_add_range`
+  sequence, and the same at map capacities 64..4096, against a bit-array
+  oracle.  Under AddressSanitizer it fails on 5.8.3.
 
 ## 5.8.3
 
