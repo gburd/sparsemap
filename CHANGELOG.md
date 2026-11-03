@@ -5,6 +5,36 @@ Notable changes per release.  The Rust port keeps its own log in
 across the C library, the Rust crate and the Python binding, so a
 release exists even where one of them is functionally unchanged.
 
+## Unreleased
+
+### Fixed
+
+- **A read cursor walked the chunk list from the start for every lookup in
+  the gap before the cached chunk.**  A lookup that falls between chunks
+  caches the chunk after it (the walk stops at the first chunk that ends
+  after the index), and the next ascending lookup in the same gap failed
+  the `idx >= cursor start` test, so `sm_contains` fell back to a walk
+  from chunk 0.  An ascending pass over a sparse map -- one member per
+  chunk -- was O(lookups x chunks) instead of O(lookups + chunks).  It
+  surfaced in pg_fts, which tests every scored document id against a
+  segment's deletions: with deletions scattered over a large table a
+  ranked query became 60-300x slower.  The cursor now resumes from the
+  cached chunk's left neighbour (the cursor already records it in
+  `prev_offset`), after checking that the neighbour ends exactly where the
+  cached chunk begins.  100,000 ascending gap lookups over 20,000 chunks:
+  2,960 ms -> 3.8 ms (pg_fts's vendored copy, c6id.metal).  Answers are
+  unchanged for any index and any cursor; no API, ABI or wire-format
+  change.
+
+### Tests
+
+- `tests/test_cursor_gap.c`: cursor answers equal cursor-free ones
+  (ascending with repeats, and arbitrary order) on sparse, clustered and
+  run-length maps, and a ceiling on 100,000 ascending gap lookups.  On
+  Debian 13 x86_64 (c6id.metal, gcc): the meson suite passes 28/28 in a
+  release build and 28/28 under ASan+UBSan; the new test's gap pass takes
+  2.5 ms, and against 5.8.3's `sm.c` it fails at 2,087 ms.
+
 ## 5.8.3
 
 Four correctness and memory-safety fixes contributed by pg_fts / pg_tre
