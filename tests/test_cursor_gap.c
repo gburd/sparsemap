@@ -190,9 +190,26 @@ cursor_agrees(sm_t *m, uint64_t q, size_t off, uint64_t start, size_t po)
 	return (sm_next_member(m, q, &c) == sm_next_member(m, q, NULL));
 }
 
+/* Does this build encode a whole chunk of ones as one RLE descriptor (the
+ * mainline) or as a sparse chunk of ONES flags (the no-rle variant)? */
+static int
+build_has_rle(void)
+{
+	sm_t *m = sm_create(1024);
+	uint64_t desc = 0;
+
+	if (m == NULL)
+		return (0);
+	sm_add_range(m, 1 << 20, (1 << 20) + 3 * 2048);
+	memcpy(&desc, sm_get_data(m) + 16, sizeof(desc));
+	sm_free(m);
+	return ((desc >> 62) == 1);
+}
+
 static int
 any_cursor_state(void)
 {
+	const int rle_build = build_has_rle();
 	int trial;
 
 	for (trial = 0; trial < 40; trial++) {
@@ -226,7 +243,7 @@ any_cursor_state(void)
 
 				memcpy(&desc, d + off + 8, sizeof(desc));
 				chunk_at = off + 16;
-				if ((desc >> 62) != 1)
+				if (!rle_build || (desc >> 62) != 1)
 					for (slot = 0; slot < 32; slot++)
 						if (((desc >> (2 * slot)) & 3) == 2)
 							chunk_at += 8;
