@@ -4,6 +4,17 @@ All notable changes to the Rust `sparsemap` crate are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com), and
 the crate follows [SemVer](https://semver.org).
 
+## [5.8.5] - 2026-11-04
+
+Matches the C library at 5.8.5: the embedded C source's read cursor no
+longer resumes a lookup from an unverified left-neighbour hint, which
+could start the chunk walk mid-chunk and answer wrong for a cursor kept
+across a mutation (reported by pg_fts), and `sm_next_member` now checks
+its cursor.  The Rust crate models a map as a `BTreeMap` and has no
+cursor; it is not itself affected.  Wire format unchanged (version 2,
+byte-identical to 5.8.4); C<->Rust compatibility re-verified in both
+directions.
+
 ## [5.8.4] - 2026-11-02
 
 Matches the C library at 5.8.4: the embedded C source gets pg_fts's

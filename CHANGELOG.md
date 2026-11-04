@@ -5,6 +5,53 @@ Notable changes per release.  The Rust port keeps its own log in
 across the C library, the Rust crate and the Python binding, so a
 release exists even where one of them is functionally unchanged.
 
+## 5.8.5
+
+A correctness fix to the 5.8.4 read cursor, reported by pg_fts (found
+with a CBMC proof, then reproduced natively).  No API, ABI, or
+wire-format change: `sm_cursor_t` and `struct sparsemap` keep their
+layout and serialized output is byte-identical to 5.8.4.
+
+### Fixed
+
+- **A read cursor could start its walk mid-chunk and answer wrong.**
+  5.8.4 made a lookup in the gap before the cursor's cached chunk resume
+  from the cursor's `prev_offset` hint.  It checked only that the word
+  there was at most the index and that a descriptor read 8 bytes later
+  sized a chunk ending exactly at the cached offset.  Neither check shows
+  the hint is a chunk start, and a hint on a payload word can pass both.
+  Example: three adjacent one-member chunks, the cursor on the third, and
+  `prev_offset` 16 (chunk 0's vector word).  `sm_contains` then returned
+  false for a member, with no sanitizer report.  Correct use of the API
+  never produces such a hint.  A cursor kept across a mutation, copied
+  from another map, or overwritten can.  The walk now starts only at
+  chunk 0, or at the cached offset after its start word matches, as in
+  5.8.3.  The 5.8.4 speedup is kept: a lookup that ends in the gap before
+  a chunk caches that chunk's left neighbour, which the walk itself just
+  verified, so the next lookup in the gap resumes there.  100,000
+  ascending gap lookups over 20,000 chunks take 2.9 ms (5.8.3: 2,800 ms).
+- **`sm_next_member` did not check its cursor at all.**  It resumed from
+  `cur->offset` without checking the start word there, so a cursor whose
+  offset had moved walked from the middle of a chunk.  It now checks, like
+  `sm_contains`.  This is older than 5.8.4.
+
+### Changed
+
+- `sm.h`'s cursor contract says what the self-check does and does not
+  catch.  It detects a chunk that moved, but a payload word can hold the
+  same value, so a stale cursor can give a wrong answer, not only a slow
+  one.  Reset a cursor after mutating the map; `sm_add_grow_cursor` keeps
+  its own cursor valid.
+
+### Tests
+
+- `tests/test_cursor_gap.c` adds two checks: pg_fts's reproducer over
+  every `prev_offset`, and `sm_contains` / `sm_next_member` through
+  cursors at every offset of small maps with any `prev_offset`.  Both
+  fail on 5.8.4.  pg_fts's CBMC harness verifies the fix (C1, C2, C3 and
+  the C3x counterexample, on its four layouts), and so does a
+  stale-offset property, which fails if the start-word check is removed.
+
 ## 5.8.4
 
 A cursor performance fix contributed by pg_fts, and an out-of-bounds
