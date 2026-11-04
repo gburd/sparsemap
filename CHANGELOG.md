@@ -5,6 +5,16 @@ Notable changes per release.  The Rust port keeps its own log in
 across the C library, the Rust crate and the Python binding, so a
 release exists even where one of them is functionally unchanged.
 
+## 5.8.5 (no-rle variant)
+
+Matches the mainline 5.8.5.  The read cursor's 5.8.4 gap resume trusted
+an unverified left-neighbour hint here too, and pg_fts's reproducer gave
+the same wrong answer on this build.  The walk now starts only at chunk
+0, or at the cached offset after its start word matches.  A lookup in
+the gap before a chunk caches that chunk's verified left neighbour, so
+the 5.8.4 speedup stays.  `sm_next_member` now checks its cursor as well.
+No API/ABI/wire change; still zero run-length-encoding code.
+
 ## 5.8.4 (no-rle variant)
 
 Matches the mainline 5.8.4.  pg_fts's cursor fix applies here unchanged:
