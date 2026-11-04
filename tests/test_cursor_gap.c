@@ -1,22 +1,33 @@
 /* SPDX-License-Identifier: MIT */
 /*
  * test_cursor_gap.c - read-cursor lookups that fall in the gap before a
- * chunk.
+ * chunk (5.8.4, reworked in 5.8.5).
  *
- * A lookup that falls in the gap BEFORE a chunk caches that chunk: the
- * walk stops at the first chunk ending after idx.  Through 5.8.3 the next
- * ascending lookup in the same gap (idx < cursor start) ignored the cursor
- * and walked from chunk 0, so a pass of ascending lookups against a sparse
- * map -- one member per chunk -- cost O(lookups x chunks).  pg_fts hit it
- * as a 60-300x slower ranked scan: live document ids tested against
- * deletions scattered over a large table.  The cursor now resumes from the
- * cached chunk's left neighbour.
+ * A lookup that falls in the gap BEFORE a chunk returns that chunk: the
+ * walk stops at the first chunk ending after idx.  Through 5.8.3 the cursor
+ * cached that chunk, and the next ascending lookup in the same gap
+ * (idx < cursor start) ignored the cursor and walked from chunk 0, so a
+ * pass of ascending lookups against a sparse map -- one member per chunk --
+ * cost O(lookups x chunks).  pg_fts hit it as a 60-300x slower ranked scan.
+ *
+ * 5.8.4 fixed the cost by resuming from the cursor's prev_offset hint, but
+ * nothing proved the hint was a chunk start: a hint pointing at a payload
+ * word could pass its checks and start the walk mid-chunk, returning a
+ * wrong answer (pg_fts, found with CBMC).  5.8.5 never resumes from the
+ * hint.  A gap lookup caches the left neighbour, which the walk itself
+ * just verified, so the next gap lookup resumes there.
  *
  * Checks:
  *   1. exactness: sm_contains with a cursor equals sm_contains with NULL,
  *      for ascending passes (with repeats) and for arbitrary order (the
  *      cursor self-validates), over sparse, clustered and run-length maps;
- *   2. cost: 100,000 ascending gap lookups over 20,000 one-member chunks
+ *   2. hint_never_trusted: pg_fts's reproducer -- a valid cursor with
+ *      prev_offset set to every 8-byte offset -- agrees with NULL;
+ *   3. any_cursor_state: sm_contains and sm_next_member agree with NULL
+ *      through cursors at every offset whose start word does not match,
+ *      and at every chunk start with the right start word, for every
+ *      prev_offset and index of small maps;
+ *   4. cost: 100,000 ascending gap lookups over 20,000 one-member chunks
  *      finish under a ceiling (about 1e9 chunk steps, seconds, on 5.8.3;
  *      about 1e5 with the fix).  Lifted under sanitizers and coverage, as in
  *      test_amplify.c.
@@ -27,6 +38,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
 
 #if defined(__SANITIZE_ADDRESS__) || defined(SM_COVERAGE_BUILD)
@@ -114,6 +126,138 @@ exactness(void)
 	return (0);
 }
 
+/*
+ * pg_fts's reproducer.  Three adjacent one-member chunks (at byte offsets
+ * 0, 24 and 48); a lookup in the third leaves the cursor there.  Then
+ * prev_offset is set to every 8-byte offset and member 32773 looked up.
+ * On 5.8.4 prev_offset 16 -- chunk 0's vector word -- passed the
+ * neighbour checks and the walk answered false for a member.
+ */
+static int
+hint_never_trusted(void)
+{
+	const uint64_t b = 32768, c = 2048, x = 32773;
+	sm_t *m = sm_create(4096);
+	sm_cursor_t cur = SM_CURSOR_INIT;
+	size_t hint;
+
+	if (m == NULL)
+		return (1);
+	sm_add(m, b + 5);
+	sm_add(m, b + c + 5);
+	sm_add(m, b + 2 * c + 5);
+	(void)sm_contains(m, 38479, &cur);
+	for (hint = 0; hint <= 64; hint += 8) {
+		sm_cursor_t h = cur;
+		h.prev_offset = hint;
+		if (sm_contains(m, x, &h) != sm_contains(m, x, NULL)) {
+			fprintf(stderr, "FAIL prev_offset %zu: sm_contains(%llu) "
+			    "disagrees with the cursor-free lookup\n", hint,
+			    (unsigned long long)x);
+			sm_free(m);
+			return (1);
+		}
+	}
+	sm_free(m);
+	return (0);
+}
+
+/*
+ * Cursors the API never produces -- what a cursor kept across a mutation,
+ * copied from another map, or overwritten can hold.  The walk may only
+ * start at chunk 0 or at a cached offset whose start word matches the
+ * recorded start.  So for every cached offset whose word does NOT match
+ * (any start_idx but the word there), and for every true chunk start
+ * with the right start_idx, every answer must equal the cursor-free one,
+ * whatever prev_offset holds.  (A wrong offset whose payload word happens
+ * to equal start_idx is not detectable without more state in the cursor;
+ * sm_cursor_t documents that a cursor kept across a mutation is invalid.)
+ * Small maps keep the full cross product affordable.
+ */
+static int
+cursor_agrees(sm_t *m, uint64_t q, size_t off, uint64_t start, size_t po)
+{
+	sm_cursor_t c;
+
+	c.offset = off;
+	c.start_idx = start;
+	c.prev_offset = po;
+	if (sm_contains(m, q, &c) != sm_contains(m, q, NULL))
+		return (0);
+	c.offset = off;
+	c.start_idx = start;
+	c.prev_offset = po;
+	return (sm_next_member(m, q, &c) == sm_next_member(m, q, NULL));
+}
+
+static int
+any_cursor_state(void)
+{
+	int trial;
+
+	for (trial = 0; trial < 40; trial++) {
+		sm_t *m = sm_create(1024);
+		const uint64_t base = 1 << 20, span = 6 * 2048;
+		size_t used, off, po, chunk_at = 0;
+		uint64_t q, k, n = 1 + rnd() % 12;
+
+		if (m == NULL)
+			return (1);
+		for (k = 0; k < n; k++) {
+			const uint64_t v = base + rnd() % span;
+			if (rnd() % 4 == 0)
+				sm_add_range(m, v, v + 1 + rnd() % 3000);
+			else
+				sm_add(m, v);
+		}
+		used = sm_get_size(m) - 8; /* chunk stream after the count */
+		for (off = 0; off < used; off += 8) {
+			const uint8_t *d = sm_get_data(m) + 8;
+			uint64_t here;
+			const int is_chunk = off == chunk_at;
+
+			memcpy(&here, d + off, sizeof(here));
+			if (is_chunk) {
+				/* The next chunk: 8-byte start, 8-byte descriptor,
+				 * then one word per MIXED (10) flag -- none for an
+				 * RLE descriptor (top bits 01). */
+				uint64_t desc;
+				unsigned int slot;
+
+				memcpy(&desc, d + off + 8, sizeof(desc));
+				chunk_at = off + 16;
+				if ((desc >> 62) != 1)
+					for (slot = 0; slot < 32; slot++)
+						if (((desc >> (2 * slot)) & 3) == 2)
+							chunk_at += 8;
+			}
+			for (po = 0; po <= used; po += 8) {
+				for (q = base - 2048; q < base + span + 2048;
+				    q += 1 + rnd() % 97) {
+					if (!cursor_agrees(m, q, off, here + 2048, po) ||
+					    (is_chunk &&
+						!cursor_agrees(m, q, off, here, po))) {
+						fprintf(stderr, "FAIL any-cursor offset %zu "
+						    "(%s) prev %zu idx %llu\n", off,
+						    is_chunk ? "chunk start" : "mid-chunk", po,
+						    (unsigned long long)q);
+						sm_free(m);
+						return (1);
+					}
+				}
+			}
+		}
+		if (chunk_at != used) { /* the walk above must tile the stream */
+			fprintf(stderr, "FAIL any-cursor: chunk walk ended at %zu, "
+			    "stream is %zu bytes\n", chunk_at, used);
+			sm_free(m);
+			return (1);
+		}
+		sm_free(m);
+	}
+	return (0);
+}
+
 static int
 cost(void)
 {
@@ -154,7 +298,8 @@ cost(void)
 int
 main(void)
 {
-	if (exactness() != 0 || cost() != 0)
+	if (exactness() != 0 || hint_never_trusted() != 0 ||
+	    any_cursor_state() != 0 || cost() != 0)
 		return (1);
 	printf("test_cursor_gap: ok\n");
 	return (0);
