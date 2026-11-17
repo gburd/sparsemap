@@ -31,6 +31,10 @@
  * SM_EXPOSE_STRUCT. */
 #define SM_INTERNAL
 #include "sm.h"
+#if defined(__BMI2__) && defined(__x86_64__)
+#include <immintrin.h>
+#define SM_HAVE_PDEP64 1
+#endif
 #include <errno.h>
 #include <stdarg.h>
 #include <stdbool.h>
@@ -1017,46 +1021,42 @@ __sm_check_invariants(const struct sparsemap *map)
 	});
 }
 
-/**
- * @brief Calculates the vector size for a given byte value.
+/*
+ * Descriptor flag masks.
  *
- * This function uses a lookup table to determine the vector size associated
- * with a given byte value.
- *
- * Each entry in the lookup table represents a possible combination of 4 2-bit
- * values (00, 01, 10, 11).  The value at each index corresponds to the count
- * of "10" patterns in that 4-bit combination.  For example, lookup[10] is 2
- * because the binary representation of 10 (0000 1010) contains the "1010"
- * pattern twice.
- *
- * @param[in] b The byte value for which the vector size needs to be calculated.
- * @return The vector size associated with the given byte value.
- * @see scripts/gen_chunk_vector_size_table.py
+ * A sparse descriptor packs thirty-two 2-bit flags, flag i in bits
+ * [2i, 2i+1].  Splitting the word into the high bit (SM_DESC_HI_BITS)
+ * and the low bit (SM_DESC_LO_BITS) of every flag lets one popcount
+ * count all flags of a kind at once.  The bit that represents flag i
+ * in both masks below is the flag's high bit, 2i+1.
  */
-static size_t
-__sm_chunk_calc_vector_size(const uint8_t b)
+#define SM_DESC_HI_BITS UINT64_C(0xAAAAAAAAAAAAAAAA)
+#define SM_DESC_LO_BITS UINT64_C(0x5555555555555555)
+
+/**
+ * @brief Marks every SM_PAYLOAD_MIXED (2#10) flag of a sparse descriptor.
+ *
+ * @param[in] desc A sparse (non-RLE) chunk descriptor.
+ * @return A word with bit 2i+1 set exactly when flag i is MIXED; every
+ *         other bit is clear.
+ */
+static inline __sm_bitvec_t
+__sm_desc_mixed_mask(const __sm_bitvec_t desc)
 {
-	/* clang-format off */
-  static const size_t lookup[] = {
-    0,  0,  1,  0,  0,  0,  1,  0,  1,  1,  2,  1,  0,  0,  1,  0,
-    0,  0,  1,  0,  0,  0,  1,  0,  1,  1,  2,  1,  0,  0,  1,  0,
-    1,  1,  2,  1,  1,  1,  2,  1,  2,  2,  3,  2,  1,  1,  2,  1,
-    0,  0,  1,  0,  0,  0,  1,  0,  1,  1,  2,  1,  0,  0,  1,  0,
-    0,  0,  1,  0,  0,  0,  1,  0,  1,  1,  2,  1,  0,  0,  1,  0,
-    0,  0,  1,  0,  0,  0,  1,  0,  1,  1,  2,  1,  0,  0,  1,  0,
-    1,  1,  2,  1,  1,  1,  2,  1,  2,  2,  3,  2,  1,  1,  2,  1,
-    0,  0,  1,  0,  0,  0,  1,  0,  1,  1,  2,  1,  0,  0,  1,  0,
-    1,  1,  2,  1,  1,  1,  2,  1,  2,  2,  3,  2,  1,  1,  2,  1,
-    1,  1,  2,  1,  1,  1,  2,  1,  2,  2,  3,  2,  1,  1,  2,  1,
-    2,  2,  3,  2,  2,  2,  3,  2,  3,  3,  4,  3,  2,  2,  3,  2,
-    1,  1,  2,  1,  1,  1,  2,  1,  2,  2,  3,  2,  1,  1,  2,  1,
-    0,  0,  1,  0,  0,  0,  1,  0,  1,  1,  2,  1,  0,  0,  1,  0,
-    0,  0,  1,  0,  0,  0,  1,  0,  1,  1,  2,  1,  0,  0,  1,  0,
-    1,  1,  2,  1,  1,  1,  2,  1,  2,  2,  3,  2,  1,  1,  2,  1,
-    0,  0,  1,  0,  0,  0,  1,  0,  1,  1,  2,  1,  0,  0,  1,  0
-  };
-	/* clang-format on */
-	return (lookup[b]);
+	return ((desc & SM_DESC_HI_BITS) & ~((desc & SM_DESC_LO_BITS) << 1));
+}
+
+/**
+ * @brief Marks every SM_PAYLOAD_NONE (2#01) flag of a sparse descriptor.
+ *
+ * @param[in] desc A sparse (non-RLE) chunk descriptor.
+ * @return A word with bit 2i+1 set exactly when flag i is NONE; every
+ *         other bit is clear.
+ */
+static inline __sm_bitvec_t
+__sm_desc_none_mask(const __sm_bitvec_t desc)
+{
+	return (((desc & SM_DESC_LO_BITS) << 1) & ~(desc & SM_DESC_HI_BITS));
 }
 
 /**
@@ -1099,43 +1099,29 @@ __sm_desc_flag_byte(const __sm_bitvec_t desc, const size_t n)
 SM_ALWAYS_INLINE size_t
 __sm_chunk_get_position(const __sm_chunk_t *chunk, size_t bv)
 {
-	/* Handle 4 indices (1 byte) at a time. */
-	size_t position = 0;
-
 	/* Defense-in-depth: callers compute `bv` as `idx / SM_BITS_PER_VECTOR`
 	 * after subtracting the chunk's start offset; on a corrupt buffer
 	 * (sm_open of attacker-controlled bytes) the start offset can be
 	 * wildly wrong, making `bv` arbitrarily large.  Clamp to the
-	 * physical chunk capacity so the loop below never walks past the
-	 * 8-byte header word.  Returning 0 here causes the caller to read
+	 * physical chunk capacity so the mask shift below stays defined.
+	 * Returning 0 here causes the caller to read
 	 * chunk->m_data[1] which is also bounded by the chunk_size that
 	 * __sm_get_size_impl validated. */
 	if (bv >= SM_FLAGS_PER_INDEX) {
 		return (0);
 	}
 
-	/* Handle RLE by examining the first byte. */
-	if (!__sm_chunk_is_rle(chunk)) {
-		const __sm_bitvec_t desc = *chunk->m_data;
-		const size_t num_bytes =
-		    bv / ((size_t)SM_FLAGS_PER_INDEX_BYTE * SM_BITS_PER_VECTOR);
-		size_t i;
-		for (i = 0; i < num_bytes; i++) {
-			position += __sm_chunk_calc_vector_size(
-			    __sm_desc_flag_byte(desc, i));
-		}
-
-		bv -= num_bytes * SM_FLAGS_PER_INDEX_BYTE;
-		for (i = 0; i < bv; i++) {
-			const size_t flags =
-			    SM_CHUNK_GET_FLAGS(*chunk->m_data, i);
-			if (flags == SM_PAYLOAD_MIXED) {
-				position++;
-			}
-		}
+	/* An RLE chunk stores no payload words.  For a sparse chunk the
+	 * payload word of flag bv follows one stored word per MIXED flag
+	 * below it, so count the MIXED flags in [0, bv).  bv < 32 here, so
+	 * the mask shift is in [2, 64) and well defined. */
+	if (!__sm_chunk_is_rle(chunk) && bv > 0) {
+		const __sm_bitvec_t below = ~(__sm_bitvec_t)0 >>
+		    (SM_BITS_PER_VECTOR - 2 * bv);
+		return ((size_t)SM_POPCOUNT64(
+		    __sm_desc_mixed_mask(*chunk->m_data) & below));
 	}
-
-	return (position);
+	return (0);
 }
 
 /**
@@ -1168,31 +1154,13 @@ __sm_chunk_init(__sm_chunk_t *chunk, uint8_t *data)
 SM_ALWAYS_INLINE size_t
 __sm_chunk_get_capacity(const __sm_chunk_t *chunk)
 {
-	size_t capacity = SM_CHUNK_MAX_CAPACITY;
-	__sm_bitvec_t desc;
-	size_t i;
-
 	/* Handle RLE which encodes the capacity in the vector. */
 	if (SM_UNLIKELY(__sm_chunk_is_rle(chunk))) {
 		return (__sm_chunk_rle_get_capacity(chunk));
 	}
-
-	desc = *chunk->m_data;
-
-	for (i = 0; i < sizeof(__sm_bitvec_t); i++) {
-		const uint8_t b = __sm_desc_flag_byte(desc, i);
-		int j;
-		if (!b || b == 0xff) {
-			continue;
-		}
-		for (j = 0; j < SM_FLAGS_PER_INDEX_BYTE; j++) {
-			const size_t flags = SM_CHUNK_GET_FLAGS(b, j);
-			if (flags == SM_PAYLOAD_NONE) {
-				capacity -= SM_BITS_PER_VECTOR;
-			}
-		}
-	}
-	return (capacity);
+	/* Every NONE flag removes one vector from the full capacity. */
+	return (SM_CHUNK_MAX_CAPACITY - SM_BITS_PER_VECTOR *
+	    (size_t)SM_POPCOUNT64(__sm_desc_none_mask(*chunk->m_data)));
 }
 
 /**
@@ -1291,9 +1259,9 @@ __sm_chunk_is_empty(const __sm_chunk_t *chunk)
 /**
  * @brief Retrieves the size of the specified chunk.
  *
- * This function calculates the memory size required by the given chunk.
- * If the chunk is not run-length encoded (RLE), the function iterates
- * over the chunk's data array and computes the size using a lookup table.
+ * This function calculates the memory size required by the given chunk:
+ * the descriptor word, plus for a sparse (non-RLE) chunk one payload word
+ * per MIXED flag.
  *
  * @param[in] chunk The chunk whose size is to be determined.
  * @return The size of the chunk in bytes.
@@ -1304,14 +1272,9 @@ __sm_chunk_get_size(const __sm_chunk_t *chunk)
 	/* At least one __sm_bitvec_t is required for the flags (m_data[0]) */
 	size_t size = sizeof(__sm_bitvec_t);
 	if (SM_LIKELY(!__sm_chunk_is_rle(chunk))) {
-		/* Use a lookup table for each byte of the flags */
-		const __sm_bitvec_t desc = *chunk->m_data;
-		size_t i;
-		for (i = 0; i < sizeof(__sm_bitvec_t); i++) {
-			size += sizeof(__sm_bitvec_t) *
-			    __sm_chunk_calc_vector_size(
-			        __sm_desc_flag_byte(desc, i));
-		}
+		/* One payload word per MIXED flag. */
+		size += sizeof(__sm_bitvec_t) * (size_t)SM_POPCOUNT64(
+		    __sm_desc_mixed_mask(*chunk->m_data));
 	}
 	return (size);
 }
@@ -1501,6 +1464,36 @@ __sm_chunk_set_bit(const __sm_chunk_t *chunk, const uint64_t idx, size_t *pos)
 }
 
 /**
+ * @brief Returns the position of the n-th (0-based) set bit of a word.
+ *
+ * With BMI2, pdep deposits the single bit 1 << n onto the n-th set bit of
+ * @a w and tzcnt reads its position.  The portable form clears the @a n
+ * lowest set bits and counts the trailing zeros of what is left; it runs
+ * fewer than 64 iterations.
+ *
+ * NB: the caller guarantees n < popcount(w); the result is meaningless
+ * otherwise.
+ *
+ * @param[in] w The word to search.
+ * @param[in] n The 0-based rank of the set bit to find.
+ * @return The bit position, in [0, 64).
+ */
+static inline size_t
+__sm_word_select(__sm_bitvec_t w, size_t n)
+{
+	__sm_assert(n < (size_t)SM_POPCOUNT64(w));
+#if defined(SM_HAVE_PDEP64)
+	return ((size_t)SM_CTZ64(_pdep_u64(UINT64_C(1) << n, w)));
+#else
+	while (n > 0) {
+		w &= w - 1;
+		n--;
+	}
+	return ((size_t)SM_CTZ64(w));
+#endif
+}
+
+/**
  * @brief Selects the nth bit with the specified value from a chunk.
  *
  * This function scans a chunk of data to find the nth occurrence of a bit
@@ -1637,20 +1630,16 @@ __sm_chunk_select(const __sm_chunk_t *chunk, ssize_t n, ssize_t *offset,
 				const __sm_bitvec_t w = chunk->m_data[1 +
 				    __sm_chunk_get_position(chunk,
 				        (i * SM_FLAGS_PER_INDEX_BYTE) + (size_t)j)];
-				/* Use ctzll for fast bit extraction */
-				__sm_bitvec_t target_bits = value ? w : ~w;
-				__sm_bitvec_t remaining = target_bits;
-				while (remaining) {
-					int k = SM_CTZ64(remaining);
-					if (n == 0) {
-						*offset = -1;
-						return (ret + (size_t)k);
-					}
-					n--;
-					remaining &= remaining -
-					    1; /* clear lowest set bit */
+				const __sm_bitvec_t target_bits = value ? w : ~w;
+				const ssize_t pc = SM_POPCOUNT64(target_bits);
+				if (n >= pc) {
+					n -= pc;
+					ret += SM_BITS_PER_VECTOR;
+					continue;
 				}
-				ret += SM_BITS_PER_VECTOR;
+				*offset = -1;
+				return (ret +
+				    __sm_word_select(target_bits, (size_t)n));
 			}
 		}
 	}

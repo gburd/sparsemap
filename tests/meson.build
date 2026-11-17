@@ -63,6 +63,27 @@ foreach name : ['test_rle_standalone', 'test_heisenbug', 'test_empty_map', 'test
   test(name, exe, timeout : 300)
 endforeach
 
+# White-box check of the popcount chunk descriptor helpers against the
+# v5.8.5 byte-table loops.  Compiles its own copy of ../sm.c (like
+# test_hegel_white) to reach the file-static helpers.  On x86-64 a second
+# copy built with -mbmi2 exercises the pdep in-word select; that binary
+# skips itself (exit 77) on a cpu without BMI2.
+test_desc_popcount = executable('test_desc_popcount',
+  'test_desc_popcount.c',
+  include_directories : inc,
+  c_args : test_defines + ['-Wno-unused-function'],
+)
+test('test_desc_popcount', test_desc_popcount, timeout : 300)
+if host_machine.cpu_family() == 'x86_64' and cc.has_argument('-mbmi2')
+  test_desc_popcount_bmi2 = executable('test_desc_popcount_bmi2',
+    'test_desc_popcount.c',
+    include_directories : inc,
+    c_args : test_defines + ['-Wno-unused-function', '-mbmi2',
+      '-DSM_TEST_REQUIRE_BMI2=1'],
+  )
+  test('test_desc_popcount_bmi2', test_desc_popcount_bmi2, timeout : 300)
+endif
+
 # The big munit-driven suite.  Long-running scale/perf cases live here.
 test('main', test_main, timeout : 600)
 
