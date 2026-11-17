@@ -252,6 +252,7 @@ typedef SSIZE_T ssize_t;
 #define sm_allocator_t       SM__P(sm_allocator_t)
 #define sm_cursor_t          SM__P(sm_cursor_t)
 #define sm_membership_t      SM__P(sm_membership_t)
+#define sm_op_t              SM__P(sm_op_t)
 #define sm_stats_t           SM__P(sm_stats_t)
 #define sm_subset_relation_t SM__P(sm_subset_relation_t)
 
@@ -309,6 +310,7 @@ typedef SSIZE_T ssize_t;
 #define sm_membership               SM__P(sm_membership)
 #define sm_minimum                  SM__P(sm_minimum)
 #define sm_next_member              SM__P(sm_next_member)
+#define sm_next_member_op           SM__P(sm_next_member_op)
 #define sm_nonempty_difference      SM__P(sm_nonempty_difference)
 #define sm_offset                   SM__P(sm_offset)
 #define sm_open                     SM__P(sm_open)
@@ -323,6 +325,7 @@ typedef SSIZE_T ssize_t;
 #define sm_remove                   SM__P(sm_remove)
 #define sm_remove_range             SM__P(sm_remove_range)
 #define sm_scan                     SM__P(sm_scan)
+#define sm_scan_op                  SM__P(sm_scan_op)
 #define sm_select                   SM__P(sm_select)
 #define sm_serialize                SM__P(sm_serialize)
 #define sm_serialized_size          SM__P(sm_serialized_size)
@@ -1337,6 +1340,89 @@ uint64_t sm_next_member(const sm_t *map, uint64_t prev_idx, sm_cursor_t *cur);
  * @see sm_locator_prev_member()
  */
 uint64_t sm_prev_member(const sm_t *map, uint64_t prev_idx, sm_cursor_t *cur);
+
+/* -------------------------------------------------------------------
+ * Lazy iteration over a combined set
+ *
+ * Walk the members of (a OP b) without building the result map.  For
+ * callers that combine two maps only to iterate the result once.
+ * ------------------------------------------------------------------- */
+
+/** @brief The set operation a lazy iteration applies. */
+typedef enum {
+	SM_OP_AND = 0,    /**< members of both a and b */
+	SM_OP_OR = 1,     /**< members of a or b or both */
+	SM_OP_ANDNOT = 2, /**< members of a that b lacks */
+	SM_OP_XOR = 3     /**< members of exactly one of a and b */
+} sm_op_t;
+
+/** @brief Find the lowest member of (a OP b) at index > \a prev_idx.
+ *
+ * Gives the same answer as sm_next_member() on the map sm_and(),
+ * sm_or(), sm_andnot() or sm_xor() would build, without building it.
+ * Pass `SM_IDX_MAX` to start at the first member; a member at
+ * UINT64_MAX cannot be told apart from "none", as with
+ * sm_next_member().
+ *
+ * @code
+ *   sm_cursor_t ca = SM_CURSOR_INIT, cb = SM_CURSOR_INIT;
+ *   uint64_t i = SM_IDX_MAX;
+ *   while ((i = sm_next_member_op(a, b, SM_OP_AND, i, &ca, &cb)) !=
+ *       SM_IDX_MAX) {
+ *       // i is in both a and b
+ *   }
+ * @endcode
+ *
+ * Cost: AND leapfrogs the two member streams, so each step skips to
+ * the larger of the two next members; OR takes the smaller of the two
+ * next members; ANDNOT and XOR jump over a stretch of members common
+ * to both maps in one step per chunk it spans.  None of them walks a
+ * run bit by bit, so a long RLE run in one map against an empty or
+ * sparse other map costs O(chunks), not O(run length).  Without
+ * cursors each call walks both chunk lists from chunk 0, O(chunks)
+ * per call.  With cursors an ascending scan is O(chunks(a) +
+ * chunks(b) + members) overall.
+ *
+ * @param[in] a         First map (NULL is the empty set).
+ * @param[in] b         Second map (NULL is the empty set).
+ * @param[in] op        The operation; any other value returns
+ *                      SM_IDX_MAX with errno = EINVAL.
+ * @param[in] prev_idx  Lower exclusive bound (SM_IDX_MAX: from the start).
+ * @param[in,out] cur_a Optional read cursor over \a a, or NULL.
+ * @param[in,out] cur_b Optional read cursor over \a b, or NULL.  Use
+ *                      two cursors, one per map; see sm_cursor_t.
+ * @returns The next member of a OP b, or SM_IDX_MAX if none.
+ */
+uint64_t sm_next_member_op(const sm_t *a, const sm_t *b, sm_op_t op,
+    uint64_t prev_idx, sm_cursor_t *cur_a, sm_cursor_t *cur_b);
+
+/** @brief Invoke a callback for every member of (a OP b).
+ *
+ * The lazy counterpart of sm_scan() over the map sm_and(), sm_or(),
+ * sm_andnot() or sm_xor() would build.  The callback receives the
+ * members in ascending order, in batches of at most 64; the first
+ * \a skip members of the result are not delivered.  The batch sizes
+ * may differ from those sm_scan() would use on the built map; the
+ * sequence of indices is the same.  Unlike sm_scan(), a member at
+ * UINT64_MAX is delivered.
+ *
+ * Cost is O(runs(a) + runs(b) + delivered members): both maps are read
+ * run by run, and skipped members are counted, not visited.  Uses about
+ * 33 KB of heap scratch for the two run readers.
+ *
+ * @param[in] a     First map (NULL is the empty set).
+ * @param[in] b     Second map (NULL is the empty set).
+ * @param[in] op    The operation.
+ * @param[in] fn    Callback invoked with (array_of_indices, count, aux).
+ * @param[in] skip  Number of result members to skip first.
+ * @param[in] aux   Opaque pointer forwarded to \a fn.
+ *
+ * Does nothing and sets errno to EINVAL when \a fn is NULL or \a op is
+ * not an sm_op_t; sets errno to ENOMEM and delivers nothing when the
+ * scratch allocation fails.
+ */
+void sm_scan_op(const sm_t *a, const sm_t *b, sm_op_t op,
+    void (*fn)(uint64_t vec[], size_t n, void *aux), size_t skip, void *aux);
 
 /* -------------------------------------------------------------------
  * Cardinality without allocation
