@@ -126,8 +126,8 @@ gen(int shape, uint64_t *v)
 }
 
 /* Build a map from sorted members, one cursor-threaded add each.  Not
- * sm_add_many_grow: through 5.8.5 its emitter loses members in the last
- * chunk below 2^64 (the chunk-boundary round-up overflows). */
+ * sm_add_many_grow: through 5.8.5 it drops a run that ends at UINT64_MAX
+ * (the run's exclusive end wraps to 0). */
 static sm_t *
 build(const uint64_t *v, size_t n)
 {
@@ -143,8 +143,10 @@ build(const uint64_t *v, size_t n)
 	return (m);
 }
 
-/* True when some member lies in the last chunk below 2^64, where the
- * built set operations lose bits (see build()). */
+/* True when some member lies in the last chunk below 2^64.  Through
+ * 5.8.5 sm_or and sm_xor can lose members there (a = {100, 2^64 - 4001,
+ * 2^64 - 4}, b = {5, 900} loses 2^64 - 4), so the built-map cross-check
+ * is skipped for such pairs. */
 static int
 in_top_chunk(const uint64_t *v, size_t n)
 {
