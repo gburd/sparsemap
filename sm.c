@@ -7714,13 +7714,124 @@ sm_next_member(const sm_t *map, uint64_t prev_idx, sm_cursor_t *cur)
 	}
 }
 
+/*
+ * The chunk that immediately precedes the chunk at `last`, found by a
+ * walk from chunk 0 (a walk may start only there or at a verified cursor
+ * offset, and cur->prev_offset is never trusted).  *before receives the
+ * chunk preceding the result, or NULL.  `last` must be greater than
+ * `base`.  If `last` is not a chunk start (a stale cursor whose offset
+ * held a matching payload word), the walk stops at the chunk that
+ * contains it, so the result is always a real chunk and the loop always
+ * ends: every step advances by at least one chunk header.
+ */
+static uint8_t *
+__sm_chunk_before(uint8_t *base, uint8_t *last, uint8_t **before)
+{
+	uint8_t *q = base;
+	*before = NULL;
+	for (;;) {
+		__sm_chunk_t tmp;
+		uint8_t *next;
+		__sm_chunk_init(&tmp, q + SM_SIZEOF_OVERHEAD);
+		next = q + SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&tmp);
+		if (next >= last) {
+			return (q);
+		}
+		*before = q;
+		q = next;
+	}
+}
+
+/*
+ * Reverse lookup on a chunk-mode map: the highest set bit strictly below
+ * upper_excl, or SM_IDX_MAX.
+ *
+ * The answer lies in the last chunk that starts below upper_excl, unless
+ * that chunk has no member below the bound; then it lies in an earlier
+ * chunk.  The forward walk that finds the last chunk starts at chunk 0,
+ * or at the cursor's chunk when the start word stored at cur->offset
+ * equals cur->start_idx and that chunk starts below upper_excl (the same
+ * check sm_next_member makes).  The walk remembers the chunk it passed
+ * just before the last one, so one step back costs nothing; a step back
+ * past a chunk the walk did not pass (the cursor's own chunk, or an
+ * empty chunk) walks from chunk 0 again.  The chunk holding the answer
+ * is recorded in the cursor, so a descending scan resumes in place while
+ * it stays inside one chunk.
+ */
+static uint64_t
+__sm_chunks_prev_member(const sm_t *map, uint64_t upper_excl,
+    sm_cursor_t *cur)
+{
+	uint8_t *base;
+	uint8_t *p;
+	uint8_t *last = NULL;
+	uint8_t *before = NULL;
+	size_t stream_end;
+	if (__sm_get_chunk_count(map) == 0) {
+		return (SM_IDX_MAX);
+	}
+	base = __sm_get_chunk_data(map, 0);
+	p = base;
+	stream_end = map->m_data_used - SM_SIZEOF_OVERHEAD;
+
+	/* Resume at the cursor's chunk only after checking its start word. */
+	if (cur != NULL && cur->offset != SIZE_MAX &&
+	    cur->offset + SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) <=
+	        stream_end &&
+	    cur->start_idx < upper_excl &&
+	    __sm_load_idx(base + cur->offset) == cur->start_idx) {
+		p = base + cur->offset;
+	}
+
+	/* Find the last chunk that starts below upper_excl.  Every chunk of
+	 * a valid map has its start and descriptor inside the stream; the
+	 * bound only matters for a stale cursor. */
+	while ((size_t)(p - base) + SM_SIZEOF_OVERHEAD +
+	        sizeof(__sm_bitvec_t) <= stream_end) {
+		__sm_chunk_t tmp;
+		if (__sm_load_idx((const uint8_t *)p) >= upper_excl) {
+			break;
+		}
+		before = last;
+		last = p;
+		__sm_chunk_init(&tmp, p + SM_SIZEOF_OVERHEAD);
+		p += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&tmp);
+	}
+	if (last == NULL) {
+		return (SM_IDX_MAX);
+	}
+
+	/* Step back chunk by chunk until one has a member below the bound. */
+	for (;;) {
+		const __sm_idx_t start = __sm_load_idx((const uint8_t *)last);
+		__sm_chunk_t chunk;
+		uint64_t hit;
+		__sm_chunk_init(&chunk, last + SM_SIZEOF_OVERHEAD);
+		hit = __sm_chunk_prev_set(&chunk, start, upper_excl);
+		if (hit != SM_IDX_MAX) {
+			if (cur != NULL) {
+				cur->offset = (size_t)(last - base);
+				cur->start_idx = start;
+				cur->prev_offset = (before == NULL) ? SIZE_MAX :
+				    (size_t)(before - base);
+			}
+			return (hit);
+		}
+		if (last == base) {
+			return (SM_IDX_MAX);
+		}
+		if (before != NULL) {
+			last = before;
+			before = NULL;
+		} else {
+			last = __sm_chunk_before(base, last, &before);
+		}
+	}
+}
+
 uint64_t
 sm_prev_member(const sm_t *map, uint64_t prev_idx, sm_cursor_t *cur)
 {
-	/* The cursor accelerates forward (non-decreasing) lookups only;
-	 * reverse iteration always walks from the head, so cur is accepted
-	 * for API symmetry but unused. */
-	(void)cur;
 	if (map == NULL)
 		return (SM_IDX_MAX);
 	if (__sm_is_small(map)) {
@@ -7754,62 +7865,9 @@ sm_prev_member(const sm_t *map, uint64_t prev_idx, sm_cursor_t *cur)
 		}
 	}
 	__sm_check_invariants(map);
-	{
-		const size_t count = __sm_get_chunk_count(map);
-		/* SM_IDX_MAX as input means "start past the end". */
-		const uint64_t upper_excl =
-		    (prev_idx == SM_IDX_MAX) ? UINT64_MAX : prev_idx;
-		/* Walk forward to the last chunk that starts before upper_excl,
-		 * remembering each chunk so we can step back if needed. */
-		uint8_t *p;
-		/* Track up to `count` candidate chunk pointers. */
-		uint8_t *last = NULL;
-		size_t last_idx = 0;
-		size_t i;
-		if (count == 0)
-			return (SM_IDX_MAX);
-		p = __sm_get_chunk_data(map, 0);
-		for (i = 0; i < count; i++) {
-			const __sm_idx_t start =
-			    __sm_load_idx((const uint8_t *)p);
-			__sm_chunk_t tmp;
-			if (start >= upper_excl)
-				break;
-			last = p;
-			last_idx = i;
-			__sm_chunk_init(&tmp, p + SM_SIZEOF_OVERHEAD);
-			p += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&tmp);
-		}
-		if (last == NULL)
-			return (SM_IDX_MAX);
-
-		/* Step back through chunks until we find a hit. */
-		while (true) {
-			const __sm_idx_t start =
-			    __sm_load_idx((const uint8_t *)last);
-			__sm_chunk_t chunk;
-			uint64_t hit;
-			uint8_t *q;
-			size_t j;
-			__sm_chunk_init(&chunk, last + SM_SIZEOF_OVERHEAD);
-			hit = __sm_chunk_prev_set(&chunk, start, upper_excl);
-			if (hit != SM_IDX_MAX)
-				return (hit);
-			if (last_idx == 0)
-				break;
-			/* Walk forward to find the chunk preceding `last`. */
-			q = __sm_get_chunk_data(map, 0);
-			for (j = 0; j + 1 < last_idx; j++) {
-				__sm_chunk_t tmp;
-				__sm_chunk_init(&tmp, q + SM_SIZEOF_OVERHEAD);
-				q += SM_SIZEOF_OVERHEAD +
-				    __sm_chunk_get_size(&tmp);
-			}
-			last = q;
-			last_idx--;
-		}
-		return (SM_IDX_MAX);
-	}
+	/* SM_IDX_MAX as input means "start past the end". */
+	return (__sm_chunks_prev_member(map,
+	    (prev_idx == SM_IDX_MAX) ? UINT64_MAX : prev_idx, cur));
 }
 
 bool
