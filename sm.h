@@ -1690,10 +1690,12 @@ sm_t *sm_shrink_to_fit(sm_t *map);
  *
  * The magic and body are written with native memcpy, so the stream is
  * host-endian: a little-endian writer emits the magic bytes 73 6d 31 30
- * and a big-endian writer 30 31 6d 73.  Cross-endian deserialization is
- * not yet supported; sm_deserialize returns NULL if the source endian
- * flag doesn't match the host.  Serialized maps are therefore portable
- * only between hosts of the same byte order.
+ * and a big-endian writer 30 31 6d 73.  Every body field is a 64-bit
+ * word, so sm_deserialize reads a stream from either byte order: when
+ * the endian flag differs from the host it byte-swaps each 8-byte body
+ * word, then validates as usual.  The writer is unchanged.  sm_open()
+ * and sm_open_copy() take a raw body with no header, so they cannot
+ * tell the byte order and read host order only.
  * ------------------------------------------------------------------- */
 
 /** @brief Compute the buffer size needed to serialize \a map.
@@ -1713,9 +1715,11 @@ size_t sm_serialize(const sm_t *map, uint8_t *out, size_t out_size);
 
 /** @brief Deserialize a previously-serialized buffer into a fresh map.
  *
- * Bounded-safe: validates the header magic, version, endianness, and
- * that each chunk's claimed size fits in the remaining buffer.
- * Returns NULL on any malformed input rather than crashing.
+ * Bounded-safe: validates the header magic, version, and that each
+ * chunk's claimed size fits in the remaining buffer.  A stream written
+ * on a host of the other byte order is byte-swapped word by word and
+ * then validated the same way.  Returns NULL on any malformed input
+ * rather than crashing.
  *
  * @param[in] in   Source buffer.
  * @param[in] n    Source buffer size.

@@ -9584,6 +9584,21 @@ __sm_host_is_little_endian(void)
 	return (((const uint8_t *)&one)[0] == 1);
 }
 
+/*
+ * Reverse the byte order of a 64-bit word.  Portable shifts and masks,
+ * no compiler builtin; the reader calls it once per body word of a
+ * stream written on a host of the other byte order.
+ */
+static uint64_t
+__sm_bswap64(uint64_t v)
+{
+	v = ((v & UINT64_C(0x00FF00FF00FF00FF)) << 8) |
+	    ((v >> 8) & UINT64_C(0x00FF00FF00FF00FF));
+	v = ((v & UINT64_C(0x0000FFFF0000FFFF)) << 16) |
+	    ((v >> 16) & UINT64_C(0x0000FFFF0000FFFF));
+	return ((v << 32) | (v >> 32));
+}
+
 size_t
 sm_serialized_size(const sm_t *map)
 {
@@ -9631,31 +9646,36 @@ sm_serialize(const sm_t *map, uint8_t *out, size_t out_size)
 sm_t *
 sm_deserialize(const uint8_t *in, size_t n)
 {
-	uint32_t magic;
+	/* The magic "sm10" as a little-endian writer emits it. */
+	static const uint8_t magic_le[4] = { 0x73, 0x6d, 0x31, 0x30 };
 	uint8_t version;
 	uint8_t flags;
 	bool wire_is_le;
-	bool host_is_le;
+	bool swap;
 	size_t body_len;
 	sm_t *map;
+	size_t i;
 	if (in == NULL || n < SM_WIRE_HEADER_LEN + SM_SIZEOF_OVERHEAD) {
 		return (NULL);
 	}
-	memcpy(&magic, in + 0, 4);
-	if (magic != SM_WIRE_MAGIC)
-		return (NULL);
-
 	version = in[4];
 	flags = in[5];
 	if (version != SM_WIRE_VERSION)
 		return (NULL);
 
+	/*
+	 * The writer stored the magic and every body word in its own byte
+	 * order and said which in the flags.  The magic bytes must agree
+	 * with that flag: little-endian 73 6d 31 30, big-endian 30 31 6d 73.
+	 * A stream from the other byte order is accepted and byte-swapped
+	 * below; the cardinality hint at offset 8 is not read.
+	 */
 	wire_is_le = (flags & SM_WIRE_FLAG_LE) != 0;
-	host_is_le = __sm_host_is_little_endian();
-	if (wire_is_le != host_is_le) {
-		/* Cross-endian read not yet supported. */
-		return (NULL);
+	for (i = 0; i < 4; i++) {
+		if (in[i] != magic_le[wire_is_le ? i : 3 - i])
+			return (NULL);
 	}
+	swap = wire_is_le != __sm_host_is_little_endian();
 
 	/* Body: starts at offset SM_WIRE_HEADER_LEN. */
 	body_len = n - SM_WIRE_HEADER_LEN;
@@ -9666,6 +9686,21 @@ sm_deserialize(const uint8_t *in, size_t n)
 	/* Copy the body into the map's data buffer.  The first SM_SIZEOF_OVERHEAD
 	 * bytes are the chunk count; the rest is chunks. */
 	memcpy(map->m_data, in + SM_WIRE_HEADER_LEN, body_len);
+	/* Every body field is a u64 (chunk count or small-set header, chunk
+	 * starts, descriptors, payload and small-set words), so converting a
+	 * foreign-order body is one swap per 8-byte word.  A well-formed body
+	 * is a whole number of words; anything else is rejected here rather
+	 * than half-swapped. */
+	if (swap) {
+		if (body_len % sizeof(uint64_t) != 0) {
+			sm_free(map);
+			return (NULL);
+		}
+		for (i = 0; i < body_len; i += sizeof(uint64_t)) {
+			__sm_store_u64(&map->m_data[i],
+			    __sm_bswap64(__sm_load_u64(&map->m_data[i])));
+		}
+	}
 	/* Force m_data_used to its expected value: the first 4 bytes contain
 	 * chunk_count, then we need to walk to compute total size.
 	 * sm_open's pattern handles this. */
