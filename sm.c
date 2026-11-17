@@ -1464,6 +1464,39 @@ __sm_chunk_set_bit(const __sm_chunk_t *chunk, const uint64_t idx, size_t *pos)
 }
 
 /**
+ * @brief Counts the set bits of a chunk.
+ *
+ * An RLE chunk holds its run length.  A sparse chunk holds 64 bits per
+ * ONES flag plus the set bits of every stored MIXED payload word.  The
+ * payload words are contiguous after the descriptor, so the count needs
+ * no per-slot position lookup.
+ *
+ * @param[in] chunk The chunk to count; a sparse chunk must be valid (no
+ *            data-bearing slot past its payload words).
+ * @return The number of set bits in the chunk.
+ */
+static size_t
+__sm_chunk_popcount(const __sm_chunk_t *chunk)
+{
+	const __sm_bitvec_t desc = chunk->m_data[0];
+	size_t nmixed;
+	size_t count;
+	size_t i;
+
+	if (__sm_chunk_is_rle(chunk)) {
+		return (__sm_chunk_rle_get_length(chunk));
+	}
+	/* ONES (2#11) flags: both bits of the flag set. */
+	count = SM_BITS_PER_VECTOR * (size_t)SM_POPCOUNT64((desc &
+	    SM_DESC_HI_BITS) & ((desc & SM_DESC_LO_BITS) << 1));
+	nmixed = (size_t)SM_POPCOUNT64(__sm_desc_mixed_mask(desc));
+	for (i = 0; i < nmixed; i++) {
+		count += (size_t)SM_POPCOUNT64(chunk->m_data[1 + i]);
+	}
+	return (count);
+}
+
+/**
  * @brief Returns the position of the n-th (0-based) set bit of a word.
  *
  * With BMI2, pdep deposits the single bit 1 << n onto the n-th set bit of
@@ -1499,6 +1532,10 @@ __sm_word_select(__sm_bitvec_t w, size_t n)
  * This function scans a chunk of data to find the nth occurrence of a bit
  * with the specified value (true for 1, false for 0) after skipping offset
  * bits (of any value).
+ *
+ * A sparse chunk is scanned over its whole 2048-bit window, slot by slot;
+ * the positions of a NONE slot count as unset.  An RLE chunk is scanned
+ * over [0, capacity).
  *
  * @param[in] chunk The chunk to scan for the bit.
  * @param[in] n The number of bits of value to count before returning.
@@ -1574,16 +1611,13 @@ __sm_chunk_select(const __sm_chunk_t *chunk, ssize_t n, ssize_t *offset,
 
 		for (j = 0; j < SM_FLAGS_PER_INDEX_BYTE; j++) {
 			const size_t flags = SM_CHUNK_GET_FLAGS(b, j);
-			if (flags == SM_PAYLOAD_NONE) {
-				/* No payload, but the slot still occupies its
-				 * index range: __sm_chunk_is_set addresses
-				 * flags positionally as flags[idx / 64], so
-				 * advance to keep the position we report in
-				 * step with membership (see sm_minimum). */
-				ret += SM_BITS_PER_VECTOR;
-				continue;
-			}
-			if (flags == SM_PAYLOAD_ZEROS) {
+			if (flags == SM_PAYLOAD_NONE ||
+			    flags == SM_PAYLOAD_ZEROS) {
+				/* Neither holds a set bit.  A NONE slot has no
+				 * payload but still occupies its index range:
+				 * __sm_chunk_is_set addresses flags positionally
+				 * as flags[idx / 64], so its 64 positions are
+				 * unset, exactly like a ZEROS slot's. */
 				if (value == true) {
 					ret += SM_BITS_PER_VECTOR;
 					continue;
@@ -11234,6 +11268,8 @@ sm_select(sm_t *map, uint64_t n, bool value)
 	__sm_assert(sm_get_size(map) >= SM_SIZEOF_OVERHEAD);
 	{
 		const size_t count = __sm_get_chunk_count(map);
+		uint64_t pos = 0; /* first position not yet counted */
+		bool at_end = false; /* a chunk reached 2^64 - 1 */
 		uint8_t *p;
 		size_t i;
 
@@ -11243,31 +11279,72 @@ sm_select(sm_t *map, uint64_t n, bool value)
 
 		p = __sm_get_chunk_data(map, 0);
 
-		for (i = 0; i < count; i++) {
+		/*
+		 * Walk the chunks, counting the matching positions of each
+		 * one's window and of the gap before it.  A sparse chunk's
+		 * window is its full 2048 bits, NONE slots included (they are
+		 * unset), and the next start is at least 2048 further on.  An
+		 * RLE chunk's window is its capacity.  Unset bits also fill
+		 * every gap between windows and the rest of the universe past
+		 * the last one.  A whole chunk is skipped by its popcount, so
+		 * __sm_chunk_select only runs on the chunk that holds the
+		 * answer, with an n below the chunk's 2^31-bit ceiling (n is
+		 * 64-bit; its ssize_t parameter is not, on ILP32).
+		 */
+		for (i = 0; i < count && !at_end; i++) {
 			const __sm_idx_t start =
 			    __sm_load_idx((const uint8_t *)p);
 			__sm_chunk_t chunk;
-			ssize_t new_n;
-			size_t index;
-			/* Start of this chunk is greater than n meaning there are a set of 0s
-			 * before the first 1 sufficient to consume n. */
-			if (value == false && i == 0 && start > n) {
-				return (n);
-			}
+			size_t window;
+			size_t set;
+			size_t matching;
+
 			p += SM_SIZEOF_OVERHEAD;
 			__sm_chunk_init(&chunk, p);
+			window = __sm_chunk_is_rle(&chunk) ?
+			    __sm_chunk_rle_get_capacity(&chunk) :
+			    (size_t)SM_CHUNK_MAX_CAPACITY;
 
-			new_n = (ssize_t)n;
-			index = __sm_chunk_select(&chunk, (ssize_t)n, &new_n,
-			    value);
-			if (new_n == -1) {
+			if (value == false && start > pos) {
+				const uint64_t gap = start - pos;
+				if (n < gap) {
+					return (pos + n);
+				}
+				n -= gap;
+			}
+
+			set = __sm_chunk_popcount(&chunk);
+			if (value) {
+				matching = set;
+			} else {
+				matching = set >= window ? 0 : window - set;
+			}
+			if (n < (uint64_t)matching) {
+				ssize_t new_n = (ssize_t)n;
+				const size_t index = __sm_chunk_select(&chunk,
+				    (ssize_t)n, &new_n, value);
+				__sm_assert(new_n == -1);
+				if (new_n != -1) {
+					return (SM_IDX_MAX);
+				}
 				return (start + index);
 			}
-			n = (uint64_t)new_n;
+			n -= (uint64_t)matching;
 
+			if (UINT64_MAX - start < (uint64_t)window) {
+				at_end = true;
+			} else {
+				pos = start + window;
+			}
 			p += __sm_chunk_get_size(&chunk);
 		}
-		return (SM_IDX_MAX);
+		/* Past the last window every bit is unset.  Position
+		 * SM_IDX_MAX itself is the "not found" sentinel, not an
+		 * answer. */
+		if (value || at_end || n >= SM_IDX_MAX - pos) {
+			return (SM_IDX_MAX);
+		}
+		return (pos + n);
 	}
 }
 
