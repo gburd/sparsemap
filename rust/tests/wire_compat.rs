@@ -262,3 +262,51 @@ fn c_mixed_lowrun_highsparse() {
 fn c_mixed_straddle_1024() {
     check(MIXED_STRADDLE_1024, &set([0, 1, 1023, 1024, 1025, 2050]));
 }
+
+// --- the other byte order ---
+
+/// Rewrite a little-endian stream exactly as a big-endian writer
+/// produces it: magic bytes reversed, flags bit 0 cleared, and the
+/// cardinality hint and every 8-byte body word byte-swapped.
+fn to_big_endian(le: &[u8]) -> Vec<u8> {
+    assert_eq!(le[5] & 1, 1, "fixture is little-endian");
+    let mut be = le.to_vec();
+    be[0..4].reverse();
+    be[5] &= !1;
+    for word in be[8..].chunks_exact_mut(8) {
+        word.reverse();
+    }
+    be
+}
+
+/// Every C fixture (chunk mode, RLE chunks, and the small-set form)
+/// reads back the same from a big-endian writer, as the C 5.9 reader
+/// does.
+#[test]
+fn c_fixtures_read_from_big_endian_writer() {
+    for le in [
+        EMPTY,
+        SINGLE,
+        SCATTERED,
+        RUN_5000,
+        RUN_4WINDOWS,
+        TWO_CLUSTERS,
+        OFFSET_RUN,
+        SMALL_ZERO,
+        SMALL_WORD0,
+        SMALL_FULLWORD,
+        SMALL_TWOWORDS,
+        SMALL_SCATTER,
+        SMALL_EMPTYTHENSINGLE,
+        RLE_RUN_0_1000,
+        RLE_RUN_0_1023,
+        RLE_RUN_0_5000,
+        RLE_RUN_2048_4095,
+        MIXED_LOWRUN_HIGHSPARSE,
+        MIXED_STRADDLE_1024,
+    ] {
+        let want = SparseMap::from_bytes(le).unwrap();
+        let be = to_big_endian(le);
+        assert_eq!(SparseMap::from_bytes(&be).as_ref(), Ok(&want));
+    }
+}

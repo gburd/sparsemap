@@ -21,9 +21,14 @@
 //! mixed-with-payload), least-significant slot first.
 //!
 //! Chunk starts are 64-bit, so the format addresses the full 64-bit
-//! universe the public API advertises.  Reading honors the body's
-//! declared endianness, so a buffer written on a big-endian host can
-//! be read on a little-endian one.
+//! member universe `[0, u64::MAX)`.
+//!
+//! The C writer is host-endian: the magic, the cardinality hint, and
+//! every body word go out in the writer's byte order, and flags bit 0
+//! says which.  Every body field is a 64-bit word, so reading honors
+//! the declared order word by word, and a buffer written on a
+//! big-endian host reads the same as one from a little-endian host.
+//! [`SparseMap::to_bytes`] always writes little-endian, on any host.
 //!
 //! Version 2 of the wire format (sparsemap 4.0.0+).  Earlier 4-byte-
 //! start v1 buffers are not read; consumers should re-serialize through
@@ -167,7 +172,18 @@ impl SparseMap {
         if buf.len() < HEADER_LEN + OVERHEAD {
             return Err(DecodeError::TooShort);
         }
-        let magic = u32::from_le_bytes(buf[0..4].try_into().unwrap());
+        // The writer stores the magic and every body word in its own
+        // byte order and says which in flags bit 0, so the magic must
+        // read back in that same order: bytes 73 6d 31 30 from a
+        // little-endian writer, 30 31 6d 73 from a big-endian one.  The
+        // C 5.9 reader accepts both the same way.
+        let le = buf[5] & FLAG_LE != 0;
+        let magic_bytes: [u8; 4] = buf[0..4].try_into().unwrap();
+        let magic = if le {
+            u32::from_le_bytes(magic_bytes)
+        } else {
+            u32::from_be_bytes(magic_bytes)
+        };
         if magic != MAGIC {
             return Err(DecodeError::BadMagic);
         }
@@ -175,7 +191,6 @@ impl SparseMap {
         if version != VERSION {
             return Err(DecodeError::UnsupportedVersion(version));
         }
-        let le = buf[5] & FLAG_LE != 0;
 
         let body = &buf[HEADER_LEN..];
         let count = read_u64(body, 0, le).ok_or(DecodeError::Corrupt)?;
@@ -607,6 +622,97 @@ mod hostile {
                 assert_eq!(re.as_ref(), Ok(&m), "decoded map is not round-trip stable");
             }
         }
+    }
+
+    // --- The other byte order: a big-endian writer stores the magic,
+    // the cardinality hint, and every body word big-endian and clears
+    // flags bit 0.  The reader must swap every body word. ---
+
+    /// Rewrite a little-endian stream as a big-endian writer emits it.
+    fn to_big_endian(le: &[u8]) -> Vec<u8> {
+        let mut be = le.to_vec();
+        be[0..4].reverse();
+        be[5] &= !FLAG_LE;
+        for word in be[8..].chunks_exact_mut(8) {
+            word.reverse();
+        }
+        be
+    }
+
+    #[test]
+    fn reads_big_endian_writer() {
+        // Chunk mode with dense windows, multi-window runs, a run with a
+        // dense tail, and the top window; then the small-set form.
+        let top = u64::MAX - 1;
+        let mut m: SparseMap = [0, 3, 2047, 2048, 100_000, top].into_iter().collect();
+        m.insert_range(1 << 40, (1 << 40) + 5 * CHUNK_BITS + 77);
+        let mut bufs = alloc::vec![m.to_bytes()];
+
+        let mut small = small_header(2);
+        small.extend_from_slice(&((1u64 << 0) | (1u64 << 63)).to_le_bytes());
+        small.extend_from_slice(&(1u64 << 6).to_le_bytes());
+        bufs.push(small);
+
+        for le in bufs {
+            let want = SparseMap::from_bytes(&le).expect("native stream");
+            let be = to_big_endian(&le);
+            assert_ne!(be, le);
+            assert_eq!(SparseMap::from_bytes(&be).as_ref(), Ok(&want));
+        }
+    }
+
+    #[test]
+    fn rejects_corrupt_big_endian_stream() {
+        let m: SparseMap = [5, 4096].into_iter().collect();
+        let be = to_big_endian(&m.to_bytes());
+
+        // The magic must match the declared byte order: a big-endian
+        // body with the little-endian magic, or with the flag left set,
+        // is not a stream any writer produces.
+        let mut wrong_magic = be.clone();
+        wrong_magic[0..4].copy_from_slice(&MAGIC.to_le_bytes());
+        assert_eq!(
+            SparseMap::from_bytes(&wrong_magic),
+            Err(DecodeError::BadMagic)
+        );
+        let mut wrong_flag = be.clone();
+        wrong_flag[5] |= FLAG_LE;
+        assert_eq!(
+            SparseMap::from_bytes(&wrong_flag),
+            Err(DecodeError::BadMagic)
+        );
+
+        // A word left unswapped is caught by validation: here the chunk
+        // count, which then reads as 2^57 chunks and runs off the end.
+        let mut half_swapped = be.clone();
+        half_swapped[HEADER_LEN..HEADER_LEN + OVERHEAD].reverse();
+        assert_eq!(
+            SparseMap::from_bytes(&half_swapped),
+            Err(DecodeError::Corrupt)
+        );
+
+        // So is bit u64::MAX set through a big-endian top window.
+        let mut b = header(1);
+        chunk(&mut b, u64::MAX - (CHUNK_BITS - 1), sparse_all_ones());
+        assert_eq!(
+            SparseMap::from_bytes(&to_big_endian(&b)),
+            Err(DecodeError::Corrupt)
+        );
+    }
+
+    #[test]
+    fn writer_output_is_unchanged() {
+        // to_bytes always writes little-endian, flag set, the same bytes
+        // as before the reader learned to swap.  {42, 4096..8192} as
+        // written by the 5.8 crate.
+        let mut m: SparseMap = [42].into_iter().collect();
+        m.insert_range(4096, 8192);
+        let mut want = header(2);
+        want[8..16].copy_from_slice(&4097u64.to_le_bytes());
+        chunk(&mut want, 0, 0b10);
+        want.extend_from_slice(&(1u64 << 42).to_le_bytes());
+        chunk(&mut want, 4096, rle_desc(4096, 4096));
+        assert_eq!(m.to_bytes(), want);
     }
 
     // --- Small-set mode: the C encoder emits a bare bitmapword[] from
