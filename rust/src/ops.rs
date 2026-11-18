@@ -107,11 +107,8 @@ impl Builder {
         // touching the top of the universe ends at 2^64 (not
         // representable) and cannot be adjacent to anything above it, so
         // an overflowing end simply means "not contiguous".
-        let contiguous = self.run_len > 0
-            && self
-                .run_base
-                .checked_add(self.run_len * CHUNK_BITS)
-                == Some(base);
+        let contiguous =
+            self.run_len > 0 && self.run_base.checked_add(self.run_len * CHUNK_BITS) == Some(base);
         if contiguous {
             self.run_len += span;
         } else {

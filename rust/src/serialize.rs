@@ -214,8 +214,7 @@ impl SparseMap {
             let mut map = SparseMap::new();
             let mut last_word = 0u64;
             for w in 0..nwords as usize {
-                let word = read_u64(body, OVERHEAD + w * 8, le)
-                    .ok_or(DecodeError::Corrupt)?;
+                let word = read_u64(body, OVERHEAD + w * 8, le).ok_or(DecodeError::Corrupt)?;
                 last_word = word;
                 if word == 0 {
                     continue;
@@ -305,7 +304,9 @@ impl SparseMap {
                 // Sparse chunk claims exactly one window; its last bit is
                 // start + CHUNK_BITS - 1 (== u64::MAX for the top
                 // window, which is valid and must round-trip).
-                let last = start.checked_add(CHUNK_BITS - 1).ok_or(DecodeError::Corrupt)?;
+                let last = start
+                    .checked_add(CHUNK_BITS - 1)
+                    .ok_or(DecodeError::Corrupt)?;
                 prev_last = Some(last);
                 // Sparse: 32 flags, payload word per mixed slot.
                 let mut w = [0u64; WORDS_PER_CHUNK];
@@ -486,7 +487,11 @@ mod hostile {
     fn rejects_start_plus_capacity_overflow() {
         // A run whose last claimed bit runs past u64::MAX.
         let mut b = header(1);
-        chunk(&mut b, u64::MAX - (CHUNK_BITS - 1), rle_desc(CHUNK_BITS * 2, CHUNK_BITS * 2));
+        chunk(
+            &mut b,
+            u64::MAX - (CHUNK_BITS - 1),
+            rle_desc(CHUNK_BITS * 2, CHUNK_BITS * 2),
+        );
         assert_eq!(SparseMap::from_bytes(&b), Err(DecodeError::Corrupt));
     }
 

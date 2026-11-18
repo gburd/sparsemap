@@ -187,7 +187,9 @@ fn shift_extreme_offsets_are_overflow_safe() {
     let dn = m.shifted(i64::MIN);
     // Only u64::MAX-10 survives i64::MIN if it is >= |i64::MIN|.
     for b in &m {
-        if let Some(s) = b.checked_sub(i64::MIN.unsigned_abs()) { assert!(dn.contains(s)) }
+        if let Some(s) = b.checked_sub(i64::MIN.unsigned_abs()) {
+            assert!(dn.contains(s));
+        }
     }
 
     // +2^62 on small bits: every bit shifts cleanly (no overflow).
