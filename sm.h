@@ -482,11 +482,14 @@ struct SM_ALIGNED(8) sparsemap {
  * otherwise O(N^2) scan into O(N).  A lookup that falls in the gap
  * before a chunk caches that chunk's left neighbour, so the next lookup
  * in the same gap still resumes.  sm_contains() and sm_next_member()
- * use the cursor; sm_prev_member() accepts one but ignores it.
+ * use the cursor for ascending lookups; sm_prev_member() uses it for a
+ * descending scan (see its documentation for what that saves).
  *
  * Contract:
  *   - Initialize with `sm_cursor_t c = SM_CURSOR_INIT;` before the loop.
- *   - Pass `&c` to consecutive lookups with non-decreasing idx.
+ *   - Pass `&c` to consecutive lookups with non-decreasing idx (or, for
+ *     sm_prev_member(), non-increasing idx).  Out-of-order lookups are
+ *     still correct, only slower.
  *   - ANY mutation of the map (sm_add / sm_remove / sm_assign /
  *     sm_set_data_size / sm_clear / sm_split / the *_inplace ops / ...)
  *     between two cursor uses invalidates the cursor; reset it with
@@ -1462,16 +1465,29 @@ uint64_t sm_next_member(const sm_t *map, uint64_t prev_idx, sm_cursor_t *cur);
  * Standard idiom for reverse iteration:
  * @code
  *   uint64_t i = SM_IDX_MAX;  // start past-the-end
- *   while ((i = sm_prev_member(map, i, NULL)) != SM_IDX_MAX) {
+ *   sm_cursor_t c = SM_CURSOR_INIT;
+ *   while ((i = sm_prev_member(map, i, &c)) != SM_IDX_MAX) {
  *       // i is the previous set bit
  *   }
  * @endcode
  *
+ * Without a cursor every call walks the chunk list from chunk 0, so it
+ * costs O(chunks).  With a cursor, the chunk that held the answer is
+ * recorded, and the next call starts its walk there once it has checked
+ * the chunk's start word (as sm_next_member() does).  A descending scan
+ * is then O(1) per member while it stays inside one chunk.  Stepping
+ * back to an EARLIER chunk still walks from chunk 0, because the walk
+ * may not start anywhere it has not verified, so a reverse scan over a
+ * map with many chunks costs O(chunks) per chunk crossed.  For
+ * O(log chunks) reverse steps use a locator.  The cursor contract of
+ * sm_cursor_t applies: reset it after mutating the map.
+ *
  * @param[in] map       The sparsemap to scan.
  * @param[in] prev_idx  Upper exclusive bound (use SM_IDX_MAX for "start at end").
- * @param[in] cur       Optional read cursor (currently unused for reverse
- *                      iteration; accepted for API symmetry), or NULL.
+ * @param[in,out] cur   Optional read cursor for a descending scan, or
+ *                      NULL.  See sm_cursor_t.
  * @returns The previous set bit index, or SM_IDX_MAX if none.
+ * @see sm_locator_prev_member()
  */
 uint64_t sm_prev_member(const sm_t *map, uint64_t prev_idx, sm_cursor_t *cur);
 
