@@ -93,7 +93,7 @@
 /*
  * On x86 without POPCNT (the default x86-64 target), gcc turns
  * __builtin_popcountll into a call to libgcc's __popcountdi2.  The
- * inline SWAR form below measured 7-22% faster than that call on
+ * inline SWAR form below measured 6-34% faster than that call on
  * contains, rank and select over chunks, so x86 uses it unless the
  * build enables POPCNT (e.g., -mpopcnt or -march=x86-64-v2), where the
  * builtin is one instruction.  Other gcc/clang targets keep the builtin.
