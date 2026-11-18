@@ -331,6 +331,83 @@ fn u64_max_is_never_a_member() {
     assert_eq!((&lo ^ &hi), u);
 }
 
+/// The `n`-th set bit of `word` by testing each bit in turn: the oracle
+/// for `word_select`.
+fn naive_word_select(word: u64, n: u32) -> u32 {
+    let mut seen = 0;
+    for b in 0..64 {
+        if word & (1u64 << b) != 0 {
+            if seen == n {
+                return b;
+            }
+            seen += 1;
+        }
+    }
+    panic!("n >= popcount");
+}
+
+#[test]
+fn word_and_dense_select_match_a_bit_scan() {
+    // Run with and without RUSTFLAGS="-C target-feature=+bmi2": the
+    // first build checks the pdep path, the second the portable loop.
+    // Words are xorshift values thinned or thickened by AND/OR so every
+    // popcount from sparse to nearly full appears, plus the edge words.
+    let mut s = 0x9e37_79b9_7f4a_7c15u64;
+    let mut rnd = move || {
+        s ^= s << 13;
+        s ^= s >> 7;
+        s ^= s << 17;
+        s
+    };
+    let mut words = vec![1, 1 << 63, u64::MAX, u64::MAX - 1, 0x8000_0000_0000_0001];
+    for _ in 0..4000 {
+        let w = match rnd() % 4 {
+            0 => rnd() & rnd() & rnd(),
+            1 => rnd(),
+            2 => rnd() | rnd() | rnd(),
+            _ => rnd() & rnd() & rnd() & rnd() & rnd(),
+        };
+        if w != 0 {
+            words.push(w);
+        }
+    }
+    for &w in &words {
+        for n in 0..w.count_ones() {
+            assert_eq!(
+                word_select(w, n),
+                naive_word_select(w, n),
+                "word {w:#x} n {n}"
+            );
+        }
+    }
+
+    // dense_select over whole windows, including empty words before the
+    // target and a last word with only bit 63.
+    for _ in 0..200 {
+        let mut win = [0u64; WORDS_PER_CHUNK];
+        for slot in &mut win {
+            *slot = match rnd() % 3 {
+                0 => 0,
+                1 => rnd() & rnd(),
+                _ => rnd(),
+            };
+        }
+        win[WORDS_PER_CHUNK - 1] |= 1 << 63;
+        let mut want = Vec::new();
+        for (i, &x) in win.iter().enumerate() {
+            for b in 0..64 {
+                if x & (1u64 << b) != 0 {
+                    want.push(i as u64 * 64 + b);
+                }
+            }
+        }
+        for (n, &pos) in want.iter().enumerate() {
+            assert_eq!(dense_select(&win, n as u64), Some(pos));
+        }
+        assert_eq!(dense_select(&win, want.len() as u64), None);
+    }
+}
+
 // A tiny deterministic FNV-1a hasher so the equality/hash test needs no
 // std-provided Hasher.
 #[derive(Default)]

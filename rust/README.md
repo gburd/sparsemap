@@ -63,9 +63,12 @@ assert_eq!(SparseMap::from_bytes(&bytes).unwrap(), m);
 
 ## Highlights
 
-- **100% safe Rust.** `#![forbid(unsafe_code)]`; no `unsafe`, no raw
-  pointers, no build script, and **zero dependencies** (`cargo add
-  sparsemap` pulls nothing else).
+- **Safe Rust.** `#![deny(unsafe_code)]`; no raw pointers, no build
+  script, and **zero dependencies** (`cargo add sparsemap` pulls
+  nothing else).  The only `unsafe` is one call to the BMI2 `pdep`
+  intrinsic for in-word select, compiled only when the target enables
+  BMI2 (`-C target-feature=+bmi2` or a `target-cpu` that has it);
+  every other build compiles no `unsafe` code.
 - **`no_std`.** Depends only on `alloc`.  Disable the default `std`
   feature for embedded targets (you lose only the `std::error::Error`
   impls on the error types).

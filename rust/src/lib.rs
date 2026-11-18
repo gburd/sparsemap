@@ -66,7 +66,9 @@
 //! The crate is `#![no_std]` and depends only on `alloc`.
 
 #![cfg_attr(not(feature = "std"), no_std)]
-#![forbid(unsafe_code)]
+// The one `unsafe` block is the BMI2 pdep call in `word_select`, compiled
+// only for targets with BMI2; every other build compiles no unsafe code.
+#![deny(unsafe_code)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 // Domain-justified relaxations of clippy::pedantic.  A compressed bitmap
 // is full of deliberate, bounds-checked width casts (chunk starts and
@@ -532,20 +534,53 @@ fn dense_rank(w: &[u64; WORDS_PER_CHUNK], bit: usize) -> u64 {
 }
 
 /// Relative index of the `n`-th set bit within `w`.
+///
+/// Skips whole words by their popcount, then finds the bit inside the
+/// target word with [`word_select`].
 fn dense_select(w: &[u64; WORDS_PER_CHUNK], mut n: u64) -> Option<u64> {
     for (i, &word) in w.iter().enumerate() {
         let c = u64::from(word.count_ones());
         if n < c {
-            // Find the n-th set bit in `word`.
-            let mut word = word;
-            for _ in 0..n {
-                word &= word - 1;
-            }
-            return Some(i as u64 * BITS_PER_WORD + u64::from(word.trailing_zeros()));
+            return Some(i as u64 * BITS_PER_WORD + u64::from(word_select(word, n as u32)));
         }
         n -= c;
     }
     None
+}
+
+/// Position of the `n`-th (0-based) set bit of `word`, in `[0, 64)`.
+///
+/// When the build target has BMI2 (for example with `-C
+/// target-feature=+bmi2` or `-C target-cpu=native` on a BMI2 CPU), pdep
+/// deposits the single bit `1 << n` onto the `n`-th set bit of `word`
+/// and `trailing_zeros` reads its position.  Otherwise the portable form
+/// clears the `n` lowest set bits and counts the trailing zeros of what
+/// is left, in fewer than 64 steps.  Both give the same answer, as the C
+/// library's `__sm_word_select` does.
+///
+/// NB: the caller guarantees `n < word.count_ones()`.
+#[inline]
+fn word_select(word: u64, n: u32) -> u32 {
+    debug_assert!(n < word.count_ones());
+    #[cfg(all(target_arch = "x86_64", target_feature = "bmi2"))]
+    {
+        // SAFETY: _pdep_u64 only requires the BMI2 instruction set, and
+        // this block is compiled only for targets that have it, so every
+        // CPU the binary runs on executes pdep.  Note that it needs
+        // `unsafe` even here: a `#[target_feature]` function is unsafe to
+        // call from code that does not itself enable the feature.
+        #[allow(unsafe_code)]
+        let deposited = unsafe { core::arch::x86_64::_pdep_u64(1u64 << n, word) };
+        deposited.trailing_zeros()
+    }
+    #[cfg(not(all(target_arch = "x86_64", target_feature = "bmi2")))]
+    {
+        let mut word = word;
+        for _ in 0..n {
+            word &= word - 1;
+        }
+        word.trailing_zeros()
+    }
 }
 
 #[cfg(test)]
