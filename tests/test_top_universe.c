@@ -31,7 +31,13 @@
  *   3. a randomized differential over maps whose members lie in the top
  *      two chunks (and a few low ones), for every set operation, its
  *      in-place and _cardinality variants, and the predicates, with
- *      sm_validate and a full read-back of every result.
+ *      sm_validate and a full read-back of every result;
+ *   4. the same maps, sometimes with an RLE run reaching the last member,
+ *      through the single-map APIs: sm_remove, sm_split, sm_offset both
+ *      ways, rank and select of both values, sm_rank_many,
+ *      sm_select_many, sm_contains_many, sm_contains_cached, the
+ *      locator, sm_next_member_op / sm_scan_op against an empty map, and
+ *      sm_freeze.
  */
 #define SM_EXPOSE_STRUCT 1
 #include <sm.h>
@@ -868,6 +874,225 @@ setops_pair(const uint64_t *va, size_t na, const uint64_t *vb, size_t nb,
 	sm_free(b);
 }
 
+/* The k-th (0-based) position in [0, 2^64 - 1) not in v, or SM_IDX_MAX. */
+static uint64_t
+o_select0(const uint64_t *v, size_t n, uint64_t k)
+{
+	size_t i;
+
+	for (i = 0; i < n && v[i] <= k + i; i++)
+		;
+	return (k >= UINT64_MAX - i ? SM_IDX_MAX : k + i);
+}
+
+/* Members of v in [0, x). */
+static size_t
+o_below(const uint64_t *v, size_t n, uint64_t x)
+{
+	size_t i = 0;
+
+	while (i < n && v[i] < x)
+		i++;
+	return (i);
+}
+
+/* Rank, select, the batch calls, the locator, cached contains, the op
+ * iterators and the frozen copy of m against the oracle v. */
+static void
+queries(sm_t *m, const uint64_t *v, size_t n)
+{
+	static uint64_t probe[64], ks[64], sel[64], got[16384];
+	size_t ranks[64];
+	bool in[64];
+	sm_locator_t *L = sm_locator_build(m);
+	sm_frozen_t *f = sm_freeze(m);
+	sm_cursor_cached_t cc = SM_CURSOR_CACHED_INIT;
+	sm_t *empty = sm_create(64);
+	struct coll c;
+	size_t np = 0, k, i;
+	uint64_t x;
+
+	/* Probes: members, neighbours, chunk edges, the top. */
+	for (k = 0; k < n && np + 3 < 48; k += 1 + n / 16) {
+		probe[np++] = v[k] - 1;
+		probe[np++] = v[k];
+		probe[np++] = v[k] + 1;
+	}
+	probe[np++] = 0;
+	probe[np++] = TOPC - 1;
+	probe[np++] = TOPC;
+	probe[np++] = T(1);
+	probe[np++] = UINT64_MAX;
+	qsort(probe, np, sizeof(*probe), cmp_u64);
+	for (i = 0; i < np; i++) {
+		const uint64_t p = probe[i];
+		const size_t below = o_below(v, n, p);
+		const int has = in_set(v, n, p);
+
+		CHECK(sm_rank(m, 0, p, true) == below + (size_t)has,
+		    "rank1 [0, 2^64-%llu]", (unsigned long long)(0 - p));
+		if (p < (UINT64_C(1) << 62))
+			CHECK(sm_rank(m, 0, p, false) ==
+			        p + 1 - below - (size_t)has,
+			    "rank0 [0, %llu]", (unsigned long long)p);
+		CHECK(sm_contains_cached(m, p, &cc) == has, "contains_cached");
+		CHECK(L == NULL || sm_locator_contains(L, p) == has,
+		    "locator contains");
+		CHECK(L == NULL || sm_locator_rank(L, 0, p, true) ==
+		        below + (size_t)has,
+		    "locator rank");
+		CHECK(f == NULL || sm_frozen_contains(f, p) == has,
+		    "frozen contains");
+		/* select0 at the number of unset positions below p. */
+		if (!has && p != UINT64_MAX) {
+			const uint64_t k0 = p - below;
+
+			CHECK(sm_select(m, k0, false) == p, "select0 at 2^64-%llu",
+			    (unsigned long long)(0 - p));
+			CHECK(L == NULL || sm_locator_select(L, k0, false) == p,
+			    "locator select0");
+		}
+	}
+	CHECK(sm_select(m, UINT64_MAX - 1 - n, false) ==
+	        o_select0(v, n, UINT64_MAX - 1 - n),
+	    "select0 near the top");
+	for (k = 0; k < n; k++) {
+		CHECK(sm_select(m, k, true) == v[k], "select1 %zu", k);
+		CHECK(L == NULL || sm_locator_select(L, k, true) == v[k],
+		    "locator select1 %zu", k);
+		CHECK(f == NULL || sm_frozen_select(f, k) == v[k],
+		    "frozen select %zu", k);
+	}
+	CHECK(sm_select(m, n, true) == SM_IDX_MAX, "select1 past the end");
+	/* The batch calls over the same probes. */
+	sm_rank_many(m, probe, ranks, np);
+	sm_contains_many(m, probe, in, np);
+	for (i = 0; i < np; i++) {
+		CHECK(ranks[i] == o_below(v, n, probe[i]), "rank_many %zu", i);
+		CHECK(in[i] == (bool)in_set(v, n, probe[i]),
+		    "contains_many %zu", i);
+	}
+	for (k = 0; k < n && k < 60; k++)
+		ks[k] = k;
+	ks[k++] = n;
+	sm_select_many(m, ks, sel, k);
+	for (i = 0; i < k; i++)
+		CHECK(sel[i] == (ks[i] < n ? v[ks[i]] : SM_IDX_MAX),
+		    "select_many %zu", i);
+	/* The locator's iteration, the op iterators against the empty map
+	 * (each equals m itself), and the frozen copy's iteration. */
+	x = SM_IDX_MAX;
+	for (k = 0; L != NULL &&
+	     (x = sm_locator_next_member(L, x)) != SM_IDX_MAX; k++)
+		CHECK(k < n && x == v[k], "locator next %zu", k);
+	CHECK(L == NULL || k == n, "locator next count");
+	for (i = 0; i < 4; i++) {
+		x = SM_IDX_MAX;
+		for (k = 0; (x = sm_next_member_op(m, empty, (sm_op_t)i, x,
+		                 NULL, NULL)) != SM_IDX_MAX;
+		     k++)
+			CHECK(k < n && x == v[k], "next_member_op %zu", i);
+		CHECK(k == (i == SM_OP_AND ? 0 : n), "next_member_op count");
+		c.v = got;
+		c.n = 0;
+		c.cap = sizeof(got) / sizeof(got[0]);
+		c.over = 0;
+		sm_scan_op(m, empty, (sm_op_t)i, scan_fn, 0, &c);
+		CHECK(c.n == (i == SM_OP_AND ? 0 : n) &&
+		        (i == SM_OP_AND || memcmp(got, v, n * 8) == 0),
+		    "scan_op %zu", i);
+	}
+	if (f != NULL) {
+		x = SM_IDX_MAX;
+		for (k = 0; (x = sm_frozen_next_member(f, x)) != SM_IDX_MAX;
+		     k++)
+			CHECK(k < n && x == v[k], "frozen next %zu", k);
+		CHECK(k == n && sm_frozen_cardinality(f) == n, "frozen count");
+	}
+	CHECK(n == 0 || f != NULL, "sm_freeze failed");
+	CHECK(n == 0 || L != NULL, "sm_locator_build failed");
+	sm_frozen_free(f);
+	sm_locator_free(L);
+	sm_free(empty);
+}
+
+/* sm_remove, sm_split and sm_offset of m against the oracle v. */
+static void
+mutations(const sm_t *m, const uint64_t *v, size_t n)
+{
+	static uint64_t w[16384];
+	sm_t *c, *o;
+	size_t k, nw;
+	uint64_t at;
+
+	/* sm_remove of a member and of a neighbour that is absent. */
+	at = v[rnd() % n];
+	c = sm_copy(m);
+	sm_remove(c, at);
+	for (k = nw = 0; k < n; k++)
+		if (v[k] != at)
+			w[nw++] = v[k];
+	CHECK(same(c, w, nw, "remove") == 0, "sm_remove 2^64-%llu",
+	    (unsigned long long)(0 - at));
+	sm_free(c);
+	/* sm_split at a member: map keeps < at, other gets >= at. */
+	c = sm_copy(m);
+	o = sm_create(1024);
+	sm_split(c, at, o);
+	nw = o_below(v, n, at);
+	CHECK(same(c, v, nw, "split left") == 0, "sm_split left");
+	CHECK(same(o, v + nw, n - nw, "split right") == 0, "sm_split right");
+	sm_free(c);
+	sm_free(o);
+	/* sm_offset by a small or chunk-sized shift, either way. */
+	{
+		const int64_t d = (int64_t)(rnd() % 9) - 4 +
+		    (rnd() % 2 ? 2048 : 0) * (rnd() % 2 ? 1 : -1);
+
+		errno = 0;
+		o = sm_offset(m, (ssize_t)d);
+		if (d > 0 && v[n - 1] >= UINT64_MAX - (uint64_t)d) {
+			CHECK(o == NULL && errno == ERANGE, "offset %lld ERANGE",
+			    (long long)d);
+		} else {
+			for (k = nw = 0; k < n; k++)
+				if (d >= 0 || v[k] >= (uint64_t)(-d))
+					w[nw++] = v[k] + (uint64_t)d;
+			CHECK(same(o, w, nw, "offset") == 0, "sm_offset %lld",
+			    (long long)d);
+		}
+		sm_free(o);
+	}
+}
+
+static void
+single_map(long trials)
+{
+	static uint64_t v[MAXN + 8192];
+	long t;
+
+	for (t = 0; t < trials && failures < 20; t++) {
+		size_t n = gen(v), k;
+		sm_t *m;
+
+		/* Sometimes an RLE run ending at the last member. */
+		if (rnd() % 3 == 0) {
+			const uint64_t len = 1 + rnd() % 6000;
+
+			for (k = 0; k < len; k++)
+				v[n++] = T(1 + k);
+			n = uniq(v, n);
+		}
+		if (n == 0)
+			continue;
+		m = build((int)(rnd() % 4), v, n);
+		CHECK(same(m, v, n, "single build") == 0, "single build");
+		queries(m, v, n);
+		mutations(m, v, n);
+		sm_free(m);
+	}
+}
+
 static void
 differential(long trials)
 {
@@ -891,6 +1116,7 @@ main(void)
 	idx_max_compare();
 	idx_max_decoders();
 	differential(3000);
+	single_map(600);
 	if (failures != 0) {
 		fprintf(stderr, "test_top_universe: %d failure(s)\n", failures);
 		return (1);
