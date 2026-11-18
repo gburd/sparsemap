@@ -251,6 +251,7 @@ typedef SSIZE_T ssize_t;
 #define sm_t                 SM__P(sm_t)
 #define sm_allocator_t       SM__P(sm_allocator_t)
 #define sm_cursor_t          SM__P(sm_cursor_t)
+#define sm_frozen_t          SM__P(sm_frozen_t)
 #define sm_membership_t      SM__P(sm_membership_t)
 #define sm_op_t              SM__P(sm_op_t)
 #define sm_stats_t           SM__P(sm_stats_t)
@@ -287,6 +288,18 @@ typedef SSIZE_T ssize_t;
 #define sm_fill_factor              SM__P(sm_fill_factor)
 #define sm_flip_range               SM__P(sm_flip_range)
 #define sm_free                     SM__P(sm_free)
+#define sm_freeze                   SM__P(sm_freeze)
+#define sm_frozen_cardinality       SM__P(sm_frozen_cardinality)
+#define sm_frozen_contains          SM__P(sm_frozen_contains)
+#define sm_frozen_deserialize       SM__P(sm_frozen_deserialize)
+#define sm_frozen_free              SM__P(sm_frozen_free)
+#define sm_frozen_next_member       SM__P(sm_frozen_next_member)
+#define sm_frozen_prev_member       SM__P(sm_frozen_prev_member)
+#define sm_frozen_rank              SM__P(sm_frozen_rank)
+#define sm_frozen_select            SM__P(sm_frozen_select)
+#define sm_frozen_serialize         SM__P(sm_frozen_serialize)
+#define sm_frozen_serialized_size   SM__P(sm_frozen_serialized_size)
+#define sm_frozen_size              SM__P(sm_frozen_size)
 #define sm_get_capacity             SM__P(sm_get_capacity)
 #define sm_get_data                 SM__P(sm_get_data)
 #define sm_get_size                 SM__P(sm_get_size)
@@ -337,6 +350,7 @@ typedef SSIZE_T ssize_t;
 #define sm_split                    SM__P(sm_split)
 #define sm_statistics               SM__P(sm_statistics)
 #define sm_subset_compare           SM__P(sm_subset_compare)
+#define sm_thaw                     SM__P(sm_thaw)
 #define sm_to_array                 SM__P(sm_to_array)
 #define sm_union                    SM__P(sm_union)
 #define sm_union_cardinality        SM__P(sm_union_cardinality)
@@ -1423,6 +1437,104 @@ uint64_t sm_next_member_op(const sm_t *a, const sm_t *b, sm_op_t op,
  */
 void sm_scan_op(const sm_t *a, const sm_t *b, sm_op_t op,
     void (*fn)(uint64_t vec[], size_t n, void *aux), size_t skip, void *aux);
+
+/* -------------------------------------------------------------------
+ * Frozen maps: a read-only Elias-Fano copy for very sparse sets
+ *
+ * A sparsemap spends about 22 bytes on an isolated member (chunk start,
+ * descriptor and one payload word).  sm_freeze() copies a map into a
+ * separate, immutable Elias-Fano structure that spends about 2 + L bits
+ * per member, L = floor(log2(universe / members)): about 2 bytes per
+ * member at density 1e-4.  It is for very sparse sets that are built
+ * once and then only queried.  It is not a sparsemap: it has its own
+ * serialized format and cannot be mutated; sm_thaw() turns it back
+ * into an sm_t.
+ *
+ * Costs: freeze, thaw and (de)serialize are O(members) time and space,
+ * so freezing a map that holds a long RLE run materializes every member
+ * of the run.  select is O(1) (a sampled select plus a word scan);
+ * contains, rank, next and prev are O(1 + bucket size), where a bucket
+ * holds about 2 members on average.  A NULL frozen map is the empty set.
+ * ------------------------------------------------------------------- */
+
+/** @brief Opaque read-only Elias-Fano copy of a map. */
+typedef struct sm_frozen sm_frozen_t;
+
+/** @brief Build a frozen copy of \a map.
+ *
+ * O(cardinality) time and space; see the section comment.
+ *
+ * @param[in] map  Source map (NULL or empty gives an empty frozen map).
+ * @returns A new frozen map (free with sm_frozen_free()), or NULL on
+ *          allocation failure.
+ */
+sm_frozen_t *sm_freeze(const sm_t *map);
+
+/** @brief Release a frozen map (NULL-safe). */
+void sm_frozen_free(sm_frozen_t *f);
+
+/** @brief Bytes of memory the frozen map occupies (0 for NULL). */
+size_t sm_frozen_size(const sm_frozen_t *f);
+
+/** @brief Number of members (0 for NULL). */
+size_t sm_frozen_cardinality(const sm_frozen_t *f);
+
+/** @brief Membership test; equals sm_contains() on the source map. */
+bool sm_frozen_contains(const sm_frozen_t *f, uint64_t idx);
+
+/** @brief Members in the inclusive range [\a x, \a y].
+ *
+ * Equals sm_rank(map, x, y, true) on the source map; 0 when x > y.
+ */
+size_t sm_frozen_rank(const sm_frozen_t *f, uint64_t x, uint64_t y);
+
+/** @brief The \a n'th member (0-based), or SM_IDX_MAX if there are not
+ * n + 1 members.  Equals sm_select(map, n, true) on the source map. */
+uint64_t sm_frozen_select(const sm_frozen_t *f, uint64_t n);
+
+/** @brief Lowest member > \a prev_idx (SM_IDX_MAX: from the start), or
+ * SM_IDX_MAX.  Equals sm_next_member() on the source map. */
+uint64_t sm_frozen_next_member(const sm_frozen_t *f, uint64_t prev_idx);
+
+/** @brief Highest member < \a prev_idx (SM_IDX_MAX: from the end), or
+ * SM_IDX_MAX.  Equals sm_prev_member() on the source map. */
+uint64_t sm_frozen_prev_member(const sm_frozen_t *f, uint64_t prev_idx);
+
+/** @brief Build a mutable map with the frozen map's members.
+ *
+ * @returns A new owned-contiguous map (empty for NULL), or NULL on
+ *          allocation failure.
+ */
+sm_t *sm_thaw(const sm_frozen_t *f);
+
+/** @brief Bytes sm_frozen_serialize() writes (0 for NULL). */
+size_t sm_frozen_serialized_size(const sm_frozen_t *f);
+
+/** @brief Serialize a frozen map.
+ *
+ * The format is its own (magic "mfrozf01", version 1), not the
+ * sparsemap wire format, and always little-endian: a 32-byte header
+ * (magic, version and low-bit width, member count, largest member)
+ * followed by the packed low bits and the unary high bits as
+ * little-endian 64-bit words.  The select samples are rebuilt on read.
+ *
+ * @returns Bytes written, or 0 when \a f or \a out is NULL or
+ *          \a out_size is too small.
+ */
+size_t sm_frozen_serialize(const sm_frozen_t *f, uint8_t *out,
+    size_t out_size);
+
+/** @brief Read a frozen map written by sm_frozen_serialize().
+ *
+ * Validates the magic, version, sizes, the low-bit width, the number
+ * of members the high bits encode, and that the members strictly
+ * increase and end at the recorded maximum, so no query on the result
+ * can read out of bounds.  O(n) bytes.
+ *
+ * @returns A new frozen map, or NULL on malformed input or allocation
+ *          failure.
+ */
+sm_frozen_t *sm_frozen_deserialize(const uint8_t *in, size_t n);
 
 /* -------------------------------------------------------------------
  * Cardinality without allocation
