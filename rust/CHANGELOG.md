@@ -4,6 +4,37 @@ All notable changes to the Rust `sparsemap` crate are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com), and
 the crate follows [SemVer](https://semver.org).
 
+## [5.9.0] - 2026-11-18
+
+Matches the C library at 5.9.0.  Wire format unchanged (version 2);
+`to_bytes` output is byte-identical to 5.8.x.  C<->Rust compatibility
+re-verified in both directions, including sets at the top of the 64-bit
+universe.  The crate models a map as a `BTreeMap` and has none of the C
+library's 5.9.0 data-loss defects (RLE runs of 2^31 bits or more, chunk
+ends at 2^64); the embedded C source carries those fixes.
+
+### Changed
+
+- `u64::MAX` (2^64 - 1) is never a member, matching the C library, where
+  it is `SM_IDX_MAX`, the "not found" value.  `insert(u64::MAX)` stores
+  nothing and returns `false`, `contains(u64::MAX)` is always `false`,
+  and `from_bytes` rejects a buffer that sets that bit with
+  `DecodeError::Corrupt`, as the C `sm_deserialize` does.  Through 5.8.5
+  the crate stored it, and `to_bytes` then wrote a buffer the C 5.9
+  reader rejects.  `insert_range` and `shifted` never produce it;
+  `shifted` drops a member that would land on it.  The Python binding
+  follows: `insert(2**64 - 1)` returns `False`.
+- Select inside a dense word is a six-step broadword search (popcount
+  the low half, descend) instead of clearing low bits one at a time.
+  The crate stays `#![forbid(unsafe_code)]`.
+
+### Fixed
+
+- `from_bytes` reads a buffer written by the C library on a big-endian
+  host.  It decoded the magic as little-endian before reading the
+  byte-order flag, so every big-endian stream failed with `BadMagic`.
+  `to_bytes` still always writes little-endian.
+
 ## [5.8.5] - 2026-11-04
 
 Matches the C library at 5.8.5: the embedded C source's read cursor no
