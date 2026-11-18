@@ -931,13 +931,15 @@ CASE(test_select_empty_map)
 
 CASE(test_select_unset_in_rle)
 {
-    /* RLE chunk fully set within the chunk; the chunk's range is
-     * [0, 4096), all set, no unset bits within range.  sm_select(false)
-     * cannot find unset bits past the last chunk -- returns IDX_MAX. */
+    /* RLE chunk fully set over [0, 4096): no unset bit inside the run,
+     * so the first unset bit is the one just past it.  Unset bits past
+     * the last chunk are selectable (5.9.0; 5.8.x returned IDX_MAX). */
     sm_t *m = sm_create(8192);
     populate_run(m, 0, 4096);
-    EXPECT(sm_select(m, 0, false) == SM_IDX_MAX,
-           "no unset bit selectable past last chunk");
+    EXPECT(sm_select(m, 0, false) == 4096,
+           "first unset bit follows the run");
+    EXPECT(sm_select(m, 10, false) == 4106,
+           "unset bits past the last chunk are selectable");
     sm_free(m);
     return 0;
 }
@@ -2394,10 +2396,10 @@ CASE(test_guard_short_circuits)
             "locator rank agrees with plain rank");
         EXPECT(sm_locator_select(loc, 3, true) == sm_select(m, 3, true),
             "locator select agrees with plain select");
-        /* Mutating the map makes the locator stale.  Per the documented
-         * contract a stale locator still returns CORRECT answers -- it
-         * detects the mismatch and falls back to the plain O(n) path --
-         * it just loses the speedup.  So it must SEE the new bit. */
+        /* Adding 999999 inserts a new chunk, a structural change the
+         * locator's fingerprint check detects, so the queries fall back
+         * to the plain path and SEE the new bit.  (An in-place bit flip
+         * inside an existing chunk is not detected; see sm_locator_t.) */
         sm_add(m, 999999);
         EXPECT(sm_locator_contains(loc, 999999),
             "stale locator still correct: sees the new bit");

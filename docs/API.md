@@ -205,6 +205,18 @@ header itself.
 | `sm_fill_factor()` | Return the fraction of bits that are set. |
 | `sm_flip_range()` | Complement every bit in `[lo, hi)`: set bits become unset and vice versa. |
 | `sm_free()` | Dispose of a sparsemap, regardless of allocation lineage. |
+| `sm_freeze()` | Build a frozen copy of \a map. |
+| `sm_frozen_cardinality()` | Number of members (0 for NULL). */ |
+| `sm_frozen_contains()` | Membership test; equals sm_contains() on the source map. */ |
+| `sm_frozen_deserialize()` | Read a frozen map written by sm_frozen_serialize(). |
+| `sm_frozen_free()` | Release a frozen map (NULL-safe). */ |
+| `sm_frozen_next_member()` | Lowest member > \a prev_idx (SM_IDX_MAX: from the start), or |
+| `sm_frozen_prev_member()` | Highest member < \a prev_idx (SM_IDX_MAX: from the end), or |
+| `sm_frozen_rank()` | Members in the inclusive range [\a x, \a y]. |
+| `sm_frozen_select()` | The \a n'th member (0-based), or SM_IDX_MAX if there are not |
+| `sm_frozen_serialize()` | Serialize a frozen map. |
+| `sm_frozen_serialized_size()` | Bytes sm_frozen_serialize() writes (0 for NULL). */ |
+| `sm_frozen_size()` | Bytes of memory the frozen map occupies (0 for NULL). */ |
 | `sm_get_capacity()` | Return the total buffer capacity in bytes. |
 | `sm_get_data()` | Return a pointer to the raw data buffer. |
 | `sm_get_size()` | Return the number of buffer bytes currently in use. |
@@ -217,15 +229,18 @@ header itself.
 | `sm_is_subset()` | Test whether \a a's bits are a subset of \a b's bits. |
 | `sm_is_superset()` | Test whether \a a's bits are a superset of \a b's bits. |
 | `sm_jaccard_index()` | Jaccard similarity index: |a intersect b| / |a union b|. |
-| `sm_locator_build()` | Build a transient sqrt(n) locator over \a map. |
-| `sm_locator_contains()` | O(sqrt n) membership test; equals sm_contains(map, idx, NULL). */ |
+| `sm_locator_build()` | Build a transient chunk directory over \a map. |
+| `sm_locator_contains()` | O(log chunks) membership test; equals sm_contains(map, idx, NULL). |
 | `sm_locator_free()` | Release a locator built by sm_locator_build (NULL-safe). */ |
-| `sm_locator_rank()` | O(sqrt n) rank over inclusive [lo, hi]; equals sm_rank. |
-| `sm_locator_select()` | O(sqrt n) select; equals sm_select(map, n, value). |
+| `sm_locator_next_member()` | O(log chunks) successor; equals sm_next_member(map, x, NULL). |
+| `sm_locator_prev_member()` | O(log chunks) predecessor; equals sm_prev_member(map, x, NULL). |
+| `sm_locator_rank()` | O(log chunks) rank over inclusive [lo, hi]; equals sm_rank. |
+| `sm_locator_select()` | O(log chunks) select of the \a n'th (0-based) matching bit. |
 | `sm_maximum()` | Return the position of the last set bit (maximum). |
 | `sm_membership()` | Classify a sparsemap as empty, singleton, or multi-element. |
 | `sm_minimum()` | Return the position of the first set bit (minimum). |
 | `sm_next_member()` | Find the lowest set bit at index > \a prev_idx. |
+| `sm_next_member_op()` | Find the lowest member of (a OP b) at index > \a prev_idx. |
 | `sm_nonempty_difference()` | Test whether `a \ b` has any set bits, without allocating. |
 | `sm_offset()` | Create a new sparsemap with all bits shifted by \a offset. |
 | `sm_open()` | Attach to an existing (serialized) sparsemap buffer. |
@@ -237,10 +252,13 @@ header itself.
 | `sm_pop_last()` | Find the highest set bit, clear it, and return it. |
 | `sm_prev_member()` | Find the highest set bit at index < \a prev_idx. |
 | `sm_rank()` | Count matching bits in the inclusive range [\a x, \a y]. |
+| `sm_rank_many()` | Count set bits below many positions in one sweep (batched). |
 | `sm_remove()` | Clear the bit at \a idx (set to 0). |
 | `sm_remove_range()` | Clear every bit in `[lo, hi)`. |
 | `sm_scan()` | Invoke a callback for every set bit in the map. |
+| `sm_scan_op()` | Invoke a callback for every member of (a OP b). |
 | `sm_select()` | Find the position of the \a n'th matching bit (0-based). |
+| `sm_select_many()` | Select many set bits in one sweep (batched). |
 | `sm_serialize()` | Serialize \a map into \a out (`sm_serialized_size` bytes). |
 | `sm_serialized_size()` | Compute the buffer size needed to serialize \a map. |
 | `sm_set_allocator()` | Set the process-wide allocator hooks. |
@@ -251,6 +269,7 @@ header itself.
 | `sm_split()` | Split the map at \a idx, moving higher bits to \a other. |
 | `sm_statistics()` | Fill an sm_stats_t with introspection data. */ |
 | `sm_subset_compare()` | Classify the subset relationship between \a a and \a b. |
+| `sm_thaw()` | Build a mutable map with the frozen map's members. |
 | `sm_to_array()` | Materialize all set bits as a uint64_t array. |
 | `sm_union()` | Create a new sparsemap containing bits set in either \a a or \a b. |
 | `sm_union_cardinality()` | Compute the cardinality of (a union b) without allocating it. */ |
@@ -283,8 +302,10 @@ header itself.
 | `sm_allocator_t` | type |
 | `sm_cursor_cached_t` | type |
 | `sm_cursor_t` | type |
+| `sm_frozen_t` | type |
 | `sm_locator_t` | type |
 | `sm_membership_t` | type |
+| `sm_op_t` | type |
 | `sm_stats_t` | type |
 | `sm_subset_relation_t` | type |
 | `sm_t` | type |
