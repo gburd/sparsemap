@@ -193,8 +193,8 @@ never persist a cursor or depend on its `sizeof`.
 
 The same applies to `sm_cursor_cached_t` (the 5.3.0 fixed-size MRU
 lookup cache): initialize with `SM_CURSOR_CACHED_INIT`, recompile after
-upgrading, and reset it after any mutation.  `sm_locator_t` (the 5.3.0
-transient O(sqrt n) point-lookup / rank / select index) is opaque --
+upgrading, and reset it after any mutation.  `sm_locator_t` (the
+transient O(log chunks) contains / rank / select / next / prev index) is opaque --
 build it with `sm_locator_build`, use it only through the `sm_locator_*`
 functions, free it with `sm_locator_free`, and rebuild it after any
 mutation.  A stale locator can return wrong answers: its cheap

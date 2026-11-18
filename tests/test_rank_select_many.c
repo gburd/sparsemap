@@ -4,7 +4,8 @@
  * per-element plain calls and a sorted-array oracle.
  *
  * Checks, over empty, small-set, sparse, clustered, RLE-run,
- * chunk-boundary, near-2^64 and one-member-per-chunk maps:
+ * chunk-boundary, near-2^64, one-member-per-chunk and sm_offset-shifted
+ * maps:
  *   1. sm_rank_many(idxs)[i] == members strictly below idxs[i] (oracle)
  *      == sm_rank(map, 0, idxs[i] - 1, true) (0 for idxs[i] == 0), for
  *      sorted probes with repeats, including 0, SM_IDX_MAX and positions
@@ -109,7 +110,8 @@ o_below(const set_t *s, uint64_t x)
  * Build one map shape into m (grown as needed) and the oracle.  Shapes:
  * 0 small-set, 1 uniform sparse, 2 clustered, 3 RLE runs with gaps,
  * 4 chunk-boundary members, 5 near the top of the universe, 6 one member
- * per chunk, 7 a mix of all of them.
+ * per chunk, 7 a clustered map shifted by sm_offset (its chunks carry
+ * NONE slots, so they cover less than 2048 positions), 8 a mix of 1-4.
  */
 static sm_t *
 build(int shape, set_t *s)
@@ -177,6 +179,22 @@ build(int shape, set_t *s)
 		for (k = 0; k < n; k++)
 			set_push(s, k * 3 * CHUNK + rnd() % CHUNK);
 		break;
+	case 7: { /* sm_offset of a clustered map: chunks with NONE slots */
+		set_t t = { 0 };
+		sm_t *x = build(2, &t);
+		const ssize_t by = (ssize_t)(rnd() % 3000) - 1000;
+		sm_t *y = sm_offset(x, by);
+		for (k = 0; k < t.n; k++)
+			if ((int64_t)t.v[k] + by >= 0)
+				set_push(s, (uint64_t)((int64_t)t.v[k] + by));
+		sm_free(x);
+		free(t.v);
+		sm_free(m);
+		if (y == NULL)
+			y = sm_create(1024);
+		set_normalize(s);
+		return (y);
+	}
 	default:
 		for (r = 0; r < 4; r++) {
 			set_t t = { 0 };
@@ -324,12 +342,12 @@ main(void)
 
 	if (nulls() != 0)
 		return (1);
-	for (trial = 0; trial < 240; trial++) {
+	for (trial = 0; trial < 270; trial++) {
 		set_t s = { 0 };
 		char what[32];
-		sm_t *m = build(trial % 8, &s);
+		sm_t *m = build(trial % 9, &s);
 
-		snprintf(what, sizeof(what), "shape %d trial %d", trial % 8,
+		snprintf(what, sizeof(what), "shape %d trial %d", trial % 9,
 		    trial);
 		if (check_map(m, &s, what) != 0)
 			return (1);

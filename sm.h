@@ -518,16 +518,20 @@ typedef struct sm_cursor_cached {
 } sm_cursor_cached_t;
 #define SM_CURSOR_CACHED_INIT { {0}, {0}, {0}, 0, 0 }
 
-/** @brief Transient two-level sqrt(n) directory over a map's chunks.
+/** @brief Transient two-level directory over a map's chunks.
  *
  * A locator is a caller-owned, read-only acceleration index built once
- * over an UNMUTATED map with sm_locator_build().  It samples every
- * stride-th chunk (stride ~= sqrt(chunk count)) into a superblock
- * directory, so contains / rank / select run in O(sqrt n) instead of
- * O(n) chunks.  Nothing here is serialized and sm_t is unchanged.
+ * over an UNMUTATED map with sm_locator_build().  It records where every
+ * chunk starts, its byte offset, and how many set bits precede it, in two
+ * levels: an absolute record per 16 chunks and a packed 8-byte delta
+ * record per chunk, about 10 bytes per chunk in all.  contains / rank /
+ * select then run in O(log chunks) instead of O(chunks).
+ * Nothing here is serialized and sm_t is unchanged.
  *
  * Contract:
  *   - Build with sm_locator_build(map); free with sm_locator_free().
+ *     The locator keeps a pointer to the map and reads its buffer, so
+ *     the map must outlive it.
  *   - ANY mutation of the map (sm_add / sm_remove / sm_assign /
  *     sm_add_range / sm_set_data_size / sm_clear / sm_split / the
  *     *_inplace ops / ...) invalidates the locator: REBUILD it.  A
@@ -538,13 +542,11 @@ typedef struct sm_cursor_cached {
  *     chunk starts, and the cardinality cache when it was populated at
  *     build time) with the one recorded at build time.  A mismatch
  *     means the map's shape changed, and the query falls back to the
- *     plain sm_contains / sm_rank / sm_select path on the live map.
- *     This catches a mutation that inserts, removes, or moves a chunk,
- *     but not one that flips a bit inside an existing chunk without
- *     moving any bytes: sm_t has no change counter, so that case
- *     cannot be detected in O(1).  Do not rely on the fallback.
- *   - rank/select for value == false fall back to the plain path
- *     (correct, not accelerated); the sqrt speedup is for value==true.
+ *     plain sm_contains / sm_rank / sm_select path on the live map.  This catches a mutation
+ *     that inserts, removes, or moves a chunk, but not one that flips a
+ *     bit inside an existing chunk without moving any bytes: sm_t has
+ *     no change counter, so that case cannot be detected in O(1).  Do
+ *     not rely on the fallback.
  *
  * The struct layout is exposed only so the type name resolves; treat
  * it as opaque and use it only through the sm_locator_* functions.
@@ -558,11 +560,17 @@ typedef struct sm_locator {
 	uint64_t first_start; /* first chunk start (staleness fingerprint) */
 	uint64_t last_start;  /* last chunk start (staleness fingerprint) */
 	size_t last_offset;   /* base-relative offset of the last chunk */
-	size_t stride;        /* chunks per superblock (~sqrt(count)) */
-	size_t n_sb;          /* number of superblock entries */
-	uint64_t *sb_start;   /* [n_sb] start index of each stride-th chunk */
-	size_t *sb_offset;    /* [n_sb] base-relative byte offset of it */
-	size_t *sb_prefix;    /* [n_sb] cumulative SET bits BEFORE it */
+	uint64_t total;       /* set bits in the whole map */
+	bool small;           /* map was in small-set mode (no directory) */
+	size_t n_grp;         /* groups of 16 chunks */
+	uint64_t *g_start;    /* [n_grp] start of each group's first chunk */
+	uint64_t *g_set;      /* [n_grp] set bits before it */
+	size_t *g_offset;     /* [n_grp] its base-relative byte offset */
+	size_t *g_wide;       /* [n_grp] slot in w_*, or SIZE_MAX */
+	uint64_t *c_rel;      /* [count] packed per-chunk deltas */
+	size_t n_wide;        /* groups stored in w_start / w_set */
+	uint64_t *w_start;    /* [16 n_wide] absolute starts, wide groups */
+	uint64_t *w_set;      /* [16 n_wide] absolute set prefixes */
 } sm_locator_t;
 
 /** Sentinel value returned when a lookup finds no matching bit. */
@@ -1109,41 +1117,52 @@ void sm_select_many(const sm_t *map, const uint64_t *ks, uint64_t *out,
 uint64_t sm_span(sm_t *map, uint64_t start, size_t len, bool value);
 
 /* -------------------------------------------------------------------
- * sqrt(n) locator: transient O(sqrt n) contains / rank / select
+ * Locator: transient O(log chunks) contains / rank / select
  * ------------------------------------------------------------------- */
 
-/** @brief Build a transient sqrt(n) locator over \a map.
+/** @brief Build a transient chunk directory over \a map.
  *
- * O(chunk count) one-pass build.  The returned locator accelerates
- * sm_locator_contains / _rank / _select to O(sqrt n).  See
- * sm_locator_t for the (re)build-on-mutation contract.
+ * One O(chunk count) pass.  The returned locator answers
+ * sm_locator_contains / _rank / _select in O(log chunks).  It costs about 10 bytes per chunk, plus 16 more per
+ * chunk in any group of 16 chunks that spans over 2^27 bits (those store
+ * absolute values).  See sm_locator_t for the rebuild-on-mutation
+ * contract.
  *
- * @param[in] map  The sparsemap to index.
+ * @param[in] map  The sparsemap to index.  It must outlive the locator.
  * @returns A heap-allocated locator (free with sm_locator_free), or
- *          NULL on allocation failure or when \a map is NULL/empty.
+ *          NULL on allocation failure or when \a map is NULL or a
+ *          chunk-mode map with no chunks.  A small-set map gets a
+ *          locator that queries its words directly.
  */
 sm_locator_t *sm_locator_build(const sm_t *map);
 
 /** @brief Release a locator built by sm_locator_build (NULL-safe). */
 void sm_locator_free(sm_locator_t *loc);
 
-/** @brief O(sqrt n) membership test; equals sm_contains(map, idx, NULL). */
+/** @brief O(log chunks) membership test; equals sm_contains(map, idx, NULL).
+ *
+ * A NULL locator contains nothing.
+ */
 bool sm_locator_contains(const sm_locator_t *loc, uint64_t idx);
 
-/** @brief O(sqrt n) rank over inclusive [lo, hi]; equals sm_rank.
+/** @brief O(log chunks) rank over inclusive [lo, hi]; equals sm_rank.
  *
- * For value == true this uses the superblock prefix directory.  For
- * value == false it falls back to the plain sm_rank path (correct, not
- * accelerated).
+ * Two directory lookups.  For value == false the answer is the range
+ * width minus the set count, saturated at SIZE_MAX for the full 2^64
+ * range exactly as sm_rank saturates it.  lo > hi gives 0; a NULL
+ * locator gives 0.
  */
 size_t sm_locator_rank(const sm_locator_t *loc, uint64_t lo, uint64_t hi,
     bool value);
 
-/** @brief O(sqrt n) select; equals sm_select(map, n, value).
+/** @brief O(log chunks) select of the \a n'th (0-based) matching bit.
  *
- * For value == true this uses the superblock prefix directory.  For
- * value == false it falls back to the plain sm_select path (correct,
- * not accelerated).
+ * For value == true this equals sm_select(map, n, true): the position
+ * of the n-th set bit, or SM_IDX_MAX when the map has n or fewer.
+ * For value == false it is the position of the n-th unset bit in
+ * [0, 2^64 - 1), counting the gaps between and after chunks and the
+ * positions a chunk does not cover; SM_IDX_MAX when there is none.
+ * A NULL locator gives SM_IDX_MAX.
  */
 uint64_t sm_locator_select(const sm_locator_t *loc, uint64_t n, bool value);
 
