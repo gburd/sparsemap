@@ -2035,50 +2035,48 @@ CASE(test_xor_inplace)
 }
 
 /*
- * Sparse chunks built by the normal add path always carry full
- * capacity: SM_PAYLOAD_NONE is never written into a descriptor by any
- * code path (instrumenting the whole suite showed the
- * `capacity < SM_CHUNK_MAX_CAPACITY` guard in __sparsemap_add taken 0
- * times out of 8.1 million reachings).  The reduced-capacity branch
- * and __sm_chunk_increase_capacity underneath it are therefore
- * reachable only from a buffer the library did not build itself --
- * i.e. sm_open / sm_open_copy on untrusted or corrupted bytes.  That
- * makes them hardening code, not dead code, so pin the behaviour with
- * a hand-crafted buffer rather than deleting it.
+ * Sparse chunks built by the add path always carry full capacity; only
+ * sm_offset and crafted bytes give a chunk SM_PAYLOAD_NONE slots.  Pin
+ * the reduced-capacity branch of __sm_map_set and
+ * __sm_chunk_increase_capacity underneath it with a hand-crafted
+ * buffer.  The chunk holds a member: an open drops a chunk with none.
  */
 CASE(test_open_reduced_capacity_chunk)
 {
-    /* One sparse chunk at start 0 whose flag 0 is SM_PAYLOAD_NONE
-     * (0b01), so the chunk advertises less than the maximum capacity.
-     * Layout: [chunk count][chunk start][descriptor], each a host-order
-     * 64-bit word -- sm_open consumes the in-memory representation, not
-     * the serialized wire format, so write these with memcpy from
-     * uint64_t rather than poking individual bytes (which assumed a
-     * little-endian layout and failed on sparc). */
+    /* One sparse chunk at start 0 whose flag 30 is SM_PAYLOAD_NONE
+     * (0b01), so the chunk advertises a capacity of 1984, and whose
+     * flag 0 is MIXED with bit 5 set.  Layout: [chunk count][chunk
+     * start][descriptor][payload], each a host-order 64-bit word --
+     * sm_open consumes the in-memory representation, not the serialized
+     * wire format, so write these with memcpy from uint64_t rather than
+     * poking individual bytes (which assumed a little-endian layout and
+     * failed on sparc). */
     uint8_t buf[512];
     memset(buf, 0, sizeof(buf));
     const uint64_t count = 1;        /* one chunk */
     const uint64_t start = 0;        /* at bit 0 */
-    const uint64_t desc = 1ULL;      /* flag 0 = 01 = SM_PAYLOAD_NONE */
+    const uint64_t desc = (1ULL << 60) | 2ULL; /* flag 30 NONE, 0 MIXED */
+    const uint64_t word = 1ULL << 5;
     memcpy(buf + 0, &count, sizeof(count));
     memcpy(buf + 8, &start, sizeof(start));
     memcpy(buf + 16, &desc, sizeof(desc));
+    memcpy(buf + 24, &word, sizeof(word));
 
-    sm_t *m = sm_open_copy(buf, sizeof(buf), 256);
+    sm_t *m = sm_open_copy(buf, 32, 256);
     EXPECT(m != NULL, "crafted reduced-capacity buffer opens");
-    EXPECT(sm_cardinality(m) == 0, "no bits set in crafted chunk");
+    EXPECT(sm_cardinality(m) == 1, "one bit set in crafted chunk");
 
-    /* Adding a bit that fits inside SM_CHUNK_MAX_CAPACITY forces the
-     * chunk's NONE flags to be cleared so the capacity can grow. */
-    EXPECT(sm_add(m, 100) == 100, "add into reduced-capacity chunk");
-    EXPECT(sm_contains(m, 100, NULL), "bit present after capacity grow");
-    EXPECT(sm_cardinality(m) == 1, "exactly one bit set");
+    EXPECT(sm_add(m, 100) == 100, "add inside the reduced capacity");
+    EXPECT(sm_contains(m, 100, NULL), "bit present");
+    EXPECT(sm_cardinality(m) == 2, "two bits set");
 
-    /* The grown chunk must still behave normally. */
+    /* Adding a bit past the reduced capacity but inside the window
+     * forces the chunk's NONE flags to be cleared so the capacity can
+     * grow. */
     EXPECT(sm_add(m, 101) == 101, "second add");
     EXPECT(sm_add(m, 2047) == 2047, "add at chunk's last index");
-    EXPECT(sm_cardinality(m) == 3, "three bits set");
-    EXPECT(sm_minimum(m) == 100, "minimum correct");
+    EXPECT(sm_cardinality(m) == 4, "four bits set");
+    EXPECT(sm_minimum(m) == 5, "minimum correct");
     EXPECT(sm_maximum(m) == 2047, "maximum correct");
     EXPECT(sm_validate(m), "map still structurally valid");
 

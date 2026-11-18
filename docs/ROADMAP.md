@@ -26,10 +26,14 @@ Python binding wraps the Rust crate.
 These are closed.  Reopening any of them needs new evidence, not a
 preference.
 
-- **Scalar only, no SIMD.**  See the SIMD section of `README.md` for the
-  measurements.  `-O3 -march=native` already auto-vectorizes five loops
-  and buys only ~6-13% on set operations, which is the same order as the
-  gather overhead a hand-written kernel would have to repay first.
+- **Compile-time SIMD for the set-op kernels.**  `sm_union` /
+  `sm_intersection` / `sm_difference` use hand-written AVX2/SSE2
+  intrinsics for the 32-word chunk loops, selected by `__AVX2__` /
+  `__SSE2__` at compile time with a scalar `#else` fallback (so ARM /
+  RISC-V / s390x / SPARC still build unchanged).  No runtime dispatch,
+  no wire-format change.  A wire-format SIMD extension (aligned
+  contiguous-bitvec payloads) was analysed and is **not planned** — see
+  the SIMD section of `README.md`.
 - **Not thread-safe, and not becoming so.**  Concurrent readers of an
   unmutated map are fine; mutation needs external synchronisation.  The
   `experiment/thread-safe` branch is a 2024 archive.
@@ -123,14 +127,13 @@ valid.  Commit the `cargo-fuzz` target.  *Accept:* zero panics in a
 30 min `overflow-checks = true` campaign, and the review's release-mode
 wrong-answer reproducers are rejected.
 
-**S7. Wire-format truth.**  The format is host-endian: a big-endian
-writer and a little-endian reader reject each other's files.  The
-header comment in `sm.h` documents the wrong magic and version, and
-`docs/ARCHITECTURE.md` wrongly says the reader byte-swaps.  Make the
-documentation match the code and state plainly that serialized maps
-are portable only between hosts of the same byte order.  (Implementing
-cross-endian reads is a wire-format change and is deferred; see
-section 5.)  Pin the endianness behaviour with a test.
+**S7. Wire-format truth.**  The format is host-endian, and the
+documentation now says so.  Done in 5.9.0: `sm_deserialize` also
+reads a stream from the other byte order.  Every body field is a
+64-bit word, so the reader byte-swaps each one when the header's
+endian flag differs from the host and then validates as usual; the
+writer and wire version 2 are unchanged.  `tests/test_wire_endian.c`
+pins the behaviour.
 
 **S8. CI supply chain.**  The hegel job downloads `libhegel.so` and
 `hegel.h` without verifying them, although `flake.nix` pins the same
@@ -215,10 +218,6 @@ not part of the automated matrix.
 
 ### 5. Deferred, with a reason
 
-- **Cross-endian deserialization** -- the format is host-endian (see
-  S7).  Supporting byte-swapped reads is a wire-format version bump
-  and a second decoder path; do it when a consumer actually moves
-  serialized maps between byte orders.
 - **An aligned-alloc hook in `sm_allocator_t`** -- only needed if SIMD
   work ever happens, and adding it now would be a speculative API slot.
 - **`sm_shrink_to_fit`** -- no consumer has asked; `sm_owned_copy`

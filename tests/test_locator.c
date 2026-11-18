@@ -22,7 +22,9 @@
  *      step (sm_prev_member re-walks from chunk 0 for each step back);
  *   6. structural staleness: after a mutation that inserts or removes a
  *      chunk, the locator's fingerprint check notices and the queries fall
- *      back to the plain path on the live map, so they stay correct.
+ *      back to the plain path on the live map, so they stay correct;
+ *   7. empty maps: a fresh map, and maps emptied out of small-set and out
+ *      of chunk mode, all get a locator that answers as the empty map.
  *
  * A mutation that flips a bit inside an existing chunk without moving any
  * bytes is NOT detected (sm_t has no change counter); the contract in sm.h
@@ -722,13 +724,46 @@ structural(void)
 	return (0);
 }
 
+/*
+ * Every empty map gets a locator that answers as the empty map: a fresh
+ * one, one emptied out of small-set mode, and one emptied out of chunk
+ * mode.  Through the 5.9 candidate an emptied small map's locator
+ * returned SM_IDX_MAX for select0, and the other two got NULL.
+ */
+static int
+empties(void)
+{
+	sm_t *m[3];
+	set_t none = { 0 };
+	int i;
+
+	m[0] = sm_create(1024);
+	m[1] = sm_create(1024);
+	m[2] = sm_create(4096);
+	sm_add(m[1], 5);
+	sm_remove(m[1], 5);
+	sm_add(m[2], 1 << 20);
+	sm_remove(m[2], 1 << 20);
+	for (i = 0; i < 3; i++) {
+		char what[32];
+		sm_locator_t *loc = sm_locator_build(m[i]);
+
+		snprintf(what, sizeof(what), "empty map %d", i);
+		CHECK(loc != NULL, "%s: build", what);
+		CHECK(sm_locator_select(loc, 7, false) == 7,
+		    "%s: select0(7)", what);
+		sm_locator_free(loc);
+		if (check_fresh(m[i], &none, what) != 0)
+			return (1);
+		sm_free(m[i]);
+	}
+	return (0);
+}
+
 static int
 nulls(void)
 {
-	sm_t *m = sm_create(1024);
-
 	CHECK(sm_locator_build(NULL) == NULL, "build(NULL)");
-	CHECK(sm_locator_build(m) == NULL, "build(empty)");
 	CHECK(!sm_locator_contains(NULL, 5), "contains(NULL)");
 	CHECK(sm_locator_rank(NULL, 0, 9, true) == 0, "rank(NULL)");
 	CHECK(sm_locator_select(NULL, 0, true) == SM_IDX_MAX, "select(NULL)");
@@ -739,15 +774,14 @@ nulls(void)
 	CHECK(sm_locator_prev_member(NULL, SM_IDX_MAX) == SM_IDX_MAX,
 	    "prev(NULL)");
 	sm_locator_free(NULL);
-	sm_free(m);
 	return (0);
 }
 
 int
 main(void)
 {
-	if (nulls() != 0 || fresh() != 0 || huge_runs() != 0 || cost() != 0 ||
-	    structural() != 0)
+	if (nulls() != 0 || empties() != 0 || fresh() != 0 ||
+	    huge_runs() != 0 || cost() != 0 || structural() != 0)
 		return (1);
 	printf("test_locator: ok\n");
 	return (0);

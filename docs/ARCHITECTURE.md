@@ -68,9 +68,14 @@ Layout in the data buffer:
 
 Each chunk's *start offset* is an absolute bit index, aligned to a
 chunk-capacity boundary.  Chunks are stored in increasing-offset
-order so binary search and merge-style algorithms work.  Duplicate
-or out-of-order start offsets are a corrupt map: `sm_validate()`
-rejects them, and the readers assume the ordering.
+order so merge-style algorithms (the set operations) can walk two maps
+in step.  The stream cannot be binary-searched: chunks vary in size,
+so the only way to reach chunk k is to walk chunks 0 through k - 1.
+Lookups, rank and select are therefore O(chunks).  Binary search
+exists only through the optional `sm_locator_t`, which records the
+start and byte offset of every sqrt(n)-th chunk.  Duplicate or
+out-of-order start offsets are a corrupt map: `sm_validate()` rejects
+them, and the readers assume the ordering.
 
 The count and the start offsets were 4 bytes each before v4.0.0,
 which silently truncated any index at or above 2^32.  Both are
@@ -114,8 +119,8 @@ contract and [MIGRATION.md](MIGRATION.md) for what changed in v1.
 front of the internal buffer.  The header records the format version,
 the writer's byte order, and the cardinality; the body is the internal
 `m_data` layout copied verbatim.  The magic and body are written with
-native `memcpy`, so **the stream is host-endian, not portable across
-byte orders** -- see the reader rules below.
+native `memcpy`, so **the stream is host-endian**; the reader converts
+a stream from the other byte order (see the reader rules below).
 
 ```
   offset 0   [4 bytes]  magic 0x30316d73 ("sm10"); a little-endian writer
@@ -131,13 +136,18 @@ byte orders** -- see the reader rules below.
 The 16-byte header is `SM_WIRE_HEADER_LEN`.  Version 1 used 4-byte
 chunk counts and start offsets; version 2 widened both to 8 bytes to
 fix silent truncation at indices >= 2^32.  A reader checks the magic,
-rejects an unknown version, and then compares the writer's endianness
-flag against the host: **if they disagree it rejects the file and
-returns NULL** -- it does not byte-swap the body.  Serialized maps are
-therefore portable only between hosts of the **same** byte order
-(verified x86_64 <-> sparcv9).  Cross-endian reads are a deferred
-wire-format change, not current behaviour; see
-[ROADMAP.md](ROADMAP.md) section 5.
+rejects an unknown version, and checks that the magic bytes are in the
+order the endianness flag claims.  When the flag differs from the
+host it byte-swaps every 8-byte word of the body, which is exact
+because every body field (chunk count or small-set header, chunk
+start, descriptor, payload word, small-set word) is a 64-bit word.  A
+foreign body that is not a whole number of words is rejected.  The
+converted body is then validated exactly like a native one, so
+serialized maps move between byte orders in either direction.  The
+cardinality at offset 8 is a hint the reader does not use.
+
+`sm_open()` and `sm_open_copy()` take the raw body without the
+header, so they have no flag to consult and read host order only.
 
 The C and Rust implementations are not required to produce
 byte-identical streams, only mutually readable ones on a host of a

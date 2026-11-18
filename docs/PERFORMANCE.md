@@ -206,7 +206,7 @@ it by walking all chunks with popcount.
 
 ### Where sparsemap excels
 
-- **Memory efficiency**: Best-in-class for 7/8 patterns. RLE encoding
+- **Memory efficiency**: smaller than CRoaring for 7/8 patterns. RLE encoding
   achieves 48-68 bytes for dense/block patterns (100-170x smaller than
   CRoaring).
 - **Iteration**: Fastest across all patterns (1.4-4.3x faster than CRoaring).
