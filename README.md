@@ -35,11 +35,10 @@ chunk it picks one of two encodings depending on the local pattern:
 And, for sets that hug the low end of the universe, a third mode
 sits below the chunk layer entirely:
 
-- **Small-set mode** stores a bare `uint64` word array from bit 0 --
-  exactly PostgreSQL's `Bitmapset` layout -- behind the same 8-byte
-  header the chunk form uses, so a near-zero set carries none of the
-  per-chunk addressing overhead.  `{0}` and `{0..63}` are 16 bytes,
-  matching `Bitmapset`; `{5, 70}` is 24.  A map stays in small mode
+- **Small-set mode** stores a bare `uint64` word array from bit 0
+  behind the same 8-byte header the chunk form uses, so a near-zero set
+  carries none of the per-chunk addressing overhead.  `{0}` and
+  `{0..63}` are 16 bytes; `{5, 70}` is 24.  A map stays in small mode
   while its largest index is below a small cap (1024 bits) and
   **transitions automatically to chunk mode** when an index grows past
   it, then **demotes back** when removals bring the set back down.  The
