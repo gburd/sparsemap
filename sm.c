@@ -9725,8 +9725,8 @@ sm_validate(const sm_t *map)
 		}
 		/* (d) [start, start + capacity) must not overlap the span of
 		 * the preceding chunk.  prev_end == 0 means the previous chunk
-		 * reached 2^64; ascending starts already forbid a follower. */
-		if (!first && prev_end != 0 && start < prev_end) {
+		 * reached 2^64, so every later start lies inside it. */
+		if (!first && (prev_end == 0 || start < prev_end)) {
 			return (false);
 		}
 		p += SM_SIZEOF_OVERHEAD + chunk_size;

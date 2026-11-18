@@ -169,6 +169,27 @@ main(void)
 	}
 	CHECK(reject("overlapping spans", o) == 0);
 
+	/* (d) a chunk after one that reaches 2^64: RLE start 2^64 - 8192,
+	 * cap 8192, then a sparse chunk at 2^64 - 6144, inside that span.
+	 * Through 5.8.5 the overlap test was skipped when the previous
+	 * end wrapped to 0, and sm_or produced exactly this map. */
+	memset(body, 0, sizeof body);
+	o = put(0, 2);
+	o = put(o, UINT64_MAX - 8191);
+	{
+		uint64_t rle = (1ULL << 62) | ((uint64_t)8192 << 31) | 8191;
+		o = put(o, rle);
+	}
+	o = put(o, UINT64_MAX - 6143);
+	o = put(o, 3);
+	CHECK(reject("chunk after the 2^64 end", o) == 0);
+	{
+		/* 5.8.5 accepted it as valid, so reject() alone cannot tell. */
+		sm_t *m = sm_open_copy(body, o, 64);
+		CHECK(m == NULL || sm_is_empty(m));
+		sm_free(m);
+	}
+
 	/* A legitimate map at the very top of the index space must NOT be
 	 * rejected: the last valid chunk ends exactly at 2^64. */
 	{
