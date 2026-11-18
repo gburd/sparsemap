@@ -220,6 +220,8 @@ header itself.
 | `sm_locator_build()` | Build a transient chunk directory over \a map. |
 | `sm_locator_contains()` | O(log chunks) membership test; equals sm_contains(map, idx, NULL). |
 | `sm_locator_free()` | Release a locator built by sm_locator_build (NULL-safe). */ |
+| `sm_locator_next_member()` | O(log chunks) successor; equals sm_next_member(map, x, NULL). |
+| `sm_locator_prev_member()` | O(log chunks) predecessor; equals sm_prev_member(map, x, NULL). |
 | `sm_locator_rank()` | O(log chunks) rank over inclusive [lo, hi]; equals sm_rank. |
 | `sm_locator_select()` | O(log chunks) select of the \a n'th (0-based) matching bit. |
 | `sm_maximum()` | Return the position of the last set bit (maximum). |

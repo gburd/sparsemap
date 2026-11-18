@@ -6,17 +6,21 @@
  * Checks:
  *   1. fresh: on many maps (empty, small-set, sparse, clustered, RLE runs,
  *      gaps, members at chunk boundaries, members near 2^64) a freshly
- *      built locator answers contains / rank / select1 exactly as the
- *      plain functions do and as the oracle does;
+ *      built locator answers contains / rank / select1 / next / prev
+ *      exactly as the plain functions do and as the oracle does;
  *   2. select0: the n-th unset bit agrees with the sorted-array oracle on
  *      every map and with a bit-array oracle on maps below 2^24, and
  *      select0(rank0(0, x - 1)) == x for every unset probe x.  Plain
  *      sm_select(map, n, false) is wrong across chunk gaps in 5.8.5, so
  *      it is not used as an oracle;
- *   3. huge runs: RLE runs of nearly 2^31 bits, so one group of chunks
+ *   3. scans: a forward scan with sm_locator_next_member and a reverse scan
+ *      with sm_locator_prev_member each visit exactly the oracle's members;
+ *   4. huge runs: RLE runs of nearly 2^31 bits, so one group of chunks
  *      spans too far for the compact per-chunk record, checked against an
  *      interval oracle;
- *   4. structural staleness: after a mutation that inserts or removes a
+ *   5. cost: a reverse scan over 20,000 one-member chunks is O(log n) per
+ *      step (sm_prev_member re-walks from chunk 0 for each step back);
+ *   6. structural staleness: after a mutation that inserts or removes a
  *      chunk, the locator's fingerprint check notices and the queries fall
  *      back to the plain path on the live map, so they stay correct.
  *
@@ -30,6 +34,20 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+
+#if defined(__SANITIZE_ADDRESS__) || defined(SM_COVERAGE_BUILD)
+#define SCAN_CEILING_MS 2000.0
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer) ||                                       \
+    __has_feature(undefined_behavior_sanitizer)
+#define SCAN_CEILING_MS 2000.0
+#else
+#define SCAN_CEILING_MS 250.0
+#endif
+#else
+#define SCAN_CEILING_MS 250.0
+#endif
 
 #define CHECK(c, ...)                                                        \
 	do {                                                                 \
@@ -154,6 +172,29 @@ o_select0(const set_t *s, uint64_t k)
 	return (k + lo);
 }
 
+/* The first member above x, or SM_IDX_MAX (x == SM_IDX_MAX: the first). */
+static uint64_t
+o_next(const set_t *s, uint64_t x)
+{
+	size_t i;
+
+	if (x == SM_IDX_MAX)
+		return (s->n ? s->v[0] : SM_IDX_MAX);
+	i = o_below(s, x);
+	if (i < s->n && s->v[i] == x)
+		i++;
+	return (i < s->n ? s->v[i] : SM_IDX_MAX);
+}
+
+/* The last member below x, or SM_IDX_MAX. */
+static uint64_t
+o_prev(const set_t *s, uint64_t x)
+{
+	size_t i = o_below(s, x);
+
+	return (i ? s->v[i - 1] : SM_IDX_MAX);
+}
+
 /*
  * Build one map shape into m (grown as needed) and the oracle.  Shapes:
  * 0 small-set, 1 uniform sparse, 2 clustered, 3 RLE runs with gaps,
@@ -200,7 +241,8 @@ build(int shape, set_t *s)
 			if (!sm_add_range(m, base, base + len)) {
 				m = sm_set_data_size(m, NULL,
 				    sm_get_capacity(m) * 2 + 4096);
-				if (m == NULL || !sm_add_range(m, base, base + len))
+				if (m == NULL ||
+				    !sm_add_range(m, base, base + len))
 					exit(2);
 			}
 			base += len + rnd() % 20000;
@@ -343,11 +385,35 @@ check_select0(const sm_locator_t *loc, const set_t *s, const uint64_t *p,
 			if (k % 7 == 0 || x + 3000 > nb)
 				CHECK(sm_locator_select(loc, k, false) == x,
 				    "%s select0(%llu) bit oracle %llu", what,
-				    (unsigned long long)k, (unsigned long long)x);
+				    (unsigned long long)k,
+				    (unsigned long long)x);
 			k++;
 		}
 		free(bits);
 	}
+	return (0);
+}
+
+/* A full forward and a full reverse scan visit exactly the members. */
+static int
+check_scans(const sm_locator_t *loc, const set_t *s, const char *what)
+{
+	uint64_t x = SM_IDX_MAX;
+	size_t i;
+
+	for (i = 0; i < s->n; i++) {
+		x = sm_locator_next_member(loc, x);
+		CHECK(x == s->v[i], "%s forward scan step %zu", what, i);
+	}
+	CHECK(sm_locator_next_member(loc, x) == SM_IDX_MAX,
+	    "%s forward scan end", what);
+	x = SM_IDX_MAX;
+	for (i = s->n; i > 0; i--) {
+		x = sm_locator_prev_member(loc, x);
+		CHECK(x == s->v[i - 1], "%s reverse scan step %zu", what, i);
+	}
+	CHECK(sm_locator_prev_member(loc, x) == SM_IDX_MAX,
+	    "%s reverse scan end", what);
 	return (0);
 }
 
@@ -397,8 +463,19 @@ check_fresh(sm_t *m, const set_t *s, const char *what)
 			    "%s rank0 oracle", what);
 		CHECK(sm_locator_rank(loc, hi, lo, true) == (lo == hi ? r1 : 0),
 		    "%s inverted range", what);
+		CHECK(sm_locator_next_member(loc, x) == o_next(s, x),
+		    "%s next(%llu)", what, (unsigned long long)x);
+		CHECK(sm_locator_prev_member(loc, x) == o_prev(s, x),
+		    "%s prev(%llu)", what, (unsigned long long)x);
+		if (i % 32 == 0) {
+			CHECK(sm_next_member(m, x, NULL) == o_next(s, x),
+			    "%s plain next", what);
+			CHECK(sm_prev_member(m, x, NULL) == o_prev(s, x),
+			    "%s plain prev", what);
+		}
 	}
-	if (check_select0(loc, s, p, np, what) != 0)
+	if (check_select0(loc, s, p, np, what) != 0 ||
+	    check_scans(loc, s, what) != 0)
 		return (1);
 	for (k = 0; k <= s->n; k += 1 + (s->n > 3000 ? rnd() % 64 : 0)) {
 		const uint64_t want = k < s->n ? s->v[k] : SM_IDX_MAX;
@@ -440,7 +517,8 @@ fresh(void)
  * members and a short run, checked against an interval oracle.  The
  * chunks sit in one group of 16 that spans far more than the 2^27 bits a
  * compact per-chunk record can express, so the group is stored with
- * absolute values (wide), and the set-bit prefixes inside it pass 2^32.  Each run stays below 2^31 bits and the runs do not touch: on
+ * absolute values (wide), and the set-bit prefixes inside it pass 2^32.
+ * Each run stays below 2^31 bits and the runs do not touch: on
  * 5.8.5 sm_add_range truncates a longer run to its low 31 bits (a
  * separate defect), and adjacent runs coalesce into one.
  */
@@ -493,6 +571,15 @@ huge_runs(void)
 			    "huge rank %llu", (unsigned long long)x);
 			CHECK(sm_locator_rank(loc, 0, x, false) == x + 1 - upto,
 			    "huge rank0 %llu", (unsigned long long)x);
+			CHECK(sm_locator_next_member(loc, x) ==
+			        (x + 1 < lo ? lo : x + 1 < hi ? x + 1
+			                    : r + 1 < niv ? iv[r + 1][0]
+			                                  : SM_IDX_MAX),
+			    "huge next %llu", (unsigned long long)x);
+			CHECK(sm_locator_prev_member(loc, x) ==
+			        (x > hi ? hi - 1 : x > lo ? x - 1
+			                 : r ? iv[r - 1][1] - 1 : SM_IDX_MAX),
+			    "huge prev %llu", (unsigned long long)x);
 		}
 		/* The first, a middle and the last member of the run. */
 		CHECK(sm_locator_select(loc, before[r], true) == lo,
@@ -504,9 +591,11 @@ huge_runs(void)
 		    "huge select1 last of %zu", r);
 		/* Unset bits before lo number lo - before[r]: the gap's first
 		 * and last unset positions. */
-		CHECK(sm_locator_select(loc, gap_lo - before[r], false) == gap_lo,
+		CHECK(sm_locator_select(loc, gap_lo - before[r], false) ==
+		        gap_lo,
 		    "huge select0 gap start %zu", r);
-		CHECK(sm_locator_select(loc, lo - 1 - before[r], false) == lo - 1,
+		CHECK(sm_locator_select(loc, lo - 1 - before[r], false) ==
+		        lo - 1,
 		    "huge select0 gap end %zu", r);
 		CHECK(sm_locator_select(loc, lo - before[r], false) == hi,
 		    "huge select0 after run %zu", r);
@@ -515,6 +604,51 @@ huge_runs(void)
 	    "huge select1 past the end");
 	sm_locator_free(loc);
 	sm_free(m);
+	return (0);
+}
+
+static double
+now_ms(void)
+{
+	struct timespec t;
+
+	clock_gettime(CLOCK_MONOTONIC, &t);
+	return ((double)t.tv_sec * 1e3 + (double)t.tv_nsec / 1e6);
+}
+
+/* A reverse scan over 20,000 one-member chunks.  sm_prev_member walks
+ * from chunk 0 for each step back to an earlier chunk, about 2e8 chunk
+ * steps here; the locator does each step in O(log chunks). */
+static int
+cost(void)
+{
+	const uint64_t nmem = 20000;
+	uint64_t i, x = SM_IDX_MAX, *ids = malloc(nmem * sizeof(uint64_t));
+	sm_t *m = sm_create(256);
+	sm_locator_t *loc;
+	double t0, ms;
+
+	if (m == NULL || ids == NULL)
+		return (1);
+	for (i = 0; i < nmem; i++)
+		ids[i] = i * 3 * CHUNK + 7;
+	CHECK(sm_add_many_grow(&m, ids, nmem), "build");
+	loc = sm_locator_build(m);
+	CHECK(loc != NULL, "locator");
+	t0 = now_ms();
+	for (i = nmem; i > 0; i--) {
+		x = sm_locator_prev_member(loc, x);
+		CHECK(x == ids[i - 1], "reverse step %llu",
+		    (unsigned long long)i);
+	}
+	ms = now_ms() - t0;
+	CHECK(ms < SCAN_CEILING_MS, "reverse scan of %llu chunks took %.3f ms",
+	    (unsigned long long)nmem, ms);
+	printf("reverse scan over %llu chunks: %.3f ms\n",
+	    (unsigned long long)nmem, ms);
+	sm_locator_free(loc);
+	sm_free(m);
+	free(ids);
 	return (0);
 }
 
@@ -557,14 +691,23 @@ structural(void)
 			break;
 		}
 		for (k = 0; k < 400; k++) {
-			const uint64_t q = (k % 2) ? x + k / 2 - 100
-			                           : rnd() % ((n + 101) * 5 * CHUNK);
+			const uint64_t span = (n + 101) * 5 * CHUNK;
+			const uint64_t q =
+			    (k % 2) ? x + k / 2 - 100 : rnd() % span;
 			CHECK(sm_locator_contains(loc, q) ==
 			        sm_contains(m, q, NULL),
 			    "stale contains %llu", (unsigned long long)q);
 			CHECK(sm_locator_rank(loc, 0, q, true) ==
 			        sm_rank(m, 0, q, true),
 			    "stale rank %llu", (unsigned long long)q);
+			if (k % 16 == 0) {
+				CHECK(sm_locator_next_member(loc, q) ==
+				        sm_next_member(m, q, NULL),
+				    "stale next %llu", (unsigned long long)q);
+				CHECK(sm_locator_prev_member(loc, q) ==
+				        sm_prev_member(m, q, NULL),
+				    "stale prev %llu", (unsigned long long)q);
+			}
 		}
 		for (k = 0; k <= n; k += 1 + rnd() % 8)
 			CHECK(sm_locator_select(loc, k, true) ==
@@ -588,7 +731,10 @@ nulls(void)
 	CHECK(sm_locator_select(NULL, 0, true) == SM_IDX_MAX, "select(NULL)");
 	CHECK(sm_locator_select(NULL, 0, false) == SM_IDX_MAX,
 	    "select0(NULL)");
-
+	CHECK(sm_locator_next_member(NULL, SM_IDX_MAX) == SM_IDX_MAX,
+	    "next(NULL)");
+	CHECK(sm_locator_prev_member(NULL, SM_IDX_MAX) == SM_IDX_MAX,
+	    "prev(NULL)");
 	sm_locator_free(NULL);
 	sm_free(m);
 	return (0);
@@ -597,7 +743,7 @@ nulls(void)
 int
 main(void)
 {
-	if (nulls() != 0 || fresh() != 0 || huge_runs() != 0 ||
+	if (nulls() != 0 || fresh() != 0 || huge_runs() != 0 || cost() != 0 ||
 	    structural() != 0)
 		return (1);
 	printf("test_locator: ok\n");

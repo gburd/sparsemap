@@ -301,6 +301,8 @@ typedef SSIZE_T ssize_t;
 #define sm_locator_build            SM__P(sm_locator_build)
 #define sm_locator_contains         SM__P(sm_locator_contains)
 #define sm_locator_free             SM__P(sm_locator_free)
+#define sm_locator_next_member      SM__P(sm_locator_next_member)
+#define sm_locator_prev_member      SM__P(sm_locator_prev_member)
 #define sm_locator_rank             SM__P(sm_locator_rank)
 #define sm_locator_select           SM__P(sm_locator_select)
 #define sm_locator_t                SM__P(sm_locator_t)
@@ -525,7 +527,7 @@ typedef struct sm_cursor_cached {
  * chunk starts, its byte offset, and how many set bits precede it, in two
  * levels: an absolute record per 16 chunks and a packed 8-byte delta
  * record per chunk, about 10 bytes per chunk in all.  contains / rank /
- * select then run in O(log chunks) instead of O(chunks).
+ * select / next / prev then run in O(log chunks) instead of O(chunks).
  * Nothing here is serialized and sm_t is unchanged.
  *
  * Contract:
@@ -542,7 +544,8 @@ typedef struct sm_cursor_cached {
  *     chunk starts, and the cardinality cache when it was populated at
  *     build time) with the one recorded at build time.  A mismatch
  *     means the map's shape changed, and the query falls back to the
- *     plain sm_contains / sm_rank / sm_select path on the live map.  This catches a mutation
+ *     plain sm_contains / sm_rank / sm_select / sm_next_member /
+ *     sm_prev_member path on the live map.  This catches a mutation
  *     that inserts, removes, or moves a chunk, but not one that flips a
  *     bit inside an existing chunk without moving any bytes: sm_t has
  *     no change counter, so that case cannot be detected in O(1).  Do
@@ -1117,13 +1120,14 @@ void sm_select_many(const sm_t *map, const uint64_t *ks, uint64_t *out,
 uint64_t sm_span(sm_t *map, uint64_t start, size_t len, bool value);
 
 /* -------------------------------------------------------------------
- * Locator: transient O(log chunks) contains / rank / select
+ * Locator: transient O(log chunks) contains / rank / select / next / prev
  * ------------------------------------------------------------------- */
 
 /** @brief Build a transient chunk directory over \a map.
  *
  * One O(chunk count) pass.  The returned locator answers
- * sm_locator_contains / _rank / _select in O(log chunks).  It costs about 10 bytes per chunk, plus 16 more per
+ * sm_locator_contains / _rank / _select / _next_member / _prev_member in
+ * O(log chunks).  It costs about 10 bytes per chunk, plus 16 more per
  * chunk in any group of 16 chunks that spans over 2^27 bits (those store
  * absolute values).  See sm_locator_t for the rebuild-on-mutation
  * contract.
@@ -1165,6 +1169,29 @@ size_t sm_locator_rank(const sm_locator_t *loc, uint64_t lo, uint64_t hi,
  * A NULL locator gives SM_IDX_MAX.
  */
 uint64_t sm_locator_select(const sm_locator_t *loc, uint64_t n, bool value);
+
+/** @brief O(log chunks) successor; equals sm_next_member(map, x, NULL).
+ *
+ * The lowest set bit strictly greater than \a prev_idx; SM_IDX_MAX as
+ * \a prev_idx means "from the start".  Each call is independent, so a
+ * forward scan costs O(log chunks) per member however the members are
+ * spread over chunks.
+ *
+ * @returns The next set bit, or SM_IDX_MAX if none (or a NULL locator).
+ */
+uint64_t sm_locator_next_member(const sm_locator_t *loc, uint64_t prev_idx);
+
+/** @brief O(log chunks) predecessor; equals sm_prev_member(map, x, NULL).
+ *
+ * The highest set bit strictly less than \a prev_idx; SM_IDX_MAX as
+ * \a prev_idx means "from the end".  Unlike sm_prev_member, which walks
+ * from chunk 0 whenever it steps back to an earlier chunk, a reverse
+ * scan costs O(log chunks) per member.
+ *
+ * @returns The previous set bit, or SM_IDX_MAX if none (or a NULL
+ *          locator).
+ */
+uint64_t sm_locator_prev_member(const sm_locator_t *loc, uint64_t prev_idx);
 
 /* -------------------------------------------------------------------
  * Iteration

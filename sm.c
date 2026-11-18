@@ -12127,8 +12127,9 @@ __sm_loc_select0(const sm_locator_t *loc, uint64_t k)
 	for (v = 0; v < SM_FLAGS_PER_INDEX; v++) {
 		const uint64_t z = 64 - (uint64_t)SM_POPCOUNT64(words[v]);
 		if (rem < z) {
-			return (__sm_loc_word_select0(
-			    s + (uint64_t)v * SM_BITS_PER_VECTOR, words[v], rem));
+			const uint64_t from =
+			    s + (uint64_t)v * SM_BITS_PER_VECTOR;
+			return (__sm_loc_word_select0(from, words[v], rem));
 		}
 		rem -= z;
 	}
@@ -12177,7 +12178,10 @@ sm_locator_rank(const sm_locator_t *loc, uint64_t lo, uint64_t hi, bool value)
 	if (lo > hi) {
 		return (0);
 	}
-	set = __sm_loc_upto(loc, hi) - (lo == 0 ? 0 : __sm_loc_upto(loc, lo - 1));
+	set = __sm_loc_upto(loc, hi);
+	if (lo > 0) {
+		set -= __sm_loc_upto(loc, lo - 1);
+	}
 	if (value) {
 		return ((size_t)set);
 	}
@@ -12206,6 +12210,49 @@ sm_locator_select(const sm_locator_t *loc, uint64_t n, bool value)
 		return (__sm_loc_small_select0(loc->map, n));
 	}
 	return (__sm_loc_select0(loc, n));
+}
+
+/*
+ * sm_locator_next_member: the first set bit above prev_idx is the one
+ * whose rank is the number of set bits in [0, prev_idx].  Two directory
+ * lookups, so a scan in either direction is O(log chunks) per step even
+ * across long stretches of one-member chunks.
+ */
+uint64_t
+sm_locator_next_member(const sm_locator_t *loc, uint64_t prev_idx)
+{
+	if (__sm_locator_is_stale(loc)) {
+		__sm_assert(false);
+		return (sm_next_member(loc ? loc->map : NULL, prev_idx, NULL));
+	}
+	if (prev_idx == SM_IDX_MAX) {
+		return (__sm_loc_select1(loc, 0));
+	}
+	return (__sm_loc_select1(loc, __sm_loc_upto(loc, prev_idx)));
+}
+
+/*
+ * sm_locator_prev_member: the last set bit below prev_idx is the one
+ * whose rank is one less than the number of set bits in
+ * [0, prev_idx - 1].  SM_IDX_MAX ("from the end") is the exclusive bound
+ * 2^64 - 1, as in sm_prev_member.
+ */
+uint64_t
+sm_locator_prev_member(const sm_locator_t *loc, uint64_t prev_idx)
+{
+	uint64_t below;
+	if (__sm_locator_is_stale(loc)) {
+		__sm_assert(false);
+		return (sm_prev_member(loc ? loc->map : NULL, prev_idx, NULL));
+	}
+	if (prev_idx == 0) {
+		return (SM_IDX_MAX);
+	}
+	below = __sm_loc_upto(loc, prev_idx - 1);
+	if (below == 0) {
+		return (SM_IDX_MAX);
+	}
+	return (__sm_loc_select1(loc, below - 1));
 }
 
 /* -------------------------------------------------------------------
@@ -12358,7 +12405,8 @@ sm_select_many(const sm_t *map, const uint64_t *ks, uint64_t *out, size_t n)
 		size_t next_off;
 		__sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
 		cap = __sm_chunk_get_capacity(&chunk);
-		set = (uint64_t)__sm_chunk_rank(&rank, true, &chunk, 0, cap - 1);
+		set = (uint64_t)__sm_chunk_rank(&rank, true, &chunk, 0,
+		    cap - 1);
 
 		/* Every k in [running, running + set) is in this chunk. */
 		while (q < n && ks[q] >= running && ks[q] - running < set) {

@@ -152,7 +152,8 @@ build(int shape, set_t *s)
 			if (!sm_add_range(m, base, base + len)) {
 				m = sm_set_data_size(m, NULL,
 				    sm_get_capacity(m) * 2 + 4096);
-				if (m == NULL || !sm_add_range(m, base, base + len))
+				if (m == NULL ||
+				    !sm_add_range(m, base, base + len))
 					exit(2);
 			}
 			base += len + rnd() % 20000;
