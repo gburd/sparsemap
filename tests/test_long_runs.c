@@ -9,7 +9,8 @@
  * sm_xor, sm_extract_range, sm_add_many and the set ops' RLE paths), so
  * sm_add_range(m, 0, 2^31) gave cardinality 0; and sm_add extending an
  * RLE run one bit at a time, which grew the capacity to 2^31 - 1 and
- * then wrote length 2^31 as 0, losing the whole run.
+ * then wrote length 2^31 as 0, losing the whole run.  The same
+ * unaligned capacity let a later sm_add start a chunk inside the run.
  *
  * Every map here is a handful of RLE chunks, so the checks are run-level
  * rather than per bit: for each expected run [lo, hi), sm_rank over it is
@@ -304,6 +305,27 @@ add_one_at_a_time(void)
 	sm_free(m);
 }
 
+/*
+ * A run of 2^31 - 1 bits less its second-last bit, then that bit's
+ * neighbour past the end.  Through 5.8.5 the remove coalesced the run
+ * into one RLE chunk of capacity 2^31 - 1, which is not a multiple of
+ * 2048, and the add then started a chunk at 2^31 - 2048, inside that
+ * span: sm_validate false.
+ */
+static void
+unaligned_capacity(void)
+{
+	const uint64_t M = UINT64_C(0x7FFFFFFF);
+	const struct run r[2] = { { 0, M - 1 }, { M, M + 1 } };
+	sm_t *m = range_map(0, M);
+
+	CHECK(m != NULL && sm_remove(m, M - 1) == M - 1, "remove");
+	CHECK(m != NULL && sm_add(m, M) == M, "add");
+	CHECK(runs_are(m, r, 2, "unaligned capacity") == 0,
+	    "unaligned capacity");
+	sm_free(m);
+}
+
 int
 main(void)
 {
@@ -315,6 +337,7 @@ main(void)
 	set_ops();
 	mutations();
 	add_one_at_a_time();
+	unaligned_capacity();
 	if (failures != 0) {
 		fprintf(stderr, "test_long_runs: %d failure(s)\n", failures);
 		return (1);
