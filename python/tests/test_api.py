@@ -170,3 +170,14 @@ def test_rank_select_are_inverse():
 
 def test_repr():
     assert repr(SparseMap([1, 2])) == "SparseMap(cardinality=2)"
+
+def test_u64_max_is_never_a_member():
+    # 2**64 - 1 is the c library's not found value so no map holds it
+    top = 2**64 - 1
+    m = SparseMap([5, top])
+    assert list(m) == [5]
+    assert not m.insert(top)
+    assert top not in m
+    m.insert_range(top - 3, top)
+    assert list(m) == [5, top - 3, top - 2, top - 1]
+    assert SparseMap.from_bytes(m.to_bytes()) == m

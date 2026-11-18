@@ -246,31 +246,89 @@ fn deserialize_rejects_garbage() {
 }
 
 #[test]
-fn top_of_universe_run_is_panic_free() {
-    // A full window at the top of the universe promotes to a run ending
-    // at 2^64.  insert/coalesce, iterate, min/max/rank/select and the
-    // set operations must all handle the run end without overflowing.
+fn top_of_universe_is_panic_free() {
+    // Fill the top window [2^64 - 2048, 2^64) bit by bit.  Every bit but
+    // u64::MAX goes in, so the window stays dense (it can never become
+    // an all-ones run), and min/max/rank/select, iteration and the set
+    // operations must all handle the top window without overflowing.
     let base = u64::MAX - (CHUNK_BITS - 1);
     let mut m = SparseMap::new();
     for off in 0..CHUNK_BITS {
-        m.insert(base + off);
+        let idx = base + off;
+        assert_eq!(m.insert(idx), idx != u64::MAX);
     }
-    assert_eq!(m.cardinality(), CHUNK_BITS);
+    assert!(matches!(m.chunks.get(&base), Some(Chunk::Dense(_))));
+    assert_eq!(m.cardinality(), CHUNK_BITS - 1);
     assert_eq!(m.min(), Some(base));
-    assert_eq!(m.max(), Some(u64::MAX));
-    assert!(m.contains(u64::MAX));
+    assert_eq!(m.max(), Some(u64::MAX - 1));
+    assert!(!m.contains(u64::MAX));
     assert_eq!(m.rank(u64::MAX), CHUNK_BITS - 1);
-    assert_eq!(m.select(CHUNK_BITS - 1), Some(u64::MAX));
+    assert_eq!(m.select(CHUNK_BITS - 2), Some(u64::MAX - 1));
+    assert_eq!(m.select(CHUNK_BITS - 1), None);
     let bits: Vec<u64> = m.iter().collect();
-    assert_eq!(bits.len() as u64, CHUNK_BITS);
-    assert_eq!(*bits.last().unwrap(), u64::MAX);
+    assert_eq!(bits.len() as u64, CHUNK_BITS - 1);
+    assert_eq!(*bits.last().unwrap(), u64::MAX - 1);
     assert!(bits.windows(2).all(|w| w[0] < w[1]));
     // Set operations touch the run-merge and cursor-advance paths.
     let other: SparseMap = [base].into_iter().collect();
     assert_eq!((&m | &other), m);
     assert_eq!((&m & &other), other);
-    assert_eq!((&m - &other).cardinality(), CHUNK_BITS - 1);
-    assert_eq!((&m ^ &other).cardinality(), CHUNK_BITS - 1);
+    assert_eq!((&m - &other).cardinality(), CHUNK_BITS - 2);
+    assert_eq!((&m ^ &other).cardinality(), CHUNK_BITS - 2);
+}
+
+#[test]
+fn u64_max_is_never_a_member() {
+    // insert refuses u64::MAX and stores nothing, on an empty map and
+    // next to members in the top window.
+    let mut m = SparseMap::new();
+    assert!(!m.insert(u64::MAX));
+    assert!(m.is_empty());
+    assert!(!m.contains(u64::MAX));
+    assert!(m.insert(u64::MAX - 1));
+    assert!(!m.insert(u64::MAX));
+    assert!(!m.contains(u64::MAX));
+    assert!(!m.remove(u64::MAX));
+    assert_eq!(m.cardinality(), 1);
+    assert_eq!(m.max(), Some(u64::MAX - 1));
+    assert_eq!(m.rank(u64::MAX), 1);
+
+    // insert_range is half-open, so a range ending at u64::MAX stops
+    // one short of it, including the whole-window run fast path for
+    // ranges that cover several top windows.
+    for start in [
+        u64::MAX - 1,
+        u64::MAX - 2047,
+        u64::MAX - 2048,
+        u64::MAX - 5 * CHUNK_BITS,
+    ] {
+        let mut r = SparseMap::new();
+        r.insert_range(start, u64::MAX);
+        assert_eq!(r.cardinality(), u64::MAX - start, "range from {start}");
+        assert_eq!(r.max(), Some(u64::MAX - 1));
+        assert!(!r.contains(u64::MAX));
+        // The top window holds 2047 members, so it is never a run.
+        let top = window_base(u64::MAX);
+        assert!(!matches!(r.chunks.get(&top), Some(Chunk::Run(_))));
+        assert_eq!(SparseMap::from_bytes(&r.to_bytes()).as_ref(), Ok(&r));
+    }
+
+    // Extend / FromIterator go through insert and drop it too.
+    let c: SparseMap = [5, u64::MAX, u64::MAX - 2].into_iter().collect();
+    assert_eq!(c.to_vec(), vec![5, u64::MAX - 2]);
+
+    // shifted drops a member that would land on u64::MAX.
+    let s: SparseMap = [1, u64::MAX - 11, u64::MAX - 10].into_iter().collect();
+    assert_eq!(s.shifted(10).to_vec(), vec![11, u64::MAX - 1]);
+
+    // A union or xor of two maps that each fill the top window short of
+    // u64::MAX stays short of it.
+    let lo: SparseMap = (u64::MAX - CHUNK_BITS..u64::MAX - 1).collect();
+    let hi: SparseMap = [u64::MAX - 1].into_iter().collect();
+    let u = &lo | &hi;
+    assert_eq!(u.max(), Some(u64::MAX - 1));
+    assert!(!u.contains(u64::MAX));
+    assert_eq!((&lo ^ &hi), u);
 }
 
 // A tiny deterministic FNV-1a hasher so the equality/hash test needs no

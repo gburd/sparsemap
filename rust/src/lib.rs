@@ -22,6 +22,17 @@
 //! for the two regimes that matter — long runs and sparse clusters —
 //! while degrading gracefully to a plain bitmap for random data.
 //!
+//! # Member universe
+//!
+//! A member is any index in `[0, u64::MAX)`.  Index `u64::MAX`
+//! (2^64 - 1) is never a member: [`insert`](SparseMap::insert) refuses
+//! it, [`contains`](SparseMap::contains) is always false for it, and
+//! [`from_bytes`](SparseMap::from_bytes) rejects a buffer that sets it.
+//! This matches the C library, where 2^64 - 1 is `SM_IDX_MAX`, the
+//! "not found" value, and `sm_deserialize` rejects a stream holding it;
+//! so every buffer [`to_bytes`](SparseMap::to_bytes) writes is one the
+//! C reader accepts.
+//!
 //! # Example
 //!
 //! ```
@@ -176,7 +187,8 @@ impl SparseMap {
         self.cardinality()
     }
 
-    /// Returns `true` if bit `idx` is set.
+    /// Returns `true` if bit `idx` is set.  Always `false` for
+    /// `u64::MAX`, which is never a member.
     #[must_use]
     pub fn contains(&self, idx: u64) -> bool {
         // The covering chunk, if any, is the one with the greatest base
@@ -201,7 +213,15 @@ impl SparseMap {
 
     /// Sets bit `idx`.  Returns `true` if the bit was newly set,
     /// `false` if it was already set (mirroring [`alloc::collections::BTreeSet::insert`]).
+    ///
+    /// `u64::MAX` is never a member (see the [member
+    /// universe](crate#member-universe)): `insert(u64::MAX)` stores
+    /// nothing and returns `false`, so unlike `BTreeSet::insert` a
+    /// `false` here does not always mean "already present".
     pub fn insert(&mut self, idx: u64) -> bool {
+        if idx == u64::MAX {
+            return false;
+        }
         let base = window_base(idx);
 
         // Already covered by a run?
@@ -349,8 +369,8 @@ impl SparseMap {
     /// Returns the number of set bits strictly less than `idx`
     /// (the standard succinct-structure *rank*).
     ///
-    /// `rank(0)` is always 0; `rank(u64::MAX) + contains(u64::MAX) as
-    /// u64` is the cardinality.
+    /// `rank(0)` is always 0; `rank(u64::MAX)` is the cardinality,
+    /// because `u64::MAX` is never a member.
     #[must_use]
     pub fn rank(&self, idx: u64) -> u64 {
         let mut total = 0;
@@ -396,7 +416,8 @@ impl SparseMap {
         None
     }
 
-    /// Sets every bit in the half-open range `[start, end)`.
+    /// Sets every bit in the half-open range `[start, end)`.  Because
+    /// `end <= u64::MAX`, the range never includes `u64::MAX`.
     pub fn insert_range(&mut self, start: u64, end: u64) {
         // A whole-window fast path keeps long ranges cheap.
         let mut i = start;

@@ -52,5 +52,10 @@ main(void)
   { static uint64_t b[1204]; int k = 0; for (int i = 0; i <= 1200; i++) b[k++] = i;
     b[k++] = 50000; b[k++] = 50003; b[k++] = 123456; emit("mixed_lowrun_highsparse", b, k); }
   { uint64_t b[] = { 0, 1, 1023, 1024, 1025, 2050 }; emit("mixed_straddle_1024", b, 6); }
+  /* top of the universe; 2^64 - 1 is never a member */
+  { uint64_t b[] = { 3, UINT64_MAX - 2048, UINT64_MAX - 2047, UINT64_MAX - 1 };
+    emit("near_max", b, 4); }
+  { static uint64_t b[2047]; for (int i = 0; i < 2047; i++) b[i] = UINT64_MAX - 2047 + (uint64_t)i;
+    emit("top_window", b, 2047); }
   return 0;
 }

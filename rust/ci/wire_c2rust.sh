@@ -12,7 +12,7 @@ export CARGO_REGISTRY_TOKEN=
 cc -O2 -I.. ../sm.c ci/c_emit.c -o /tmp/sm_c_emit
 cargo build -q --example wire_emit
 fail=0
-for set in empty zero two scatter near dense64 run1000 run1023; do
+for set in empty zero two scatter near dense64 run1000 run1023 nearmax topwindow; do
   /tmp/sm_c_emit "$set" 2>/tmp/cref.txt |
     cargo run -q --example wire_emit -- read > /tmp/rustbits.txt || true
   grep -v '^#' /tmp/cref.txt > /tmp/cbits.txt

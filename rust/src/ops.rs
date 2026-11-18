@@ -340,8 +340,11 @@ impl SparseMap {
     }
 
     /// Returns a copy with every bit shifted by `offset` (positive =
-    /// toward higher indices).  Bits that would move below zero or above
-    /// `u64::MAX` are dropped, matching the C `sm_offset`.
+    /// toward higher indices).  Bits that would move below zero, or to
+    /// `u64::MAX` or beyond (outside the [member
+    /// universe](crate#member-universe)), are dropped one by one.  The C
+    /// `sm_offset` drops bits below zero the same way, but fails as a
+    /// whole when its largest member would leave the universe.
     #[must_use]
     pub fn shifted(&self, offset: i64) -> SparseMap {
         let mut out = SparseMap::new();

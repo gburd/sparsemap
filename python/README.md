@@ -46,6 +46,9 @@ assert SparseMap.from_bytes(blob) == m
 ## API
 
 - `SparseMap(iterable=None)`; `insert`, `remove`, `clear`, `x in m`.
+  Members lie in `[0, 2**64 - 1)`: `2**64 - 1` is never a member, so
+  `insert(2**64 - 1)` stores nothing and returns `False`, as the C
+  library rejects it.
 - `insert_range(start, end)` / `remove_range(start, end)`, half-open.
 - `rank(idx)` (set bits strictly below `idx`), `select(n)` (0-based),
   `span(start, length, value=True)`.

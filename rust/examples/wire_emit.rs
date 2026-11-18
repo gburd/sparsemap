@@ -30,8 +30,27 @@ fn build(name: &str) -> SparseMap {
         "rle2048" => (2048..=4095).collect(),
         "mixedhi" => (0..=1200).chain([50000, 50003, 123456]).collect(),
         "straddle" => [0, 1, 1023, 1024, 1025, 2050].into_iter().collect(),
+        // The top of the universe.  u64::MAX is never a member, so the
+        // C 5.9 reader rejects any stream that sets it; these check that
+        // Rust's top-window encodings stay below it and are C-readable.
+        "nearmax" => [3, u64::MAX - 2048, u64::MAX - 2047, u64::MAX - 1]
+            .into_iter()
+            .collect(),
+        "topwindow" => range(u64::MAX - 2047, u64::MAX),
+        "toprun" => range(u64::MAX - 5 * 2048 - 99, u64::MAX),
+        "runbelowtop" => {
+            let mut m = range(u64::MAX - 4 * 2048 + 1, u64::MAX - 2047);
+            m.insert(u64::MAX - 1);
+            m
+        }
         other => panic!("unknown set {other}"),
     }
+}
+
+fn range(start: u64, end: u64) -> SparseMap {
+    let mut m = SparseMap::new();
+    m.insert_range(start, end);
+    m
 }
 
 fn main() {

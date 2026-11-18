@@ -7,7 +7,7 @@ use pyo3::types::{PyBytes, PyInt};
 // leading colons keep the crate distinct from the generated pymodule item
 use ::sparsemap::SparseMap as Map;
 
-/// a sparse compressed run length encoded set of non negative integers
+/// a sparse compressed run length encoded set of integers in [0, 2**64 - 1)
 #[pyclass(name = "SparseMap", module = "sparsemap", eq)]
 #[derive(Clone, Default, PartialEq)]
 struct PySparseMap {
@@ -46,6 +46,9 @@ impl PySparseMap {
     }
 
     /// set bit idx and return true when it was newly set
+    ///
+    /// 2**64 - 1 is never a member so inserting it stores nothing and
+    /// returns false just as the c library rejects it
     fn insert(&mut self, idx: u64) -> bool {
         self.inner.insert(idx)
     }

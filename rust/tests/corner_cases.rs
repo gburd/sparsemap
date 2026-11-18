@@ -64,10 +64,12 @@ fn singleton_and_empty() {
     let e = SparseMap::new();
     agree(&e, &BTreeSet::new());
     assert_eq!(e.rank(1234), 0);
-    for b in [0u64, 63, 64, 1023, 1024, 100_000, u64::MAX] {
+    for b in [0u64, 63, 64, 1023, 1024, 100_000, u64::MAX - 1] {
         let m = sm([b]);
         agree(&m, &bt([b]));
     }
+    // u64::MAX is never a member, so a "singleton" of it is empty.
+    agree(&sm([u64::MAX]), &BTreeSet::new());
 }
 
 #[test]

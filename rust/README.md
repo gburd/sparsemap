@@ -73,9 +73,13 @@ assert_eq!(SparseMap::from_bytes(&bytes).unwrap(), m);
   `Default`, `Clone`, `PartialEq`/`Eq`/`Hash`, and the `|`, `&`, `-`,
   `^` operators (plus their `*=` assigning forms).
 - **Reads the C library's format.** `from_bytes` decodes buffers written
-  by the C `sm_serialize`, addressing the full 64-bit universe;
-  verified in-crate against checked-in C-produced fixtures, and in CI
-  the reverse direction (C reading Rust's `to_bytes`).
+  by the C `sm_serialize`, with 64-bit chunk starts; verified in-crate
+  against checked-in C-produced fixtures, and in CI the reverse
+  direction (C reading Rust's `to_bytes`).
+- **The same member universe as C.** Members lie in `[0, 2^64 - 1)`.
+  `u64::MAX` is the C library's "not found" value, so `insert(u64::MAX)`
+  stores nothing and returns `false`, and `from_bytes` rejects a buffer
+  that sets it, as the C `sm_deserialize` does.
 
 ## Comparison with the C library
 

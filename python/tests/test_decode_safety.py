@@ -65,6 +65,8 @@ HOSTILE = {
     + _chunk(CHUNK_BITS, _sparse_all_ones())
     + _chunk(CHUNK_BITS, _sparse_all_ones()),
     "zero_capacity_rle": _header(1) + _chunk(0, _rle_desc(0, 0)),
+    # 2**64 - 1 is never a member so a stream that sets it is corrupt
+    "sets_bit_u64_max": _header(1) + _chunk(TOP_BASE, _sparse_all_ones()),
 }
 
 

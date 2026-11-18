@@ -30,8 +30,28 @@ fn op_strategy() -> impl Strategy<Value = Op> {
     ]
 }
 
+/// Ops over the top `T` indices of the universe, `[u64::MAX - T,
+/// u64::MAX]`.  The span includes `u64::MAX` itself and ranges ending
+/// at it, so these ops try to create the one index that is never a
+/// member.
+const T: u64 = 6 * 2048 + 100;
+
+fn top_op_strategy() -> impl Strategy<Value = Op> {
+    let lo = u64::MAX - T;
+    prop_oneof![
+        (lo..=u64::MAX).prop_map(Op::Insert),
+        (lo..=u64::MAX).prop_map(Op::Remove),
+        (lo..=u64::MAX, 1u64..6000).prop_map(|(a, w)| Op::InsertRange(a, a.saturating_add(w))),
+        (lo..=u64::MAX, 1u64..6000).prop_map(|(a, w)| Op::RemoveRange(a, a.saturating_add(w))),
+    ]
+}
+
 fn apply(m: &mut SparseMap, model: &mut BTreeSet<u64>, op: &Op) {
     match *op {
+        // u64::MAX is never a member: the oracle refuses it too.
+        Op::Insert(u64::MAX) => {
+            assert!(!m.insert(u64::MAX));
+        }
         Op::Insert(i) => {
             assert_eq!(m.insert(i), model.insert(i));
         }
@@ -89,6 +109,24 @@ proptest! {
             prop_assert_eq!(m.rank(bit), n as u64);
         }
         prop_assert_eq!(m.select(sorted.len() as u64), None);
+    }
+
+    /// The stateful model test at the top of the universe: inserts and
+    /// ranges that reach `u64::MAX` never make it a member, and every
+    /// map serializes to a buffer the reader (like the C reader)
+    /// accepts.
+    #[test]
+    fn model_top_of_universe(ops in proptest::collection::vec(top_op_strategy(), 0..60)) {
+        let mut m = SparseMap::new();
+        let mut model = BTreeSet::new();
+        for op in &ops {
+            apply(&mut m, &mut model, op);
+            prop_assert!(!m.contains(u64::MAX));
+        }
+        check(&m, &model);
+        prop_assert_eq!(m.rank(u64::MAX), model.len() as u64);
+        let back = SparseMap::from_bytes(&m.to_bytes());
+        prop_assert_eq!(back.as_ref(), Ok(&m));
     }
 
     /// `contains` agrees with the oracle across the whole universe edge

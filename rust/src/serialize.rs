@@ -76,8 +76,9 @@ pub enum DecodeError {
     BadMagic,
     /// The version byte is not understood.
     UnsupportedVersion(u8),
-    /// A chunk's declared size runs past the end of the buffer, or the
-    /// chunk starts are not strictly increasing.
+    /// A chunk's declared size runs past the end of the buffer, the
+    /// chunk starts are not strictly increasing, or the stream sets bit
+    /// `u64::MAX`, which is never a member.
     Corrupt,
 }
 
@@ -309,7 +310,13 @@ impl SparseMap {
         if run_len > 0 {
             chunks.insert(run_base, Chunk::Run(run_len as u32));
         }
-        Ok(SparseMap { chunks })
+        let map = SparseMap { chunks };
+        // Bit 2^64 - 1 is not a member; the C sm_validate rejects a
+        // stream that sets it, and so does this reader.
+        if map.max() == Some(u64::MAX) {
+            return Err(DecodeError::Corrupt);
+        }
+        Ok(map)
     }
 }
 
@@ -512,20 +519,63 @@ mod hostile {
     }
 
     #[test]
-    fn accepts_full_top_window_run() {
-        // A full top window promotes to a run ending at 2^64; it must
-        // decode, iterate ascending, and round-trip.
+    fn rejects_bit_u64_max() {
+        // Bit 2^64 - 1 is not a member, so every stream that sets it is
+        // rejected, as the C sm_validate does: a sparse top window with
+        // slot 31 all ones or with the top bit in its mixed payload, an
+        // RLE run whose length reaches 2^64, and a run spanning several
+        // windows up to 2^64.
         let base = u64::MAX - (CHUNK_BITS - 1);
-        let mut m = SparseMap::new();
-        for off in 0..CHUNK_BITS {
-            m.insert(base + off);
+        let mut bufs: Vec<Vec<u8>> = Vec::new();
+
+        let mut b = header(1);
+        chunk(&mut b, base, sparse_all_ones());
+        bufs.push(b);
+
+        let mut b = header(1);
+        chunk(&mut b, base, 0b10u64 << 62);
+        b.extend_from_slice(&(1u64 << 63).to_le_bytes());
+        bufs.push(b);
+
+        let mut b = header(1);
+        chunk(&mut b, base, rle_desc(CHUNK_BITS, CHUNK_BITS));
+        bufs.push(b);
+
+        let mut b = header(1);
+        chunk(
+            &mut b,
+            base - 3 * CHUNK_BITS,
+            rle_desc(4 * CHUNK_BITS, 4 * CHUNK_BITS),
+        );
+        bufs.push(b);
+
+        for buf in bufs {
+            assert_eq!(SparseMap::from_bytes(&buf), Err(DecodeError::Corrupt));
         }
-        let back = SparseMap::from_bytes(&m.to_bytes()).expect("top-window run is valid");
-        assert_eq!(back, m);
-        assert_eq!(back.max(), Some(u64::MAX));
-        assert_eq!(back.cardinality(), CHUNK_BITS);
-        let bits: Vec<u64> = back.iter().collect();
-        assert!(bits.windows(2).all(|w| w[0] < w[1]), "iterates ascending");
+    }
+
+    #[test]
+    fn accepts_top_window_short_of_u64_max() {
+        // A chunk that reaches 2^64 is valid when its last bit is clear:
+        // an RLE run of 2047 bits in the top window, and a sparse top
+        // window with every bit but u64::MAX set.
+        let base = u64::MAX - (CHUNK_BITS - 1);
+        let mut b = header(1);
+        chunk(&mut b, base, rle_desc(CHUNK_BITS, CHUNK_BITS - 1));
+        let m = SparseMap::from_bytes(&b).expect("run short of u64::MAX is valid");
+        assert_eq!(m.cardinality(), CHUNK_BITS - 1);
+        assert_eq!(m.max(), Some(u64::MAX - 1));
+
+        let mut b = header(1);
+        chunk(
+            &mut b,
+            base,
+            (sparse_all_ones() & !(0b11u64 << 62)) | (0b10u64 << 62),
+        );
+        b.extend_from_slice(&(u64::MAX >> 1).to_le_bytes());
+        let m2 = SparseMap::from_bytes(&b).expect("sparse window short of u64::MAX");
+        assert_eq!(m2, m);
+        assert_eq!(SparseMap::from_bytes(&m.to_bytes()).as_ref(), Ok(&m));
     }
 
     #[test]

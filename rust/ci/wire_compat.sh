@@ -12,7 +12,8 @@ cc -O2 -I.. ../sm.c ci/c_read.c -o /tmp/sm_c_read
 fail=0
 for set in single scattered run5000 run4w clusters offset \
 	smallzero smallword0 smallfullword smalltwowords smallscatter \
-	rle1000 rle1023 rle5000 rle2048 mixedhi straddle; do
+	rle1000 rle1023 rle5000 rle2048 mixedhi straddle \
+	nearmax topwindow toprun runbelowtop; do
 	cargo run -q --example wire_emit -- emit "$set" | /tmp/sm_c_read > /tmp/c_view.txt
 	cargo run -q --example wire_emit -- describe "$set"            > /tmp/rust_view.txt
 	if diff -q /tmp/rust_view.txt /tmp/c_view.txt >/dev/null; then

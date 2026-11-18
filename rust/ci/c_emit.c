@@ -27,6 +27,16 @@ int main(int argc, char **argv) {
     else if (!strcmp(set, "run1000")) { for (uint64_t i=0;i<=1000;i++) put(&m,i,ref); }
     else if (!strcmp(set, "run1023")) { for (uint64_t i=0;i<1024;i++) put(&m,i,ref); }
     else if (!strcmp(set, "empty")) { /* nothing */ }
+    else if (!strcmp(set, "nearmax")) {
+        /* The top of the universe; 2^64 - 1 is never a member. */
+        put(&m, 3, ref);
+        put(&m, UINT64_MAX - 2048, ref);
+        put(&m, UINT64_MAX - 2047, ref);
+        put(&m, UINT64_MAX - 1, ref);
+    }
+    else if (!strcmp(set, "topwindow")) {
+        for (uint64_t i = UINT64_MAX - 2047; i < UINT64_MAX; i++) put(&m, i, ref);
+    }
     else { fprintf(stderr, "unknown set %s\n", set); return 2; }
 
     /* Report the encoded mode to stderr for the harness log. */

@@ -24,7 +24,9 @@ main(void)
 	}
 	sm_t *m = sm_deserialize(buf, n);
 	if (m == NULL) {
-		/* Empty maps may decode to NULL; emit nothing. */
+		/* A valid stream, even an empty map's, decodes to a map.  Say
+		 * so on stdout so the harness diff reports the rejection. */
+		printf("sm_deserialize rejected the buffer\n");
 		free(buf);
 		return (0);
 	}

@@ -23,6 +23,9 @@ SETS = {
     # mixed
     "mixed_lowrun_highsparse": list(range(1201)) + [50_000, 50_003, 123_456],
     "mixed_straddle_1024": [0, 1, 1023, 1024, 1025, 2050],
+    # top of the universe where 2**64 - 1 is never a member
+    "near_max": [3, 2**64 - 2049, 2**64 - 2048, 2**64 - 2],
+    "top_window": list(range(2**64 - 2048, 2**64 - 1)),
 }
 
 def main():
