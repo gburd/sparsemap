@@ -12948,52 +12948,20 @@ sm_contains_many(const sm_t *map, const uint64_t *idxs, bool *results,
 	}
 }
 
-/* Set bits strictly below idx in a small-set map: popcount of the whole
- * words below idx's word plus the masked part of that word. */
+/* Set bits strictly below idx in a small-set map (sm_rank_many's
+ * convention), via the inclusive-range helper. */
 static size_t
 __sm_batch_small_rank(const sm_t *map, uint64_t idx)
 {
-	const __sm_bitvec_unaligned_t *w = __sm_small_words(map);
-	const size_t nw = __sm_small_nwords(map);
-	const uint64_t full = idx / SM_BITS_PER_VECTOR;
-	const size_t whole = full < (uint64_t)nw ? (size_t)full : nw;
-	size_t set = 0;
-	size_t i;
-	for (i = 0; i < whole; i++) {
-		set += (size_t)SM_POPCOUNT64(w[i]);
-	}
-	if (whole < nw && idx % SM_BITS_PER_VECTOR != 0) {
-		const __sm_bitvec_t mask = ((__sm_bitvec_t)1
-		    << (idx % SM_BITS_PER_VECTOR)) - 1;
-		set += (size_t)SM_POPCOUNT64(w[whole] & mask);
-	}
-	return (set);
+	return (idx == 0 ? 0 : __sm_small_rank1(map, 0, idx - 1));
 }
 
 /* Position of the k-th (0-based) set bit of a small-set map, or
- * SM_IDX_MAX when it has k or fewer members.  Skips whole words by
- * popcount, then clears the low set bits of the target word. */
+ * SM_IDX_MAX when it has k or fewer members. */
 static uint64_t
 __sm_batch_small_select(const sm_t *map, uint64_t k)
 {
-	const __sm_bitvec_unaligned_t *w = __sm_small_words(map);
-	const size_t nw = __sm_small_nwords(map);
-	size_t i;
-	for (i = 0; i < nw; i++) {
-		__sm_bitvec_t word = w[i];
-		const uint64_t pc = (uint64_t)SM_POPCOUNT64(word);
-		if (k >= pc) {
-			k -= pc;
-			continue;
-		}
-		while (k > 0) {
-			word &= word - 1;
-			k--;
-		}
-		return ((uint64_t)i * SM_BITS_PER_VECTOR +
-		    (uint64_t)SM_CTZ64(word));
-	}
-	return (SM_IDX_MAX);
+	return (__sm_small_select(map, k, true));
 }
 
 /* -------------------------------------------------------------------
