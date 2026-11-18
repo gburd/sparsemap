@@ -26,15 +26,18 @@
  *   2. SM_IDX_MAX: every adder rejects it with EINVAL and changes
  *      nothing, the bulk builders reject an input holding it, sm_remove
  *      and sm_contains treat it as absent, sm_validate rejects a buffer
- *      that sets it, and members up to 2^64 - 2 behave;
+ *      that sets it, sm_frozen_deserialize rejects a stream claiming it,
+ *      and members up to 2^64 - 2 behave;
  *   3. a randomized differential over maps whose members lie in the top
  *      two chunks (and a few low ones), for every set operation, its
  *      in-place and _cardinality variants, and the predicates, with
  *      sm_validate and a full read-back of every result;
  *   4. the same maps, sometimes with a run reaching the last member,
  *      through the single-map APIs: sm_remove, sm_split, sm_offset both
- *      ways, rank and select of both values, sm_contains_many,
- *      sm_contains_cached and the locator.
+ *      ways, rank and select of both values, sm_rank_many,
+ *      sm_select_many, sm_contains_many, sm_contains_cached, the
+ *      locator, sm_next_member_op / sm_scan_op against an empty map, and
+ *      sm_freeze.
  */
 #define SM_EXPOSE_STRUCT 1
 #include <sm.h>
@@ -657,14 +660,17 @@ idx_max_compare(void)
 }
 
 /* sm_validate (and the decoders) reject a buffer with bit 2^64 - 1 set;
+ * sm_frozen_deserialize rejects a stream whose maximum is SM_IDX_MAX;
  * sm_offset onto SM_IDX_MAX is ERANGE. */
 static void
 idx_max_decoders(void)
 {
 	const uint64_t top[] = { T(1) };
 	sm_t *m = by_add(top, 1), *o;
+	sm_frozen_t *f;
 	uint8_t *buf, *data;
-	size_t len;
+	size_t len, i;
+	uint64_t mx;
 
 	CHECK(m != NULL && sm_validate(m), "map with 2^64 - 2");
 	/* Set bit 2^64 - 1 by hand: the payload word of the last slot. */
@@ -704,6 +710,28 @@ idx_max_decoders(void)
 	}
 	data[len - 1] &= 0x7f;
 	CHECK(sm_validate(m), "restored");
+
+	/* A frozen stream claiming maximum SM_IDX_MAX. */
+	f = sm_freeze(m);
+	CHECK(f != NULL && sm_frozen_cardinality(f) == 1, "freeze");
+	len = sm_frozen_serialized_size(f);
+	buf = malloc(len);
+	CHECK(buf != NULL && sm_frozen_serialize(f, buf, len) == len,
+	    "frozen serialize");
+	sm_frozen_free(f);
+	if (buf != NULL) {
+		f = sm_frozen_deserialize(buf, len);
+		CHECK(f != NULL && sm_frozen_select(f, 0) == T(1),
+		    "frozen round trip");
+		sm_frozen_free(f);
+		mx = UINT64_MAX;
+		for (i = 0; i < 8; i++)
+			buf[24 + i] = (uint8_t)(mx >> (8 * i));
+		f = sm_frozen_deserialize(buf, len);
+		CHECK(f == NULL, "frozen stream with max SM_IDX_MAX accepted");
+		sm_frozen_free(f);
+		free(buf);
+	}
 
 	/* sm_offset: onto SM_IDX_MAX or past it is ERANGE; to 2^64 - 2 is
 	 * fine. */
@@ -868,16 +896,21 @@ o_below(const uint64_t *v, size_t n, uint64_t x)
 	return (i);
 }
 
-/* Rank, select, contains_many, the locator and cached contains of m
- * against the oracle v. */
+/* Rank, select, the batch calls, the locator, cached contains, the op
+ * iterators and the frozen copy of m against the oracle v. */
 static void
 queries(sm_t *m, const uint64_t *v, size_t n)
 {
-	static uint64_t probe[64];
+	static uint64_t probe[64], ks[64], sel[64], got[16384];
+	size_t ranks[64];
 	bool in[64];
 	sm_locator_t *L = sm_locator_build(m);
+	sm_frozen_t *f = sm_freeze(m);
 	sm_cursor_cached_t cc = SM_CURSOR_CACHED_INIT;
+	sm_t *empty = sm_create(64);
+	struct coll c;
 	size_t np = 0, k, i;
+	uint64_t x;
 
 	/* Probes: members, neighbours, chunk edges, the top. */
 	for (k = 0; k < n && np + 3 < 48; k += 1 + n / 16) {
@@ -908,12 +941,16 @@ queries(sm_t *m, const uint64_t *v, size_t n)
 		CHECK(L == NULL || sm_locator_rank(L, 0, p, true) ==
 		        below + (size_t)has,
 		    "locator rank");
+		CHECK(f == NULL || sm_frozen_contains(f, p) == has,
+		    "frozen contains");
 		/* select0 at the number of unset positions below p. */
 		if (!has && p != UINT64_MAX) {
 			const uint64_t k0 = p - below;
 
 			CHECK(sm_select(m, k0, false) == p, "select0 at 2^64-%llu",
 			    (unsigned long long)(0 - p));
+			CHECK(L == NULL || sm_locator_select(L, k0, false) == p,
+			    "locator select0");
 		}
 	}
 	CHECK(sm_select(m, UINT64_MAX - 1 - n, false) ==
@@ -923,14 +960,60 @@ queries(sm_t *m, const uint64_t *v, size_t n)
 		CHECK(sm_select(m, k, true) == v[k], "select1 %zu", k);
 		CHECK(L == NULL || sm_locator_select(L, k, true) == v[k],
 		    "locator select1 %zu", k);
+		CHECK(f == NULL || sm_frozen_select(f, k) == v[k],
+		    "frozen select %zu", k);
 	}
 	CHECK(sm_select(m, n, true) == SM_IDX_MAX, "select1 past the end");
+	/* The batch calls over the same probes. */
+	sm_rank_many(m, probe, ranks, np);
 	sm_contains_many(m, probe, in, np);
-	for (i = 0; i < np; i++)
+	for (i = 0; i < np; i++) {
+		CHECK(ranks[i] == o_below(v, n, probe[i]), "rank_many %zu", i);
 		CHECK(in[i] == (bool)in_set(v, n, probe[i]),
 		    "contains_many %zu", i);
+	}
+	for (k = 0; k < n && k < 60; k++)
+		ks[k] = k;
+	ks[k++] = n;
+	sm_select_many(m, ks, sel, k);
+	for (i = 0; i < k; i++)
+		CHECK(sel[i] == (ks[i] < n ? v[ks[i]] : SM_IDX_MAX),
+		    "select_many %zu", i);
+	/* The locator's iteration, the op iterators against the empty map
+	 * (each equals m itself), and the frozen copy's iteration. */
+	x = SM_IDX_MAX;
+	for (k = 0; L != NULL &&
+	     (x = sm_locator_next_member(L, x)) != SM_IDX_MAX; k++)
+		CHECK(k < n && x == v[k], "locator next %zu", k);
+	CHECK(L == NULL || k == n, "locator next count");
+	for (i = 0; i < 4; i++) {
+		x = SM_IDX_MAX;
+		for (k = 0; (x = sm_next_member_op(m, empty, (sm_op_t)i, x,
+		                 NULL, NULL)) != SM_IDX_MAX;
+		     k++)
+			CHECK(k < n && x == v[k], "next_member_op %zu", i);
+		CHECK(k == (i == SM_OP_AND ? 0 : n), "next_member_op count");
+		c.v = got;
+		c.n = 0;
+		c.cap = sizeof(got) / sizeof(got[0]);
+		c.over = 0;
+		sm_scan_op(m, empty, (sm_op_t)i, scan_fn, 0, &c);
+		CHECK(c.n == (i == SM_OP_AND ? 0 : n) &&
+		        (i == SM_OP_AND || memcmp(got, v, n * 8) == 0),
+		    "scan_op %zu", i);
+	}
+	if (f != NULL) {
+		x = SM_IDX_MAX;
+		for (k = 0; (x = sm_frozen_next_member(f, x)) != SM_IDX_MAX;
+		     k++)
+			CHECK(k < n && x == v[k], "frozen next %zu", k);
+		CHECK(k == n && sm_frozen_cardinality(f) == n, "frozen count");
+	}
+	CHECK(n == 0 || f != NULL, "sm_freeze failed");
 	CHECK(n == 0 || L != NULL, "sm_locator_build failed");
+	sm_frozen_free(f);
 	sm_locator_free(L);
+	sm_free(empty);
 }
 
 /* sm_remove, sm_split and sm_offset of m against the oracle v. */

@@ -205,6 +205,18 @@ header itself.
 | `sm_fill_factor()` | Return the fraction of bits that are set. |
 | `sm_flip_range()` | Complement every bit in `[lo, hi)`: set bits become unset and vice versa. |
 | `sm_free()` | Dispose of a sparsemap, regardless of allocation lineage. |
+| `sm_freeze()` | Build a frozen copy of \a map. |
+| `sm_frozen_cardinality()` | Number of members (0 for NULL). */ |
+| `sm_frozen_contains()` | Membership test; equals sm_contains() on the source map. */ |
+| `sm_frozen_deserialize()` | Read a frozen map written by sm_frozen_serialize(). |
+| `sm_frozen_free()` | Release a frozen map (NULL-safe). */ |
+| `sm_frozen_next_member()` | Lowest member > \a prev_idx (SM_IDX_MAX: from the start), or |
+| `sm_frozen_prev_member()` | Highest member < \a prev_idx (SM_IDX_MAX: from the end), or |
+| `sm_frozen_rank()` | Members in the inclusive range [\a x, \a y]. |
+| `sm_frozen_select()` | The \a n'th member (0-based), or SM_IDX_MAX if there are not |
+| `sm_frozen_serialize()` | Serialize a frozen map. |
+| `sm_frozen_serialized_size()` | Bytes sm_frozen_serialize() writes (0 for NULL). */ |
+| `sm_frozen_size()` | Bytes of memory the frozen map occupies (0 for NULL). */ |
 | `sm_get_capacity()` | Return the total buffer capacity in bytes. |
 | `sm_get_data()` | Return a pointer to the raw data buffer. |
 | `sm_get_size()` | Return the number of buffer bytes currently in use. |
@@ -257,6 +269,7 @@ header itself.
 | `sm_split()` | Split the map at \a idx, moving higher bits to \a other. |
 | `sm_statistics()` | Fill an sm_stats_t with introspection data. */ |
 | `sm_subset_compare()` | Classify the subset relationship between \a a and \a b. |
+| `sm_thaw()` | Build a mutable map with the frozen map's members. |
 | `sm_to_array()` | Materialize all set bits as a uint64_t array. |
 | `sm_union()` | Create a new sparsemap containing bits set in either \a a or \a b. |
 | `sm_union_cardinality()` | Compute the cardinality of (a union b) without allocating it. */ |
@@ -289,6 +302,7 @@ header itself.
 | `sm_allocator_t` | type |
 | `sm_cursor_cached_t` | type |
 | `sm_cursor_t` | type |
+| `sm_frozen_t` | type |
 | `sm_locator_t` | type |
 | `sm_membership_t` | type |
 | `sm_op_t` | type |

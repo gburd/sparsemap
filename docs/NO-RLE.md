@@ -21,15 +21,18 @@ maintained together; the mainline stays the RLE version.
   pattern.  Decode safety comes entirely from the structural checks in
   `sm_validate()`:
     - each chunk's size is bounded — a descriptor word plus at most 32
-      payload words (264 bytes), computed from the per-vector flag table
+      payload words (264 bytes), one masked popcount of the descriptor
       — so the pre-validate stride walk can never be driven to over-read;
     - the running bound `p + SM_SIZEOF_OVERHEAD + chunk_size > end`
       rejects any chunk that would read past the buffer *before* the
       payload is touched (verified against a descriptor engineered to
       demand the maximal 264-byte stride against a 24-byte buffer);
     - chunk starts must be chunk-aligned and strictly ascending, spans
-      must not overlap, and the stored chunk count must match the walk
-      exactly.
+      must not overlap, the stored chunk count must match the walk
+      exactly, every chunk must hold a member, and bit 2^64 - 1
+      (`SM_IDX_MAX`, never a member) must be clear.  The readers drop an
+      empty chunk (which `sm_split` through 5.8.5 could leave) before
+      validating.
   A stream that fails any of these is rejected; `sm_open()` /
   `sm_deserialize()` return `NULL` (or, per the S1 contract, an empty
   map) rather than crashing or mis-decoding.
@@ -47,6 +50,16 @@ maintained together; the mainline stays the RLE version.
   `tests/test_chunk_transitions.c`, `test_sparse_only_contract`).  A
   same-endian, sparse-only stream that carries no RLE chunk still
   round-trips between the two variants.
+
+- **A long run costs one chunk per 2048 bits.**  An all-ONES chunk is
+  16 bytes (start plus descriptor), so a run of 2^31 bits is 2^20
+  chunks, 16 MiB, where the RLE build needs one.  The run-based paths
+  (`sm_add_range`, `sm_remove_range`, `sm_flip_range`, the set ops and
+  relations, the op iterators) are O(chunks) and never O(bits), but
+  plain `sm_rank` / `sm_select` / `sm_contains` without a cursor walk
+  those chunks; build a locator for O(log chunks) queries over such a
+  map.  `sm_add_range` into a buffer too small for the run fails with
+  `ENOSPC` and leaves the map unchanged.
 
 Everything else — the sparse chunk codec, the 3-word `sm_t`, the wire
 header, the hardening contracts (S1–S5), the full `sm_*` surface — is
@@ -131,18 +144,17 @@ accepts.
 The point / scalar / iteration primitives (`sm_contains`, `sm_add`,
 `sm_remove`, `sm_cardinality`, `sm_minimum`, `sm_maximum`,
 `sm_is_empty`, `sm_next_member`, `sm_prev_member`, `sm_get_size`,
-`sm_get_data`, `sm_contains_many`) read the word array directly.  The
+`sm_get_data`, `sm_contains_many`, `sm_rank`, `sm_select`, `sm_span`,
+`sm_scan`, `sm_statistics`, `sm_rank_many`, `sm_select_many`) read the
+word array directly.  The
 maximal-run iterator decodes a small map up front, so all run-based set
 algebra, hashing and comparison (`sm_union`, `sm_intersection`,
 `sm_difference`, `sm_xor`, `sm_extract_range`, `sm_hash`, `sm_equals`,
 `sm_compare`, `sm_subset_compare`, the `*_cardinality` family,
 `sm_jaccard_index`) are covered at one chokepoint.  The remaining
-raw-chunk walkers (`sm_offset`, `sm_split`, `sm_scan`, `sm_statistics`,
-`sm_select`, `sm_rank`, `sm_span`) operate on a transparently
-materialized chunk view; `sm_split` promotes in place.  The
-`sm_locator_*` accelerator returns a degenerate (always-fall-back)
-locator for a small map, so its queries route to the plain,
-small-set-aware path.
+raw-chunk walker `sm_offset` operates on a transparently materialized
+chunk view, and `sm_split` promotes in place.  A locator built over a
+small map answers from its words.
 
 ## Wire format
 
@@ -151,6 +163,8 @@ version `2`, endian flag, cardinality) followed by the internal `m_data`
 body copied verbatim.  Because the body *is* `m_data`, a small-set map
 serializes to its small-set form automatically, and `sm_deserialize`
 reconstructs it (the body's own header marker is authoritative;
-reserved header byte 6 is set to `1` as a documented mirror of the mode).
-Small-set maps are portable between same-endian hosts, exactly like
-chunk-mode maps.
+reserved header byte 6 is set to `1` as a documented mirror of the mode,
+and is `0` for any empty map, whichever mode it was emptied in).
+`sm_deserialize` reads a stream from either byte order: every body word
+is 64 bits, so a foreign stream is byte-swapped word by word and then
+validated.
