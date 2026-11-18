@@ -48,8 +48,6 @@ Best case: 16 KB of consecutive set bits in 8 bytes.  Worst case
 
 Good fit:
 
-- PostgreSQL extensions tracking TID sets, bitmap heap scans,
-  posting lists.
 - Trigram / n-gram indexes where document identifiers cluster.
 - Allocation bitmaps for storage engines (free-list tracking).
 - Anywhere you'd reach for [CRoaring](https://github.com/RoaringBitmap/CRoaring)
