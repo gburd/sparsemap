@@ -10168,27 +10168,23 @@ sm_intersection(const sm_t *a, const sm_t *b)
 		const __sm_idx_t a_start = __sm_load_idx((const uint8_t *)ap);
 		__sm_chunk_t a_chunk;
 		bool a_rle;
-		size_t a_cap;
 		size_t a_size;
 		size_t a_end;
 		const __sm_idx_t b_start = __sm_load_idx((const uint8_t *)bp);
 		__sm_chunk_t b_chunk;
 		bool b_rle;
-		size_t b_cap;
 		size_t b_size;
 		size_t b_end;
 		__sm_chunk_init(&a_chunk, ap + SM_SIZEOF_OVERHEAD);
 		a_rle = SM_IS_CHUNK_RLE(&a_chunk);
-		a_cap = __sm_chunk_get_capacity(&a_chunk);
 		a_size = __sm_chunk_get_size(&a_chunk);
-		a_end = (size_t)__sm_end(a_start, a_cap); /* one past last bit */
+		a_end = (size_t)__sm_chunk_window_end(&a_chunk, a_start);
 
 		/* Read chunk b metadata */
 		__sm_chunk_init(&b_chunk, bp + SM_SIZEOF_OVERHEAD);
 		b_rle = SM_IS_CHUNK_RLE(&b_chunk);
-		b_cap = __sm_chunk_get_capacity(&b_chunk);
 		b_size = __sm_chunk_get_size(&b_chunk);
-		b_end = (size_t)__sm_end(b_start, b_cap);
+		b_end = (size_t)__sm_chunk_window_end(&b_chunk, b_start);
 
 		/* Prefetch next chunks */
 		if (ai + 1 < a_count) {
@@ -10513,14 +10509,12 @@ sm_difference(const sm_t *a, const sm_t *b)
 		uint8_t *bp_save;
 		size_t bi_save;
 		bool a_rle;
-		size_t a_cap_bits;
 		size_t a_size;
 		size_t a_end;
 		__sm_chunk_init(&a_chunk, ap + SM_SIZEOF_OVERHEAD);
 		a_rle = SM_IS_CHUNK_RLE(&a_chunk);
-		a_cap_bits = __sm_chunk_get_capacity(&a_chunk);
 		a_size = __sm_chunk_get_size(&a_chunk);
-		a_end = (size_t)__sm_end(a_start, a_cap_bits);
+		a_end = (size_t)__sm_chunk_window_end(&a_chunk, a_start);
 
 		/* Prefetch next a chunk */
 		if (ai + 1 < a_count) {
@@ -10551,16 +10545,15 @@ sm_difference(const sm_t *a, const sm_t *b)
 			    __sm_load_idx((const uint8_t *)bp);
 			__sm_chunk_t b_chunk;
 			bool b_rle;
-			size_t b_cap_bits;
 			size_t ov_start;
 			size_t ov_end;
 			size_t b_size;
 			size_t b_end;
 			__sm_chunk_init(&b_chunk, bp + SM_SIZEOF_OVERHEAD);
 			b_rle = SM_IS_CHUNK_RLE(&b_chunk);
-			b_cap_bits = __sm_chunk_get_capacity(&b_chunk);
 			b_size = __sm_chunk_get_size(&b_chunk);
-			b_end = (size_t)__sm_end(b_start, b_cap_bits);
+			b_end = (size_t)__sm_chunk_window_end(&b_chunk,
+			    b_start);
 
 			/* b is past a: no more overlaps for this a chunk */
 			if (a_end <= (size_t)b_start)
@@ -10688,11 +10681,13 @@ sm_difference(const sm_t *a, const sm_t *b)
 				int i;
 
 				if (a_rle && !b_rle) {
-					/* a is RLE, b is sparse */
+					/* a is RLE, b is sparse.  a's run covers
+					 * the whole window, including slots b's
+					 * NONE flags leave out (NULL flags). */
 					__sm_expand_sparse_chunk(&b_chunk, bw2,
 					    bc2);
 					__sm_expand_rle_as_words(&a_chunk,
-					    a_start, b_start, aw2, ac2, bc2);
+					    a_start, b_start, aw2, ac2, NULL);
 					result_start = b_start;
 				} else if (!a_rle && b_rle) {
 					/* a is sparse, b is RLE */
@@ -10868,20 +10863,17 @@ sm_union(const sm_t *a, const sm_t *b)
 		const __sm_idx_t a_start = __sm_load_idx((const uint8_t *)ap);
 		__sm_chunk_t a_chunk;
 		bool a_rle;
-		size_t a_cap_bits;
 		size_t a_size;
 		size_t a_end;
 		const __sm_idx_t b_start = __sm_load_idx((const uint8_t *)bp);
 		__sm_chunk_t b_chunk;
 		bool b_rle;
-		size_t b_cap_bits;
 		size_t b_size;
 		size_t b_end;
 		__sm_chunk_init(&a_chunk, ap + SM_SIZEOF_OVERHEAD);
 		a_rle = SM_IS_CHUNK_RLE(&a_chunk);
-		a_cap_bits = __sm_chunk_get_capacity(&a_chunk);
 		a_size = __sm_chunk_get_size(&a_chunk);
-		a_end = (size_t)__sm_end(a_start, a_cap_bits);
+		a_end = (size_t)__sm_chunk_window_end(&a_chunk, a_start);
 
 		/* Ensure cursor is at least at chunk start. */
 		if (a_cursor < (size_t)a_start)
@@ -10890,9 +10882,8 @@ sm_union(const sm_t *a, const sm_t *b)
 		/* ---- Read chunk b metadata ---- */
 		__sm_chunk_init(&b_chunk, bp + SM_SIZEOF_OVERHEAD);
 		b_rle = SM_IS_CHUNK_RLE(&b_chunk);
-		b_cap_bits = __sm_chunk_get_capacity(&b_chunk);
 		b_size = __sm_chunk_get_size(&b_chunk);
-		b_end = (size_t)__sm_end(b_start, b_cap_bits);
+		b_end = (size_t)__sm_chunk_window_end(&b_chunk, b_start);
 
 		if (b_cursor < (size_t)b_start)
 			b_cursor = (size_t)b_start;
@@ -11113,17 +11104,20 @@ sm_union(const sm_t *a, const sm_t *b)
 				int nvecs2;
 				int i;
 
+				/* The run's bits cover the whole window even
+				 * where NONE slots cut the sparse side short, so
+				 * expand it at full capacity (NULL flags). */
 				if (a_rle && !b_rle) {
 					__sm_expand_sparse_chunk(&b_chunk, bw2,
 					    bc2);
 					__sm_expand_rle_as_words(&a_chunk,
-					    a_start, b_start, aw2, ac2, bc2);
+					    a_start, b_start, aw2, ac2, NULL);
 					result_start = b_start;
 				} else if (!a_rle && b_rle) {
 					__sm_expand_sparse_chunk(&a_chunk, aw2,
 					    ac2);
 					__sm_expand_rle_as_words(&b_chunk,
-					    b_start, a_start, bw2, bc2, ac2);
+					    b_start, a_start, bw2, bc2, NULL);
 					result_start = a_start;
 				} else if (!a_rle && !b_rle) {
 					__sm_expand_sparse_chunk(&a_chunk, aw2,

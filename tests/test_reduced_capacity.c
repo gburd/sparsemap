@@ -12,11 +12,17 @@
  * cursor walks) misbehaved.  A sparse chunk now owns its whole window,
  * so the lookup stops on it and sm_add widens its capacity in place.
  *
+ * sm_union and sm_difference had the same fault: where an RLE run
+ * overlapped such a chunk they encoded the result with the sparse
+ * chunk's reduced capacity and then emitted the run's remaining window
+ * bits as a second chunk at the same start.
+ *
  * Each case shifts a two-member map by an offset that leaves a reduced
- * chunk, then writes into the uncovered tail of that chunk's window
- * through one writer, then splits the result and runs the set ops with
- * it.  Every step is checked against a sorted-array oracle: sm_validate,
- * cardinality, membership of every bit of the affected windows, and
+ * chunk, runs the four set ops (both orders of difference) between it
+ * and RLE runs over that chunk's window, writes into the uncovered tail
+ * of the window through one writer, then splits the result there and
+ * runs the set ops on the halves.  Every step is checked against a
+ * byte-per-bit oracle: sm_validate, cardinality, every bit, and
  * sm_next_member order.
  */
 #include <sm.h>
@@ -189,6 +195,53 @@ split_and_ops(sm_t *m, uint64_t at, const char *what)
 }
 
 /*
+ * The four set ops between m (a reduced chunk) and a run [rlo, rhi)
+ * that covers its window, in both operand orders, against the oracle.
+ */
+static void
+ops_with_run(sm_t *m, uint64_t rlo, uint64_t rhi, const char *what)
+{
+	static uint8_t o_or[SPAN], o_and[SPAN], o_mr[SPAN], o_rm[SPAN],
+	    o_xor[SPAN];
+	sm_t *run = sm_create(4096);
+	sm_t *r[5];
+	const uint8_t *o[5] = { o_or, o_and, o_mr, o_rm, o_xor };
+	static const char *const name[5] = { "union", "intersection",
+		"m - run", "run - m", "xor" };
+	uint64_t i;
+	int k;
+	char buf[260];
+
+	sm_add_range(run, rlo, rhi);
+	for (i = 0; i < SPAN; i++) {
+		const int in_r = i >= rlo && i < rhi;
+		o_or[i] = (uint8_t)(want[i] | in_r);
+		o_and[i] = (uint8_t)(want[i] & in_r);
+		o_mr[i] = (uint8_t)(want[i] && !in_r);
+		o_rm[i] = (uint8_t)(!want[i] && in_r);
+		o_xor[i] = (uint8_t)(want[i] ^ in_r);
+	}
+	r[0] = sm_union(m, run);
+	r[1] = sm_intersection(m, run);
+	r[2] = sm_difference(m, run);
+	r[3] = sm_difference(run, m);
+	r[4] = sm_xor(m, run);
+	for (k = 0; k < 5; k++) {
+		snprintf(buf, sizeof(buf), "%s, %s run [%llu, %llu)", what,
+		    name[k], (unsigned long long)rlo, (unsigned long long)rhi);
+		if (r[k] != NULL) {
+			same(r[k], o[k], buf);
+		} else {
+			for (i = 0; i < SPAN && !o[k][i]; i++)
+				;
+			CHECK(i == SPAN, "%s: NULL result", buf);
+		}
+		sm_free(r[k]);
+	}
+	sm_free(run);
+}
+
+/*
  * The source member `a` lands at a + off.  When a sits at the top of
  * its window and the shift carries it into the next one, or a negative
  * shift pulls a window's start below the output window's, the output
@@ -217,6 +270,12 @@ one_case(uint64_t a, long off, enum how how, uint64_t pos, uint64_t len)
 		return;
 	}
 	if (same(m, want, what)) {
+		if (how == BY_ADD && pos == 2047 && len == 1) {
+			ops_with_run(m, win - W, win + 2 * W, what);
+			ops_with_run(m, win, win + W, what);
+			ops_with_run(m, win + 7, win + W + 9, what);
+			ops_with_run(m, win + 1500, win + 2 * W, what);
+		}
 		write_bits(m, how, lo, hi);
 		if (same(m, want, what))
 			split_and_ops(m, lo, what);
