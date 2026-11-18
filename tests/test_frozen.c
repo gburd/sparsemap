@@ -114,21 +114,16 @@ gen(int shape, uint64_t *v)
 	return (uniq(v, n));
 }
 
-/* Build a map from sorted members, one cursor-threaded add each.  Not
- * sm_add_many_grow: through 5.8.5 it drops a run that ends at UINT64_MAX
- * (the run's exclusive end wraps to 0). */
+/* Build a map from sorted members. */
 static sm_t *
 build(const uint64_t *v, size_t n)
 {
 	sm_t *m = sm_create(256);
-	sm_cursor_t c = SM_CURSOR_INIT;
-	size_t k;
 
-	for (k = 0; m != NULL && k < n; k++)
-		if (sm_add_grow_cursor(&m, v[k], &c) != v[k]) {
-			sm_free(m);
-			return (NULL);
-		}
+	if (m != NULL && n > 0 && !sm_add_many_grow(&m, v, n)) {
+		sm_free(m);
+		return (NULL);
+	}
 	return (m);
 }
 

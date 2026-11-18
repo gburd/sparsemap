@@ -209,13 +209,7 @@ build(int shape, set_t *s)
 		break;
 	}
 	set_normalize(s);
-	/* sm_add_many_grow mis-builds members near 2^64 on 5.8.5 (a separate
-	 * defect), so the top-of-universe shape is added one at a time. */
-	if (shape == 5) {
-		for (k = 0; k < s->n; k++)
-			if (sm_add_grow(&m, s->v[k]) != s->v[k])
-				exit(2);
-	} else if (s->n > 0 && !sm_add_many_grow(&m, s->v, s->n)) {
+	if (s->n > 0 && !sm_add_many_grow(&m, s->v, s->n)) {
 		fprintf(stderr, "sm_add_many_grow failed\n");
 		exit(2);
 	}
@@ -291,10 +285,7 @@ check_map(sm_t *m, const set_t *s, const char *what)
 		CHECK(sel[i] == want, "%s select_many(%llu) = %llu, want %llu",
 		    what, (unsigned long long)ks[i], (unsigned long long)sel[i],
 		    (unsigned long long)want);
-		/* sm_select casts k to ssize_t, so k >= 2^63 goes negative on
-		 * an RLE chunk (a separate 5.8.5 defect); compare below it. */
-		if ((i % (nk / 100 + 1) == 0 || i + 3 >= nk) &&
-		    ks[i] < (UINT64_C(1) << 63))
+		if (i % (nk / 100 + 1) == 0 || i + 3 >= nk)
 			CHECK(sel[i] == sm_select(m, ks[i], true),
 			    "%s select_many vs sm_select at %llu", what,
 			    (unsigned long long)ks[i]);

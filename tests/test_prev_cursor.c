@@ -105,7 +105,7 @@ members(int shape, uint64_t *v)
 		for (k = 0; k < 50; k++)
 			v[n++] = 200000 + rnd() % 100000;
 		break;
-	case 5: /* top of the universe; UINT64_MAX is the iteration sentinel */
+	case 5: /* top of the universe, up to the last member 2^64 - 2 */
 		v[n++] = 7;
 		v[n++] = UINT64_MAX - 2048;
 		v[n++] = UINT64_MAX - 2;
@@ -123,20 +123,16 @@ members(int shape, uint64_t *v)
 	return (d);
 }
 
-/* Build a map from sorted members.  Not sm_add_many_grow: through 5.8.5
- * it drops a run that ends at UINT64_MAX (the exclusive end wraps). */
+/* Build a map from sorted members. */
 static sm_t *
 build(const uint64_t *v, size_t n)
 {
 	sm_t *m = sm_create(256);
-	sm_cursor_t c = SM_CURSOR_INIT;
-	size_t k;
 
-	for (k = 0; m != NULL && k < n; k++)
-		if (sm_add_grow_cursor(&m, v[k], &c) != v[k]) {
-			sm_free(m);
-			return (NULL);
-		}
+	if (m != NULL && n > 0 && !sm_add_many_grow(&m, v, n)) {
+		sm_free(m);
+		return (NULL);
+	}
 	return (m);
 }
 

@@ -15,7 +15,7 @@
  *      it is not used as an oracle;
  *   3. scans: a forward scan with sm_locator_next_member and a reverse scan
  *      with sm_locator_prev_member each visit exactly the oracle's members;
- *   4. huge runs: RLE runs of nearly 2^31 bits, so one group of chunks
+ *   4. huge runs: RLE runs of more than 2^31 bits, so one group of chunks
  *      spans too far for the compact per-chunk record, checked against an
  *      interval oracle;
  *   5. cost: a reverse scan over 20,000 one-member chunks is O(log n) per
@@ -298,13 +298,7 @@ build(int shape, set_t *s)
 		break;
 	}
 	set_normalize(s);
-	/* sm_add_many_grow mis-builds members near 2^64 on 5.8.5 (a separate
-	 * defect), so the top-of-universe shape is added one at a time. */
-	if (shape == 5) {
-		for (k = 0; k < s->n; k++)
-			if (sm_add_grow(&m, s->v[k]) != s->v[k])
-				exit(2);
-	} else if (s->n > 0 && !sm_add_many_grow(&m, s->v, s->n)) {
+	if (s->n > 0 && !sm_add_many_grow(&m, s->v, s->n)) {
 		fprintf(stderr, "sm_add_many_grow failed\n");
 		exit(2);
 	}
@@ -522,16 +516,16 @@ fresh(void)
 }
 
 /*
- * Six RLE runs of 2^31 - 4096 bits each, a few windows apart, then single
- * members and a short run, checked against an interval oracle.  The
- * chunks sit in one group of 16 that spans far more than the 2^27 bits a
- * compact per-chunk record can express, so the group is stored with
- * absolute values (wide), and the set-bit prefixes inside it pass 2^32.
- * Each run stays below 2^31 bits and the runs do not touch: on
- * 5.8.5 sm_add_range truncates a longer run to its low 31 bits (a
- * separate defect), and adjacent runs coalesce into one.
+ * Six RLE runs of 2^31 + 4101 bits each, a few windows apart, then single
+ * members and a short run, checked against an interval oracle.  Each run
+ * is longer than one RLE chunk can hold, so it is stored as two chunks
+ * (the second with an unaligned end).  The chunks sit in one group of 16
+ * that spans far more than the 2^27 bits a compact per-chunk record can
+ * express, so the group is stored with absolute values (wide), and the
+ * set-bit prefixes inside it pass 2^32.  The runs do not touch, because
+ * the oracle needs a gap between them.
  */
-#define HUGE_RUN ((UINT64_C(1) << 31) - 4096)
+#define HUGE_RUN ((UINT64_C(1) << 31) + 4101)
 #define HUGE_AT(i) (4096 + (uint64_t)(i) * (HUGE_RUN + 4 * CHUNK))
 static int
 huge_runs(void)
