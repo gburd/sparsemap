@@ -5964,13 +5964,10 @@ sm_minimum(const sm_t *map)
 				    __sm_chunk_get_position(&chunk,
 				        (m * SM_FLAGS_PER_INDEX_BYTE) +
 				            (size_t)n)];
-				int k;
-				for (k = 0; k < SM_BITS_PER_VECTOR; k++) {
-					if (w & (__sm_bitvec_t)1 << k) {
-						offset = relative_position +
-						    (uint64_t)k;
-						goto done;
-					}
+				if (w != 0) {
+					offset = relative_position +
+					    (uint64_t)SM_CTZ64(w);
+					goto done;
 				}
 				relative_position += SM_BITS_PER_VECTOR;
 			}

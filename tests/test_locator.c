@@ -366,6 +366,15 @@ check_select0(const sm_locator_t *loc, const set_t *s, const uint64_t *p,
 	}
 	CHECK(sm_locator_select(loc, UINT64_MAX, false) == SM_IDX_MAX,
 	    "%s select0(UINT64_MAX)", what);
+	/* n >= 2^63, where a signed remainder would go negative. */
+	for (i = 0; i < 3; i++) {
+		const uint64_t k = (UINT64_C(1) << 63) + i * UINT64_C(12345);
+
+		CHECK(sm_locator_select(loc, k, false) == o_select0(s, k),
+		    "%s select0(2^63 + %zu)", what, i * 12345);
+		CHECK(sm_locator_select(loc, k, true) == SM_IDX_MAX,
+		    "%s select1(2^63 + %zu)", what, i * 12345);
+	}
 	CHECK(sm_locator_select(loc, UINT64_MAX - 1 - s->n, false) ==
 	        o_select0(s, UINT64_MAX - 1 - s->n),
 	    "%s select0 near the top", what);
