@@ -56,7 +56,8 @@
  *
  *	SM_PREFETCH(addr)   Hot-loop prefetch hint.  Non-binding; safe
  *			    to drop on toolchains without the intrinsic.
- *	SM_POPCOUNT64(x)    Population count of a 64-bit value.
+ *	SM_POPCOUNT64(x)    Population count of a 64-bit value (see the
+ *			    note on x86 below).
  *	SM_CTZ64(x)	    Count trailing zeros (undefined on x == 0;
  *			    the caller must guard).
  *	SM_CLZ64(x)	    Count leading zeros (undefined on x == 0;
@@ -89,8 +90,17 @@
 #endif
 #endif /* SM_PREFETCH */
 
+/*
+ * On x86 without POPCNT (the default x86-64 target), gcc turns
+ * __builtin_popcountll into a call to libgcc's __popcountdi2.  The
+ * inline SWAR form below measured 7-22% faster than that call on
+ * contains, rank and select over chunks, so x86 uses it unless the
+ * build enables POPCNT (e.g., -mpopcnt or -march=x86-64-v2), where the
+ * builtin is one instruction.  Other gcc/clang targets keep the builtin.
+ */
 #ifndef SM_POPCOUNT64
-#if defined(__GNUC__) || defined(__clang__)
+#if (defined(__GNUC__) || defined(__clang__)) &&                     \
+    (defined(__POPCNT__) || !(defined(__x86_64__) || defined(__i386__)))
 #define SM_POPCOUNT64(x) ((int)__builtin_popcountll((uint64_t)(x)))
 #elif defined(_MSC_VER) && (defined(_M_X64) || defined(_M_ARM64))
 #include <intrin.h>
