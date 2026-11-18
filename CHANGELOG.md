@@ -5,6 +5,84 @@ Notable changes per release.  The Rust port keeps its own log in
 across the C library, the Rust crate and the Python binding, so a
 release exists even where one of them is functionally unchanged.
 
+## 5.9.0 (no-rle variant)
+
+Matches the mainline 5.9.0, re-implemented on the sparse-only code;
+still zero run-length-encoding code.  No wire-format version change;
+`sm_t` and `sm_cursor_t` are unchanged.
+
+### Fixed
+
+- `sm_select(map, n, false)` counted only the unset bits before the
+  first chunk and inside chunks, so it answered too far right on any map
+  with a gap, or gave up (`{8192}`: select0(8192) was SM_IDX_MAX, not
+  8193).
+- Chunks that reach 2^64 no longer wrap their end to 0: `sm_and`,
+  `sm_andnot`, `sm_or`, `sm_xor`, `sm_add_many`, `sm_create_from_array`,
+  `sm_split` and the locator lost members or built invalid maps there.
+- `sm_offset` computed a chunk's shifted start in `ssize_t`, a signed
+  overflow for chunks at or above 2^63 (a mainline 5.7.0 fix that never
+  reached this build): a shift near the top dropped members or returned
+  NULL.
+- `sm_split` with the index in a gap between chunks moved the whole chunk
+  below the index into `other` (also a mainline 5.7.0 fix that never
+  reached this build; 1,007 of 2,000 random sparse splits were wrong),
+  and a split inside a chunk past its last member left an empty chunk in
+  `other` (`sm_minimum(other)` = 0).
+- `sm_offset` leaves chunks with NONE slots; a later `sm_add` into the
+  uncovered tail inserted a second chunk with the same start
+  (`sm_validate` false).  A chunk now owns its whole 2048-bit window.
+- `sm_validate` rejects a chunk with no member and a set bit 2^64 - 1;
+  `sm_open`, `sm_open_copy` and `sm_deserialize` drop empty chunks from
+  older streams first.
+- An emptied small-set map serializes like every other empty map
+  (header byte 6 is now 0).
+- sm.h no longer claims a stale locator stays correct: a bit flipped
+  inside a chunk is not detected.
+
+### Changed
+
+- SM_IDX_MAX (2^64 - 1) is not a member: the adders, `sm_remove` and the
+  bulk builders return EINVAL for it, `sm_add_grow` grows only on
+  ENOSPC, `sm_contains` is false for it, and `sm_offset` onto it is
+  ERANGE.
+- rank, select, span, scan and statistics read a small-set map's words
+  instead of building a chunk-mode copy (`sm_rank`: about 17 us to
+  27 ns).
+- Descriptor sizes and positions are one popcount; in-word select uses
+  pdep under BMI2; x86 builds without POPCNT use an inline popcount.
+- `sm_remove_range`, `sm_flip_range`, `sm_overlap`, `sm_is_subset` and
+  `sm_nonempty_difference` work run by run, not bit by bit.
+- `sm_prev_member` uses its cursor for a descending scan.
+- The locator is a two-level chunk directory (about 10 bytes per chunk):
+  contains, rank and select of both values are O(log chunks).
+- `sm_deserialize` reads streams written on the other byte order.
+- The README, sm.h, sm.c and docs no longer compare against PostgreSQL's
+  `Bitmapset` or list PostgreSQL TID sets as a good fit: measured on
+  those workloads, sparsemap is neither smaller nor faster.
+
+### Added
+
+`sm_locator_next_member`, `sm_locator_prev_member`, `sm_rank_many`,
+`sm_select_many`, `sm_next_member_op`, `sm_scan_op` (`sm_op_t`), and
+`sm_freeze` / `sm_frozen_*` / `sm_thaw` (a read-only Elias-Fano copy with
+its own serialized format).
+
+### Not applicable to this build
+
+The mainline's RLE run split, and its fix for a removal that emptied a
+chunk next to an RLE run (this build's coalesce is a no-op;
+`test_remove_between_runs` guards it).  A run here costs one 16-byte
+chunk per 2048 bits, so `sm_add_range` of 2^31 bits needs a 16 MiB
+buffer and fails with ENOSPC, map unchanged, in a smaller one.
+
+### Wire format
+
+5,000 maps built through the public API serialize byte-identically to
+no-rle-v5.8.5, and every no-rle-v5.8.5 stream reads and reserializes
+identically, apart from the two edge cases above (emptied small-set map;
+streams with an empty chunk).
+
 ## 5.8.5 (no-rle variant)
 
 Matches the mainline 5.8.5.  The read cursor's 5.8.4 gap resume trusted
