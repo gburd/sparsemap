@@ -2396,10 +2396,10 @@ CASE(test_guard_short_circuits)
             "locator rank agrees with plain rank");
         EXPECT(sm_locator_select(loc, 3, true) == sm_select(m, 3, true),
             "locator select agrees with plain select");
-        /* Mutating the map makes the locator stale.  Per the documented
-         * contract a stale locator still returns CORRECT answers -- it
-         * detects the mismatch and falls back to the plain O(n) path --
-         * it just loses the speedup.  So it must SEE the new bit. */
+        /* Adding 999999 inserts a new chunk, a structural change the
+         * locator's fingerprint check detects, so the queries fall back
+         * to the plain path and SEE the new bit.  (An in-place bit flip
+         * inside an existing chunk is not detected; see sm_locator_t.) */
         sm_add(m, 999999);
         EXPECT(sm_locator_contains(loc, 999999),
             "stale locator still correct: sees the new bit");
