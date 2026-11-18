@@ -1784,18 +1784,20 @@ void sm_to_array(const sm_t *map, uint64_t *out, size_t *n_out);
 
 /** @brief Set every bit in `[lo, hi)`.
  *
- * Equivalent to looping `sm_add(map, i)` for i in [lo, hi).
- * Implementation is currently the naive loop; a chunk-aware fast
- * path may land in a future release.
+ * Equivalent to looping `sm_add(map, i)` for i in [lo, hi), but
+ * run-based: O(runs + output chunks) however wide the range, so a
+ * 2^31-bit run costs a few chunks.  The map is rewritten in place and
+ * never relocates.
  *
  * The range is half open and hi is at most UINT64_MAX, so it never
  * includes SM_IDX_MAX: [lo, UINT64_MAX) reaches the last member.
  *
  * @param[in,out] map  Destination.
  * @param[in]     lo   Inclusive lower bound.
- * @param[in]     hi   Exclusive upper bound (lo == hi is a no-op).
- * @returns true if every bit was added; false if any add returned
- *          SPARSEMAP_IDX_MAX (capacity exhausted).
+ * @param[in]     hi   Exclusive upper bound (lo >= hi is a no-op).
+ * @returns true on success (and for lo >= hi); false for a NULL map,
+ *          on allocation failure, or with errno=ENOSPC when the result
+ *          does not fit the map's buffer (the map is then unchanged).
  */
 bool sm_add_range(sm_t *map, uint64_t lo, uint64_t hi);
 
