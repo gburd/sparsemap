@@ -2563,6 +2563,168 @@ __sm_small_maximum(const sm_t *map)
 	return (0);
 }
 
+/*
+ * Number of set bits of a small-mode map in the inclusive range
+ * [begin, end].  NB: the caller guarantees begin <= end.
+ */
+static size_t
+__sm_small_rank1(const sm_t *map, uint64_t begin, uint64_t end)
+{
+	const __sm_bitvec_unaligned_t *w = __sm_small_words(map);
+	const uint64_t nbits =
+	    (uint64_t)__sm_small_nwords(map) * SM_BITS_PER_VECTOR;
+	size_t first;
+	size_t last;
+	size_t count = 0;
+	size_t i;
+
+	if (begin >= nbits) {
+		return (0);
+	}
+	if (end >= nbits) {
+		end = nbits - 1;
+	}
+	/* Mask the first and last word to the range, popcount the rest. */
+	first = (size_t)(begin / SM_BITS_PER_VECTOR);
+	last = (size_t)(end / SM_BITS_PER_VECTOR);
+	for (i = first; i <= last; i++) {
+		__sm_bitvec_t x = w[i];
+		if (i == first) {
+			x &= ~(__sm_bitvec_t)0 << (begin % SM_BITS_PER_VECTOR);
+		}
+		if (i == last) {
+			x &= ~(__sm_bitvec_t)0 >>
+			    (SM_BITS_PER_VECTOR - 1 - end % SM_BITS_PER_VECTOR);
+		}
+		count += (size_t)SM_POPCOUNT64(x);
+	}
+	return (count);
+}
+
+/*
+ * sm_select on a small-mode map: the position of the n-th (0-based) bit
+ * equal to `value` in [0, 2^64 - 1), or SM_IDX_MAX if there is none.
+ * Whole words are skipped by popcount and the target word is searched
+ * with __sm_word_select.  Every bit past the last word is unset.
+ */
+static uint64_t
+__sm_small_select(const sm_t *map, uint64_t n, bool value)
+{
+	const __sm_bitvec_unaligned_t *w = __sm_small_words(map);
+	const size_t nw = __sm_small_nwords(map);
+	const uint64_t nbits = (uint64_t)nw * SM_BITS_PER_VECTOR;
+	size_t i;
+
+	for (i = 0; i < nw; i++) {
+		const __sm_bitvec_t x = value ? w[i] : ~w[i];
+		const uint64_t pc = (uint64_t)SM_POPCOUNT64(x);
+		if (n < pc) {
+			return ((uint64_t)i * SM_BITS_PER_VECTOR +
+			    __sm_word_select(x, (size_t)n));
+		}
+		n -= pc;
+	}
+	if (value || n >= SM_IDX_MAX - nbits) {
+		return (SM_IDX_MAX);
+	}
+	return (nbits + n);
+}
+
+/*
+ * The first position >= x whose bit equals `value` in a small-mode map,
+ * or SM_IDX_MAX if there is none.  An unset bit always exists below
+ * SM_IDX_MAX past the last word, so for value == false SM_IDX_MAX
+ * comes back only for x == SM_IDX_MAX.
+ */
+static uint64_t
+__sm_small_next(const sm_t *map, uint64_t x, bool value)
+{
+	const __sm_bitvec_unaligned_t *w = __sm_small_words(map);
+	const size_t nw = __sm_small_nwords(map);
+	const uint64_t nbits = (uint64_t)nw * SM_BITS_PER_VECTOR;
+	size_t i;
+
+	if (x >= nbits) {
+		return ((value || x == SM_IDX_MAX) ? SM_IDX_MAX : x);
+	}
+	for (i = (size_t)(x / SM_BITS_PER_VECTOR); i < nw; i++) {
+		__sm_bitvec_t b = value ? w[i] : ~w[i];
+		if (i == (size_t)(x / SM_BITS_PER_VECTOR)) {
+			b &= ~(__sm_bitvec_t)0 << (x % SM_BITS_PER_VECTOR);
+		}
+		if (b != 0) {
+			return ((uint64_t)i * SM_BITS_PER_VECTOR +
+			    (uint64_t)SM_CTZ64(b));
+		}
+	}
+	return (value ? SM_IDX_MAX : nbits);
+}
+
+/*
+ * sm_span on a small-mode map: the first position p >= idx such that
+ * the len bits [p, p + len - 1] all equal `value` (len 0 and 1 both
+ * accept the first matching bit), or SM_IDX_MAX if there is none.  It
+ * steps from run to run: a run of `value` starts at p and ends where
+ * the opposite value next appears.  An unset run past the last member
+ * never ends, so it holds len bits whenever p + len - 1 does not
+ * overflow, the same bound the chunk path's rank check applies.
+ */
+static uint64_t
+__sm_small_span(const sm_t *map, uint64_t idx, size_t len, bool value)
+{
+	uint64_t p = __sm_small_next(map, idx, value);
+
+	while (p != SM_IDX_MAX) {
+		const uint64_t q = __sm_small_next(map, p, !value);
+		if (q == SM_IDX_MAX) {
+			if (len == 0 || (uint64_t)len - 1 <= UINT64_MAX - p) {
+				return (p);
+			}
+			return (SM_IDX_MAX);
+		}
+		if (q - p >= (uint64_t)len) {
+			return (p);
+		}
+		p = __sm_small_next(map, q, value);
+	}
+	return (SM_IDX_MAX);
+}
+
+/*
+ * sm_scan on a small-mode map: deliver every set bit after the first
+ * `skip`, in ascending order, one batch per word that has any left.
+ */
+static void
+__sm_small_scan(const sm_t *map,
+    void (*scanner)(uint64_t[], size_t, void *aux), size_t skip, void *aux)
+{
+	const __sm_bitvec_unaligned_t *w = __sm_small_words(map);
+	const size_t nw = __sm_small_nwords(map);
+	uint64_t buffer[SM_BITS_PER_VECTOR];
+	size_t i;
+
+	for (i = 0; i < nw; i++) {
+		__sm_bitvec_t b = w[i];
+		const size_t pc = (size_t)SM_POPCOUNT64(b);
+		size_t n = 0;
+		if (skip >= pc) {
+			skip -= pc;
+			continue;
+		}
+		/* Fewer than 64 skipped bits remain in this word. */
+		while (skip > 0) {
+			b &= b - 1;
+			skip--;
+		}
+		while (b != 0) {
+			buffer[n++] = (uint64_t)i * SM_BITS_PER_VECTOR +
+			    (uint64_t)SM_CTZ64(b);
+			b &= b - 1;
+		}
+		scanner(&buffer[0], n, aux);
+	}
+}
+
 /* Materialize a small-mode map into a freshly allocated chunk-mode map
  * (adding each set bit).  Returns NULL on allocation failure.  The
  * caller owns the result and disposes it with sm_free().  Used to give
@@ -6010,11 +6172,7 @@ sm_scan(const sm_t *map, void (*scanner)(uint64_t[], size_t, void *aux),
 	if (map == NULL)
 		return;
 	if (__sm_is_small(map)) {
-		sm_t *m = __sm_materialize(map);
-		if (m == NULL)
-			return;
-		sm_scan(m, scanner, skip, aux);
-		sm_free(m);
+		__sm_small_scan(map, scanner, skip, aux);
 		return;
 	}
 	p = __sm_get_chunk_data(map, 0);
@@ -7079,6 +7237,9 @@ sm_offset(const sm_t *map, ssize_t offset)
 		return (NULL);
 	}
 	if (__sm_is_small(map)) {
+		/* This builds a new map anyway, so the chunk-mode copy costs
+		 * no more than the result; the query paths read small maps
+		 * directly instead. */
 		sm_t *m = __sm_materialize(map);
 		sm_t *r;
 		if (m == NULL)
@@ -9498,6 +9659,43 @@ sm_validate(const sm_t *map)
 	return (p == end);
 }
 
+/*
+ * The chunk breakdown of a small-mode map for sm_statistics: the chunk
+ * view its words materialize to, which is what sm_statistics reported
+ * through 5.8.5 by building that view.  A nonempty set lies in one chunk
+ * at start 0.  That chunk is RLE when the set is a run from bit 0 and
+ * either the run ends mid-word (the promote prefers a 24-byte RLE chunk
+ * to a sparse chunk with a payload word) or the run is longer than 128
+ * bits (adding the bits in order leaves small mode at bit 128 as an RLE
+ * chunk, which then grows); otherwise it is sparse.  bytes_per_set_bit
+ * is the view's footprint, __sm_small_chunk_bytes, per set bit.  The
+ * caller fills bytes_used and bytes_capacity from the map itself.
+ * NB: stats must be zeroed.
+ */
+static void
+__sm_small_statistics(const sm_t *map, sm_stats_t *stats)
+{
+	const uint64_t card = __sm_small_cardinality(map);
+	uint64_t run_len = 0;
+
+	if (card == 0) {
+		return;
+	}
+	stats->chunks_total = 1;
+	stats->bits_set = card;
+	if (__sm_small_is_run_from_zero(map, &run_len) &&
+	    (run_len % SM_BITS_PER_VECTOR != 0 ||
+	        run_len > 2 * SM_BITS_PER_VECTOR)) {
+		stats->chunks_rle = 1;
+		stats->bits_in_rle = card;
+	} else {
+		stats->chunks_sparse = 1;
+		stats->bits_in_sparse = card;
+	}
+	stats->bytes_per_set_bit =
+	    (double)__sm_small_chunk_bytes(map) / (double)card;
+}
+
 void
 sm_statistics(const sm_t *map, sm_stats_t *stats)
 {
@@ -9508,14 +9706,7 @@ sm_statistics(const sm_t *map, sm_stats_t *stats)
 		return;
 
 	if (__sm_is_small(map)) {
-		/* Report the small map's real footprint; derive the chunk
-		 * breakdown from a materialized view (it would occupy those
-		 * chunks were it promoted). */
-		sm_t *m = __sm_materialize(map);
-		if (m != NULL) {
-			sm_statistics(m, stats);
-			sm_free(m);
-		}
+		__sm_small_statistics(map, stats);
 		stats->bytes_used = sm_get_size((sm_t *)map);
 		stats->bytes_capacity = sm_get_capacity(map);
 		return;
@@ -11255,14 +11446,7 @@ sm_select(sm_t *map, uint64_t n, bool value)
 		return (value ? SM_IDX_MAX : n);
 	}
 	if (__sm_is_small(map)) {
-		sm_t *m = __sm_materialize(map);
-		if (m == NULL)
-			return (value ? SM_IDX_MAX : n);
-		{
-			const uint64_t r = sm_select(m, n, value);
-			sm_free(m);
-			return (r);
-		}
+		return (__sm_small_select(map, n, value));
 	}
 	__sm_check_invariants(map);
 	__sm_assert(sm_get_size(map) >= SM_SIZEOF_OVERHEAD);
@@ -11376,6 +11560,11 @@ __sm_rank_vec(sm_t *map, uint64_t begin, uint64_t end, bool value,
 	width =
 	    (span_width == UINT64_MAX) ? SIZE_MAX : (size_t)(span_width + 1);
 
+	if (__sm_is_small(map)) {
+		set = __sm_small_rank1(map, begin, end);
+		return (value ? set : width - set);
+	}
+
 	/*
 	 * Rank is computed from the set-bit count only.  A bit is set
 	 * iff some chunk covers it, so the number of set bits in the
@@ -11462,16 +11651,6 @@ sm_rank(sm_t *map, uint64_t begin, uint64_t end, bool value)
 	__sm_bitvec_t vec;
 	if (map == NULL)
 		return (0);
-	if (__sm_is_small(map)) {
-		sm_t *m = __sm_materialize(map);
-		if (m == NULL)
-			return (0);
-		{
-			const size_t r = sm_rank(m, begin, end, value);
-			sm_free(m);
-			return (r);
-		}
-	}
 	__sm_check_invariants(map);
 	return (__sm_rank_vec(map, begin, end, value, &vec));
 }
@@ -11485,14 +11664,7 @@ sm_span(sm_t *map, uint64_t idx, size_t len, bool value)
 	if (map == NULL)
 		return (SM_IDX_MAX);
 	if (__sm_is_small(map)) {
-		sm_t *m = __sm_materialize(map);
-		if (m == NULL)
-			return (SM_IDX_MAX);
-		{
-			const uint64_t r = sm_span(m, idx, len, value);
-			sm_free(m);
-			return (r);
-		}
+		return (__sm_small_span(map, idx, len, value));
 	}
 	__sm_check_invariants(map);
 
@@ -11503,12 +11675,19 @@ sm_span(sm_t *map, uint64_t idx, size_t len, bool value)
 	/* Find the first bit that matches value, then... */
 	offset = sm_select(map, nth, value);
 	do {
+		size_t rank;
+		int amt = 1;
+		/* A run of len bits from here would pass 2^64, and the start
+		 * only moves right.  Without this, an unset span longer than
+		 * the rest of the universe stepped through every unset bit. */
+		if (len > 0 && (uint64_t)len - 1 > UINT64_MAX - offset) {
+			return (SM_IDX_MAX);
+		}
 		/* See if the rank of the bits in the range starting at offset is equal
 		 * to the desired amount. */
-		size_t rank = (len == 1) ?
+		rank = (len == 1) ?
 		    1 :
 		    __sm_rank_vec(map, offset, offset + len - 1, value, &vec);
-		int amt = 1;
 		if (rank >= len) {
 			/* We've found what we're looking for, return the index of the first
 			 * bit in the range. */
