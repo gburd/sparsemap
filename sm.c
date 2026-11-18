@@ -5229,6 +5229,11 @@ __sm_map_unset(sm_t *map, uint64_t idx, const bool coalesce)
 			    SM_SIZEOF_OVERHEAD + (sizeof(__sm_bitvec_t) * 2));
 			__sm_set_chunk_count(map,
 			    __sm_get_chunk_count(map) - 1);
+			/* `chunk` and `start` still describe the removed
+			 * chunk while its bytes now hold the next chunk, so
+			 * coalescing would merge a run that is not there.  An
+			 * emptied window cannot join its neighbours anyway. */
+			offset = SM_UNSET_NO_COALESCE;
 		} else {
 			offset +=
 			    SM_SIZEOF_OVERHEAD + pos * sizeof(__sm_bitvec_t);
