@@ -4284,7 +4284,8 @@ __sm_drop_empty_chunks(sm_t *map)
 		__sm_chunk_t chunk;
 		size_t size;
 		if (SM_SIZEOF_OVERHEAD + off + SM_SIZEOF_OVERHEAD +
-		        sizeof(__sm_bitvec_t) > map->m_data_used) {
+		        sizeof(__sm_bitvec_t) >
+		    map->m_data_used) {
 			return;
 		}
 		__sm_chunk_init(&chunk,
@@ -4295,8 +4296,9 @@ __sm_drop_empty_chunks(sm_t *map)
 		}
 		if (__sm_chunk_is_empty_any(&chunk)) {
 			uint8_t *p = __sm_get_chunk_data(map, off);
-			memmove(p, p + size, map->m_data_used -
-			    (SM_SIZEOF_OVERHEAD + off + size));
+			memmove(p, p + size,
+			    map->m_data_used -
+			        (SM_SIZEOF_OVERHEAD + off + size));
 			map->m_data_used -= size;
 			__sm_set_chunk_count(map,
 			    __sm_get_chunk_count(map) - 1);
@@ -8177,8 +8179,7 @@ sm_prev_member(const sm_t *map, uint64_t prev_idx, sm_cursor_t *cur)
 }
 
 /* Defined with the run iterator below. */
-static bool __sm_run_pair_any(const sm_t *a, const sm_t *b,
-    bool want_shared);
+static bool __sm_run_pair_any(const sm_t *a, const sm_t *b, bool want_shared);
 
 bool
 sm_is_subset(const sm_t *a, const sm_t *b)
@@ -10138,7 +10139,8 @@ sm_serialize(const sm_t *map, uint8_t *out, size_t out_size)
 	/* The flag mirrors the body written below, which for an empty map is
 	 * the chunk-mode header whichever mode the map is in. */
 	out[6] = (map != NULL && !sm_is_empty(map) && __sm_is_small(map)) ?
-	    SM_WIRE_FLAG_SMALL : 0;
+	    SM_WIRE_FLAG_SMALL :
+	    0;
 	out[7] = 0;
 	memcpy(out + 8, &cardinality, 8);
 
@@ -10696,8 +10698,8 @@ sm_difference(const sm_t *a, const sm_t *b)
 			__sm_chunk_init(&b_chunk, bp + SM_SIZEOF_OVERHEAD);
 			b_rle = SM_IS_CHUNK_RLE(&b_chunk);
 			b_size = __sm_chunk_get_size(&b_chunk);
-			b_end = (size_t)__sm_chunk_window_end(&b_chunk,
-			    b_start);
+			b_end =
+			    (size_t)__sm_chunk_window_end(&b_chunk, b_start);
 
 			/* b is past a: no more overlaps for this a chunk */
 			if (a_end <= (size_t)b_start)
@@ -10825,9 +10827,10 @@ sm_difference(const sm_t *a, const sm_t *b)
 				int i;
 
 				if (a_rle && !b_rle) {
-					/* a is RLE, b is sparse.  a's run covers
-					 * the whole window, including slots b's
-					 * NONE flags leave out (NULL flags). */
+					/* a is RLE, b is sparse.  a's run
+					 * covers the whole window, including
+					 * slots b's NONE flags leave out
+					 * (NULL flags). */
 					__sm_expand_sparse_chunk(&b_chunk, bw2,
 					    bc2);
 					__sm_expand_rle_as_words(&a_chunk,
@@ -11248,9 +11251,10 @@ sm_union(const sm_t *a, const sm_t *b)
 				int nvecs2;
 				int i;
 
-				/* The run's bits cover the whole window even
-				 * where NONE slots cut the sparse side short, so
-				 * expand it at full capacity (NULL flags). */
+				/* The run's bits cover the whole window,
+				 * even where NONE slots cut the sparse side
+				 * short: expand it at full capacity (NULL
+				 * flags). */
 				if (a_rle && !b_rle) {
 					__sm_expand_sparse_chunk(&b_chunk, bw2,
 					    bc2);
@@ -11652,8 +11656,8 @@ sm_split(sm_t *map, uint64_t idx, sm_t *other)
 			__sm_set_chunk_count(other,
 			    __sm_get_chunk_count(other) - 1);
 		} else {
-			dst += SM_SIZEOF_OVERHEAD +
-			    __sm_chunk_get_size(&d_chunk);
+			dst +=
+			    SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&d_chunk);
 		}
 		i++;
 

@@ -393,8 +393,8 @@ static void
 long_runs(void)
 {
 	const uint64_t lo = 4096, hi = 4096 + P31;
-	sm_t *m = sm_create(4096), *one = sm_create(1024), *in = sm_create(4096);
-	sm_t *c;
+	sm_t *m = sm_create(4096), *one = sm_create(1024);
+	sm_t *in = sm_create(4096), *c;
 	bool r = false;
 
 	CHECK(sm_add_range(m, lo, hi), "build run");
@@ -416,11 +416,14 @@ long_runs(void)
 	CHECK(r, "nonempty_difference");
 
 	c = sm_copy(m);
-	TIMED("remove_range middle", r = sm_remove_range(c, lo + 1000, hi - 1000));
+	TIMED("remove_range middle",
+	    r = sm_remove_range(c, lo + 1000, hi - 1000));
 	CHECK(r && sm_validate(c) && sm_cardinality(c) == 2000,
 	    "remove_range middle: card %zu", sm_cardinality(c));
-	CHECK(sm_contains(c, lo + 999, NULL) && !sm_contains(c, lo + 1000, NULL) &&
-	        !sm_contains(c, hi - 1001, NULL) && sm_contains(c, hi - 1000, NULL),
+	CHECK(sm_contains(c, lo + 999, NULL) &&
+	        !sm_contains(c, lo + 1000, NULL) &&
+	        !sm_contains(c, hi - 1001, NULL) &&
+	        sm_contains(c, hi - 1000, NULL),
 	    "remove_range middle: edges");
 	sm_free(c);
 

@@ -321,9 +321,10 @@ main(void)
 			const uint64_t at = as[ai] + (uint64_t)offs[oi];
 			const uint64_t poss[] = { at % W / 64 * 64 + 64,
 				at % W / 64 * 64 + 65, 1100, 1600, 2047 };
-			for (pi = 0; pi < sizeof(poss) / sizeof(poss[0]); pi++)
-				for (li = 0; li < sizeof(lens) / sizeof(lens[0]);
-				     li++)
+			const size_t np = sizeof(poss) / sizeof(poss[0]);
+			const size_t nl = sizeof(lens) / sizeof(lens[0]);
+			for (pi = 0; pi < np; pi++)
+				for (li = 0; li < nl; li++)
 					for (how = 0; how < NHOW; how++)
 						one_case(as[ai], offs[oi],
 						    (enum how)how, poss[pi],
