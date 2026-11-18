@@ -5,6 +5,166 @@ Notable changes per release.  The Rust port keeps its own log in
 across the C library, the Rust crate and the Python binding, so a
 release exists even where one of them is functionally unchanged.
 
+## 5.9.0
+
+A correctness and performance release.  It fixes every defect found by a
+review of sparsemap against the Rust succinct-structure crates sucds and
+vers-vecs, an independent differential fuzz campaign (about 2.5 billion
+checks against a sorted-interval oracle), and the CBMC cursor proofs.
+It also adds the APIs that review recommended.
+
+No API removal and no wire-format version change (still version 2).
+`sizeof(struct sparsemap)` and `sizeof(sm_cursor_t)` are unchanged.
+`sm_locator_t` changed layout (it is documented as opaque, but callers
+that include sm.h must recompile).  Serialized output is byte-identical
+to 5.8.5 for every map 5.8.5 encoded correctly; see "Wire format" below.
+
+### Fixed: data loss and wrong answers (all present in 5.8.5)
+
+- **Removing a chunk's last member next to an RLE run corrupted the
+  run.**  Emptying a sparse chunk that sat between an RLE run and the
+  next chunk coalesced using the removed chunk's stale state: the last
+  2048 bits of the following run were cleared and the removed bits came
+  back.  Cardinality stayed right and `sm_validate` passed.  Reached
+  through `sm_remove`, `sm_remove_range`, `sm_flip_range` and
+  `sm_pop_*`.
+- **RLE runs of 2^31 bits or more were truncated** to their low 31
+  bits: `sm_add_range(m, 0, 2^31)` returned success and left an empty
+  map, and extending a run past 2^31 with `sm_add` lost the whole run.
+  Long runs now span several RLE chunks.
+- **The top of the 64-bit universe.**  A chunk or run ending at 2^64
+  computed its end as 0.  `sm_and`, `sm_andnot` and `sm_or` lost members
+  or built invalid maps there.  `sm_xor`, `sm_add_many`,
+  `sm_create_from_array` and `sm_add_range` emitted an unaligned chunk
+  that iteration skipped.  `sm_split`, `sm_remove` and the locator never
+  matched the top chunk.  `sm_validate` (and so `sm_open` /
+  `sm_deserialize`) skipped its overlap check after such a chunk.
+- **`sm_select(map, n, false)` was wrong on any map with a gap between
+  chunks**, and returned SM_IDX_MAX for unset bits past the last chunk
+  (`{8192}`: select0(8192) was SM_IDX_MAX, not 8193).  select0 is now
+  defined over [0, 2^64 - 1) and documented in sm.h.
+  `sm_select(map, n, true)` with n >= 2^63 could return a member; it
+  returns SM_IDX_MAX.
+- **Duplicate chunk starts after `sm_offset`.**  `sm_offset` leaves a
+  chunk with reduced capacity.  A later add into the uncovered tail of
+  its 2048-bit window, or `sm_union` / `sm_difference` with an RLE run
+  over it, wrote a second chunk with the same start (`sm_validate`
+  false).  A sparse chunk now owns its whole window.
+- **`sm_split` left an empty chunk in `other`**, so `sm_minimum(other)`
+  returned 0.  `sm_validate` now rejects a chunk with no member;
+  `sm_open`, `sm_open_copy` and `sm_deserialize` drop such chunks from
+  older streams before validating, so every set 5.8.5 wrote still reads.
+- **`sm_span` with a length longer than the rest of the universe**
+  never returned.
+
+### Fixed: contracts
+
+- **The locator's stale contract.**  sm.h promised a stale
+  `sm_locator_t` still returned correct answers.  It did not after a
+  bit flipped inside an existing chunk (85 of 100 rank answers wrong).
+  The contract now says any mutation invalidates the locator and a
+  stale one can answer wrong; its cheap check also compares the buffer
+  pointer, used size and cardinality cache.
+- **SM_IDX_MAX (2^64 - 1) is not a member.**  It is the API's "not
+  found" value, so storing it made `sm_add`, `sm_next_member`,
+  `sm_select` and friends ambiguous.  The member universe is now
+  [0, 2^64 - 1):
+  - adding it fails with EINVAL and changes nothing, and
+    `sm_add_grow` no longer grows the buffer on it;
+  - the bulk builders reject an input that holds it;
+  - `sm_validate` (and so every reader) rejects a buffer that sets it;
+  - `sm_offset` onto it fails with ERANGE.
+- An emptied small-set map serialized with the small-set header flag
+  set; it now writes the same bytes as any other empty map (readers
+  accept both).
+
+### Performance
+
+Measured on EC2 c7i.metal-24xl (Xeon 8488C, Fedora 45, gcc 16, pinned
+to one core, three alternating rounds), against 5.8.5 with the same
+harness and data (a 10^8 universe, 9 shapes):
+
+| operation | 5.9 vs 5.8.5 |
+|---|---|
+| `sm_contains`, random | 2.6-7.5x faster |
+| `sm_contains`, ascending cursor | 1.9-8.6x |
+| `sm_rank` | 1.5-5.0x |
+| `sm_select` | 7-85x |
+| successor (`sm_next_member` from x) | 2.8-7.5x |
+| full iteration | 1.0-2.5x |
+| locator contains | 3.5-33x |
+| locator rank | 16-235x |
+| locator select | 17-708x |
+
+On uniform density 1e-2 (48,829 chunks) the locator now answers
+contains in 107 ns and rank / select in about 220 ns (5.8.5: 3.5 us,
+40 us, 42 us).
+
+- Chunk descriptor size, capacity and payload position are one popcount
+  each.  In-word select skips words by popcount and uses `pdep` when
+  built with BMI2.
+- `sm_rank`, `sm_select`, `sm_span`, `sm_scan` and `sm_statistics` read
+  small-set maps directly instead of building a chunk-mode copy on every
+  call (about 29 us down to 20-50 ns; `sm_scan` about 180 ns).
+- `sm_remove_range`, `sm_flip_range`, `sm_overlap`, `sm_is_subset` and
+  `sm_nonempty_difference` work run by run instead of bit by bit (for
+  example, `sm_is_subset` of two 200k-member maps went from 6.3 s to
+  9.5 ms).  On a result that does not fit, `sm_remove_range` and
+  `sm_flip_range` fail with ENOSPC and leave the map unchanged.
+- `sm_prev_member` uses its cursor: a descending scan is O(1) per member
+  within a chunk.
+- x86 builds without POPCNT use an inline popcount instead of a libgcc
+  call; pass `-mpopcnt` for the instruction.
+- `sm_minimum` uses count-trailing-zeros on a mixed word.
+
+### Added
+
+- **`sm_locator_t` is a two-level chunk directory** (about 10 bytes per
+  chunk): contains, rank and select of both values run in O(log chunks).
+  New `sm_locator_next_member` and `sm_locator_prev_member` step in
+  either direction in O(log chunks).
+- **`sm_rank_many` and `sm_select_many`**: batch rank (set bits strictly
+  below each position) and select over sorted queries, in one
+  O(chunks + n) sweep.
+- **`sm_next_member_op` and `sm_scan_op`** with `sm_op_t` (AND, OR,
+  ANDNOT, XOR): iterate `a OP b` without building the result map.
+- **`sm_freeze`, `sm_frozen_*` and `sm_thaw`**: a read-only Elias-Fano
+  copy for very sparse, read-mostly maps (about 2 bytes per member at
+  density 1e-4, against 22 for `sm_t`), with contains, rank, select,
+  next and prev, and its own versioned little-endian serialization.
+- **Cross-endian reads**: `sm_deserialize` reads a stream written on a
+  host of the other byte order (it byte-swaps each 64-bit word, then
+  validates as before).  The writer is unchanged.
+
+### Wire format
+
+Still version 2, and byte-identical to 5.8.5 for every map 5.8.5
+encoded correctly.  In a differential of 5,000 maps built through the
+public API, every map whose bytes differed was one 5.8.5 had built
+wrongly: checked against a sorted oracle, 5.8.5 got 3,621 of them
+wrong, 5.9.0 none.  Three deliberate changes:
+
+- an emptied small-set map writes header byte 6 as 0;
+- a run grown one bit at a time past 0x7FFFF800 bits is split into
+  chunk-aligned pieces;
+- a reader drops an empty chunk from an older stream.
+
+### Documentation
+
+- The README and sparsemap(7) no longer list PostgreSQL TID sets, bitmap
+  heap scans and posting lists as a good fit, and the README, sm.c and
+  docs/PERFORMANCE.md no longer compare against PostgreSQL's
+  `Bitmapset`: measured on those workloads, sparsemap is neither smaller
+  nor faster than `Bitmapset`.  docs/PERFORMANCE.md is marked as a
+  3.0.0-era baseline.
+- docs/ARCHITECTURE.md no longer claims the chunk stream can be
+  binary-searched.
+
+### Build
+
+- Removed `scripts/check_chunk_vector_size_table.sh` and its generator;
+  the table they checked no longer exists.
+
 ## 5.8.5
 
 A correctness fix to the 5.8.4 read cursor, reported by pg_fts (found
