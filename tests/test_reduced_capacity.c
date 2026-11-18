@@ -21,9 +21,10 @@
  * chunk, runs the four set ops (both orders of difference) between it
  * and RLE runs over that chunk's window, writes into the uncovered tail
  * of the window through one writer, then splits the result there and
- * runs the set ops on the halves.  Every step is checked against a
- * byte-per-bit oracle: sm_validate, cardinality, every bit, and
- * sm_next_member order.
+ * runs the set ops on the halves.  The unwritten map is split at the
+ * same index too, so sm_split sees the reduced chunk itself.  Every step
+ * is checked against a byte-per-bit oracle: sm_validate, cardinality,
+ * every bit, and sm_next_member order.
  */
 #include <sm.h>
 
@@ -270,6 +271,14 @@ one_case(uint64_t a, long off, enum how how, uint64_t pos, uint64_t len)
 		return;
 	}
 	if (same(m, want, what)) {
+		if (how == BY_ADD && len == 1) {
+			/* Split the reduced chunk itself, at an index in or
+			 * past its capacity. */
+			sm_t *c = sm_set_data_size(sm_copy(m), NULL, 1 << 16);
+			if (c != NULL)
+				split_and_ops(c, lo, what);
+			sm_free(c);
+		}
 		if (how == BY_ADD && pos == 2047 && len == 1) {
 			ops_with_run(m, win - W, win + 2 * W, what);
 			ops_with_run(m, win, win + W, what);
