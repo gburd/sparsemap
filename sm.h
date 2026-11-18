@@ -251,7 +251,9 @@ typedef SSIZE_T ssize_t;
 #define sm_t                 SM__P(sm_t)
 #define sm_allocator_t       SM__P(sm_allocator_t)
 #define sm_cursor_t          SM__P(sm_cursor_t)
+#define sm_frozen_t          SM__P(sm_frozen_t)
 #define sm_membership_t      SM__P(sm_membership_t)
+#define sm_op_t              SM__P(sm_op_t)
 #define sm_stats_t           SM__P(sm_stats_t)
 #define sm_subset_relation_t SM__P(sm_subset_relation_t)
 
@@ -286,6 +288,18 @@ typedef SSIZE_T ssize_t;
 #define sm_fill_factor              SM__P(sm_fill_factor)
 #define sm_flip_range               SM__P(sm_flip_range)
 #define sm_free                     SM__P(sm_free)
+#define sm_freeze                   SM__P(sm_freeze)
+#define sm_frozen_cardinality       SM__P(sm_frozen_cardinality)
+#define sm_frozen_contains          SM__P(sm_frozen_contains)
+#define sm_frozen_deserialize       SM__P(sm_frozen_deserialize)
+#define sm_frozen_free              SM__P(sm_frozen_free)
+#define sm_frozen_next_member       SM__P(sm_frozen_next_member)
+#define sm_frozen_prev_member       SM__P(sm_frozen_prev_member)
+#define sm_frozen_rank              SM__P(sm_frozen_rank)
+#define sm_frozen_select            SM__P(sm_frozen_select)
+#define sm_frozen_serialize         SM__P(sm_frozen_serialize)
+#define sm_frozen_serialized_size   SM__P(sm_frozen_serialized_size)
+#define sm_frozen_size              SM__P(sm_frozen_size)
 #define sm_get_capacity             SM__P(sm_get_capacity)
 #define sm_get_data                 SM__P(sm_get_data)
 #define sm_get_size                 SM__P(sm_get_size)
@@ -311,6 +325,7 @@ typedef SSIZE_T ssize_t;
 #define sm_membership               SM__P(sm_membership)
 #define sm_minimum                  SM__P(sm_minimum)
 #define sm_next_member              SM__P(sm_next_member)
+#define sm_next_member_op           SM__P(sm_next_member_op)
 #define sm_nonempty_difference      SM__P(sm_nonempty_difference)
 #define sm_offset                   SM__P(sm_offset)
 #define sm_open                     SM__P(sm_open)
@@ -326,6 +341,7 @@ typedef SSIZE_T ssize_t;
 #define sm_remove                   SM__P(sm_remove)
 #define sm_remove_range             SM__P(sm_remove_range)
 #define sm_scan                     SM__P(sm_scan)
+#define sm_scan_op                  SM__P(sm_scan_op)
 #define sm_select                   SM__P(sm_select)
 #define sm_select_many              SM__P(sm_select_many)
 #define sm_serialize                SM__P(sm_serialize)
@@ -338,6 +354,7 @@ typedef SSIZE_T ssize_t;
 #define sm_split                    SM__P(sm_split)
 #define sm_statistics               SM__P(sm_statistics)
 #define sm_subset_compare           SM__P(sm_subset_compare)
+#define sm_thaw                     SM__P(sm_thaw)
 #define sm_to_array                 SM__P(sm_to_array)
 #define sm_union                    SM__P(sm_union)
 #define sm_union_cardinality        SM__P(sm_union_cardinality)
@@ -465,11 +482,14 @@ struct SM_ALIGNED(8) sparsemap {
  * otherwise O(N^2) scan into O(N).  A lookup that falls in the gap
  * before a chunk caches that chunk's left neighbour, so the next lookup
  * in the same gap still resumes.  sm_contains() and sm_next_member()
- * use the cursor; sm_prev_member() accepts one but ignores it.
+ * use the cursor for ascending lookups; sm_prev_member() uses it for a
+ * descending scan (see its documentation for what that saves).
  *
  * Contract:
  *   - Initialize with `sm_cursor_t c = SM_CURSOR_INIT;` before the loop.
- *   - Pass `&c` to consecutive lookups with non-decreasing idx.
+ *   - Pass `&c` to consecutive lookups with non-decreasing idx (or, for
+ *     sm_prev_member(), non-increasing idx).  Out-of-order lookups are
+ *     still correct, only slower.
  *   - ANY mutation of the map (sm_add / sm_remove / sm_assign /
  *     sm_set_data_size / sm_clear / sm_split / the *_inplace ops / ...)
  *     between two cursor uses invalidates the cursor; reset it with
@@ -1430,18 +1450,211 @@ uint64_t sm_next_member(const sm_t *map, uint64_t prev_idx, sm_cursor_t *cur);
  * Standard idiom for reverse iteration:
  * @code
  *   uint64_t i = SM_IDX_MAX;  // start past-the-end
- *   while ((i = sm_prev_member(map, i, NULL)) != SM_IDX_MAX) {
+ *   sm_cursor_t c = SM_CURSOR_INIT;
+ *   while ((i = sm_prev_member(map, i, &c)) != SM_IDX_MAX) {
  *       // i is the previous set bit
  *   }
  * @endcode
  *
+ * Without a cursor every call walks the chunk list from chunk 0, so it
+ * costs O(chunks).  With a cursor, the chunk that held the answer is
+ * recorded, and the next call starts its walk there once it has checked
+ * the chunk's start word (as sm_next_member() does).  A descending scan
+ * is then O(1) per member while it stays inside one chunk.  Stepping
+ * back to an EARLIER chunk still walks from chunk 0, because the walk
+ * may not start anywhere it has not verified, so a reverse scan over a
+ * map with many chunks costs O(chunks) per chunk crossed.  For
+ * O(log chunks) reverse steps use a locator.  The cursor contract of
+ * sm_cursor_t applies: reset it after mutating the map.
+ *
  * @param[in] map       The sparsemap to scan.
  * @param[in] prev_idx  Upper exclusive bound (use SM_IDX_MAX for "start at end").
- * @param[in] cur       Optional read cursor (currently unused for reverse
- *                      iteration; accepted for API symmetry), or NULL.
+ * @param[in,out] cur   Optional read cursor for a descending scan, or
+ *                      NULL.  See sm_cursor_t.
  * @returns The previous set bit index, or SM_IDX_MAX if none.
+ * @see sm_locator_prev_member()
  */
 uint64_t sm_prev_member(const sm_t *map, uint64_t prev_idx, sm_cursor_t *cur);
+
+/* -------------------------------------------------------------------
+ * Lazy iteration over a combined set
+ *
+ * Walk the members of (a OP b) without building the result map.  For
+ * callers that combine two maps only to iterate the result once.
+ * ------------------------------------------------------------------- */
+
+/** @brief The set operation a lazy iteration applies. */
+typedef enum {
+	SM_OP_AND = 0,    /**< members of both a and b */
+	SM_OP_OR = 1,     /**< members of a or b or both */
+	SM_OP_ANDNOT = 2, /**< members of a that b lacks */
+	SM_OP_XOR = 3     /**< members of exactly one of a and b */
+} sm_op_t;
+
+/** @brief Find the lowest member of (a OP b) at index > \a prev_idx.
+ *
+ * Gives the same answer as sm_next_member() on the map sm_and(),
+ * sm_or(), sm_andnot() or sm_xor() would build, without building it.
+ * Pass `SM_IDX_MAX` to start at the first member; a member at
+ * UINT64_MAX cannot be told apart from "none", as with
+ * sm_next_member().
+ *
+ * @code
+ *   sm_cursor_t ca = SM_CURSOR_INIT, cb = SM_CURSOR_INIT;
+ *   uint64_t i = SM_IDX_MAX;
+ *   while ((i = sm_next_member_op(a, b, SM_OP_AND, i, &ca, &cb)) !=
+ *       SM_IDX_MAX) {
+ *       // i is in both a and b
+ *   }
+ * @endcode
+ *
+ * Cost: AND leapfrogs the two member streams, so each step skips to
+ * the larger of the two next members; OR takes the smaller of the two
+ * next members; ANDNOT and XOR jump over a stretch of members common
+ * to both maps in one step per chunk it spans.  None of them walks a
+ * run bit by bit, so a long RLE run in one map against an empty or
+ * sparse other map costs O(chunks), not O(run length).  Without
+ * cursors each call walks both chunk lists from chunk 0, O(chunks)
+ * per call.  With cursors an ascending scan is O(chunks(a) +
+ * chunks(b) + members) overall.
+ *
+ * @param[in] a         First map (NULL is the empty set).
+ * @param[in] b         Second map (NULL is the empty set).
+ * @param[in] op        The operation; any other value returns
+ *                      SM_IDX_MAX with errno = EINVAL.
+ * @param[in] prev_idx  Lower exclusive bound (SM_IDX_MAX: from the start).
+ * @param[in,out] cur_a Optional read cursor over \a a, or NULL.
+ * @param[in,out] cur_b Optional read cursor over \a b, or NULL.  Use
+ *                      two cursors, one per map; see sm_cursor_t.
+ * @returns The next member of a OP b, or SM_IDX_MAX if none.
+ */
+uint64_t sm_next_member_op(const sm_t *a, const sm_t *b, sm_op_t op,
+    uint64_t prev_idx, sm_cursor_t *cur_a, sm_cursor_t *cur_b);
+
+/** @brief Invoke a callback for every member of (a OP b).
+ *
+ * The lazy counterpart of sm_scan() over the map sm_and(), sm_or(),
+ * sm_andnot() or sm_xor() would build.  The callback receives the
+ * members in ascending order, in batches of at most 64; the first
+ * \a skip members of the result are not delivered.  The batch sizes
+ * may differ from those sm_scan() would use on the built map; the
+ * sequence of indices is the same, including a member at UINT64_MAX.
+ *
+ * Cost is O(runs(a) + runs(b) + delivered members): both maps are read
+ * run by run, and skipped members are counted, not visited.  Uses about
+ * 33 KB of heap scratch for the two run readers.
+ *
+ * @param[in] a     First map (NULL is the empty set).
+ * @param[in] b     Second map (NULL is the empty set).
+ * @param[in] op    The operation.
+ * @param[in] fn    Callback invoked with (array_of_indices, count, aux).
+ * @param[in] skip  Number of result members to skip first.
+ * @param[in] aux   Opaque pointer forwarded to \a fn.
+ *
+ * Does nothing and sets errno to EINVAL when \a fn is NULL or \a op is
+ * not an sm_op_t; sets errno to ENOMEM and delivers nothing when the
+ * scratch allocation fails.
+ */
+void sm_scan_op(const sm_t *a, const sm_t *b, sm_op_t op,
+    void (*fn)(uint64_t vec[], size_t n, void *aux), size_t skip, void *aux);
+
+/* -------------------------------------------------------------------
+ * Frozen maps: a read-only Elias-Fano copy for very sparse sets
+ *
+ * A sparsemap spends about 22 bytes on an isolated member (chunk start,
+ * descriptor and one payload word).  sm_freeze() copies a map into a
+ * separate, immutable Elias-Fano structure that spends about 2 + L bits
+ * per member, L = floor(log2(universe / members)): about 2 bytes per
+ * member at density 1e-4.  It is for very sparse sets that are built
+ * once and then only queried.  It is not a sparsemap: it has its own
+ * serialized format and cannot be mutated; sm_thaw() turns it back
+ * into an sm_t.
+ *
+ * Costs: freeze, thaw and (de)serialize are O(members) time and space,
+ * so freezing a map that holds a long RLE run materializes every member
+ * of the run.  select is O(1) (a sampled select plus a word scan);
+ * contains, rank, next and prev are O(1 + bucket size), where a bucket
+ * holds about 2 members on average.  A NULL frozen map is the empty set.
+ * ------------------------------------------------------------------- */
+
+/** @brief Opaque read-only Elias-Fano copy of a map. */
+typedef struct sm_frozen sm_frozen_t;
+
+/** @brief Build a frozen copy of \a map.
+ *
+ * O(cardinality) time and space; see the section comment.
+ *
+ * @param[in] map  Source map (NULL or empty gives an empty frozen map).
+ * @returns A new frozen map (free with sm_frozen_free()), or NULL on
+ *          allocation failure.
+ */
+sm_frozen_t *sm_freeze(const sm_t *map);
+
+/** @brief Release a frozen map (NULL-safe). */
+void sm_frozen_free(sm_frozen_t *f);
+
+/** @brief Bytes of memory the frozen map occupies (0 for NULL). */
+size_t sm_frozen_size(const sm_frozen_t *f);
+
+/** @brief Number of members (0 for NULL). */
+size_t sm_frozen_cardinality(const sm_frozen_t *f);
+
+/** @brief Membership test; equals sm_contains() on the source map. */
+bool sm_frozen_contains(const sm_frozen_t *f, uint64_t idx);
+
+/** @brief Members in the inclusive range [\a x, \a y].
+ *
+ * Equals sm_rank(map, x, y, true) on the source map; 0 when x > y.
+ */
+size_t sm_frozen_rank(const sm_frozen_t *f, uint64_t x, uint64_t y);
+
+/** @brief The \a n'th member (0-based), or SM_IDX_MAX if there are not
+ * n + 1 members.  Equals sm_select(map, n, true) on the source map. */
+uint64_t sm_frozen_select(const sm_frozen_t *f, uint64_t n);
+
+/** @brief Lowest member > \a prev_idx (SM_IDX_MAX: from the start), or
+ * SM_IDX_MAX.  Equals sm_next_member() on the source map. */
+uint64_t sm_frozen_next_member(const sm_frozen_t *f, uint64_t prev_idx);
+
+/** @brief Highest member < \a prev_idx (SM_IDX_MAX: from the end), or
+ * SM_IDX_MAX.  Equals sm_prev_member() on the source map. */
+uint64_t sm_frozen_prev_member(const sm_frozen_t *f, uint64_t prev_idx);
+
+/** @brief Build a mutable map with the frozen map's members.
+ *
+ * @returns A new owned-contiguous map (empty for NULL), or NULL on
+ *          allocation failure.
+ */
+sm_t *sm_thaw(const sm_frozen_t *f);
+
+/** @brief Bytes sm_frozen_serialize() writes (0 for NULL). */
+size_t sm_frozen_serialized_size(const sm_frozen_t *f);
+
+/** @brief Serialize a frozen map.
+ *
+ * The format is its own (magic "mfrozf01", version 1), not the
+ * sparsemap wire format, and always little-endian: a 32-byte header
+ * (magic, version and low-bit width, member count, largest member)
+ * followed by the packed low bits and the unary high bits as
+ * little-endian 64-bit words.  The select samples are rebuilt on read.
+ *
+ * @returns Bytes written, or 0 when \a f or \a out is NULL or
+ *          \a out_size is too small.
+ */
+size_t sm_frozen_serialize(const sm_frozen_t *f, uint8_t *out,
+    size_t out_size);
+
+/** @brief Read a frozen map written by sm_frozen_serialize().
+ *
+ * Validates the magic, version, sizes, the low-bit width, the number
+ * of members the high bits encode, and that the members strictly
+ * increase and end at the recorded maximum, so no query on the result
+ * can read out of bounds.  O(n) bytes.
+ *
+ * @returns A new frozen map, or NULL on malformed input or allocation
+ *          failure.
+ */
+sm_frozen_t *sm_frozen_deserialize(const uint8_t *in, size_t n);
 
 /* -------------------------------------------------------------------
  * Cardinality without allocation
@@ -1811,10 +2024,12 @@ sm_t *sm_shrink_to_fit(sm_t *map);
  *
  * The magic and body are written with native memcpy, so the stream is
  * host-endian: a little-endian writer emits the magic bytes 73 6d 31 30
- * and a big-endian writer 30 31 6d 73.  Cross-endian deserialization is
- * not yet supported; sm_deserialize returns NULL if the source endian
- * flag doesn't match the host.  Serialized maps are therefore portable
- * only between hosts of the same byte order.
+ * and a big-endian writer 30 31 6d 73.  Every body field is a 64-bit
+ * word, so sm_deserialize reads a stream from either byte order: when
+ * the endian flag differs from the host it byte-swaps each 8-byte body
+ * word, then validates as usual.  The writer is unchanged.  sm_open()
+ * and sm_open_copy() take a raw body with no header, so they cannot
+ * tell the byte order and read host order only.
  * ------------------------------------------------------------------- */
 
 /** @brief Compute the buffer size needed to serialize \a map.
@@ -1834,9 +2049,11 @@ size_t sm_serialize(const sm_t *map, uint8_t *out, size_t out_size);
 
 /** @brief Deserialize a previously-serialized buffer into a fresh map.
  *
- * Bounded-safe: validates the header magic, version, endianness, and
- * that each chunk's claimed size fits in the remaining buffer.
- * Returns NULL on any malformed input rather than crashing.
+ * Bounded-safe: validates the header magic, version, and that each
+ * chunk's claimed size fits in the remaining buffer.  A stream written
+ * on a host of the other byte order is byte-swapped word by word and
+ * then validated the same way.  Returns NULL on any malformed input
+ * rather than crashing.
  *
  * @param[in] in   Source buffer.
  * @param[in] n    Source buffer size.

@@ -7908,13 +7908,124 @@ sm_next_member(const sm_t *map, uint64_t prev_idx, sm_cursor_t *cur)
 	}
 }
 
+/*
+ * The chunk that immediately precedes the chunk at `last`, found by a
+ * walk from chunk 0 (a walk may start only there or at a verified cursor
+ * offset, and cur->prev_offset is never trusted).  *before receives the
+ * chunk preceding the result, or NULL.  `last` must be greater than
+ * `base`.  If `last` is not a chunk start (a stale cursor whose offset
+ * held a matching payload word), the walk stops at the chunk that
+ * contains it, so the result is always a real chunk and the loop always
+ * ends: every step advances by at least one chunk header.
+ */
+static uint8_t *
+__sm_chunk_before(uint8_t *base, uint8_t *last, uint8_t **before)
+{
+	uint8_t *q = base;
+	*before = NULL;
+	for (;;) {
+		__sm_chunk_t tmp;
+		uint8_t *next;
+		__sm_chunk_init(&tmp, q + SM_SIZEOF_OVERHEAD);
+		next = q + SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&tmp);
+		if (next >= last) {
+			return (q);
+		}
+		*before = q;
+		q = next;
+	}
+}
+
+/*
+ * Reverse lookup on a chunk-mode map: the highest set bit strictly below
+ * upper_excl, or SM_IDX_MAX.
+ *
+ * The answer lies in the last chunk that starts below upper_excl, unless
+ * that chunk has no member below the bound; then it lies in an earlier
+ * chunk.  The forward walk that finds the last chunk starts at chunk 0,
+ * or at the cursor's chunk when the start word stored at cur->offset
+ * equals cur->start_idx and that chunk starts below upper_excl (the same
+ * check sm_next_member makes).  The walk remembers the chunk it passed
+ * just before the last one, so one step back costs nothing; a step back
+ * past a chunk the walk did not pass (the cursor's own chunk, or an
+ * empty chunk) walks from chunk 0 again.  The chunk holding the answer
+ * is recorded in the cursor, so a descending scan resumes in place while
+ * it stays inside one chunk.
+ */
+static uint64_t
+__sm_chunks_prev_member(const sm_t *map, uint64_t upper_excl,
+    sm_cursor_t *cur)
+{
+	uint8_t *base;
+	uint8_t *p;
+	uint8_t *last = NULL;
+	uint8_t *before = NULL;
+	size_t stream_end;
+	if (__sm_get_chunk_count(map) == 0) {
+		return (SM_IDX_MAX);
+	}
+	base = __sm_get_chunk_data(map, 0);
+	p = base;
+	stream_end = map->m_data_used - SM_SIZEOF_OVERHEAD;
+
+	/* Resume at the cursor's chunk only after checking its start word. */
+	if (cur != NULL && cur->offset != SIZE_MAX &&
+	    cur->offset + SM_SIZEOF_OVERHEAD + sizeof(__sm_bitvec_t) <=
+	        stream_end &&
+	    cur->start_idx < upper_excl &&
+	    __sm_load_idx(base + cur->offset) == cur->start_idx) {
+		p = base + cur->offset;
+	}
+
+	/* Find the last chunk that starts below upper_excl.  Every chunk of
+	 * a valid map has its start and descriptor inside the stream; the
+	 * bound only matters for a stale cursor. */
+	while ((size_t)(p - base) + SM_SIZEOF_OVERHEAD +
+	        sizeof(__sm_bitvec_t) <= stream_end) {
+		__sm_chunk_t tmp;
+		if (__sm_load_idx((const uint8_t *)p) >= upper_excl) {
+			break;
+		}
+		before = last;
+		last = p;
+		__sm_chunk_init(&tmp, p + SM_SIZEOF_OVERHEAD);
+		p += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&tmp);
+	}
+	if (last == NULL) {
+		return (SM_IDX_MAX);
+	}
+
+	/* Step back chunk by chunk until one has a member below the bound. */
+	for (;;) {
+		const __sm_idx_t start = __sm_load_idx((const uint8_t *)last);
+		__sm_chunk_t chunk;
+		uint64_t hit;
+		__sm_chunk_init(&chunk, last + SM_SIZEOF_OVERHEAD);
+		hit = __sm_chunk_prev_set(&chunk, start, upper_excl);
+		if (hit != SM_IDX_MAX) {
+			if (cur != NULL) {
+				cur->offset = (size_t)(last - base);
+				cur->start_idx = start;
+				cur->prev_offset = (before == NULL) ? SIZE_MAX :
+				    (size_t)(before - base);
+			}
+			return (hit);
+		}
+		if (last == base) {
+			return (SM_IDX_MAX);
+		}
+		if (before != NULL) {
+			last = before;
+			before = NULL;
+		} else {
+			last = __sm_chunk_before(base, last, &before);
+		}
+	}
+}
+
 uint64_t
 sm_prev_member(const sm_t *map, uint64_t prev_idx, sm_cursor_t *cur)
 {
-	/* The cursor accelerates forward (non-decreasing) lookups only;
-	 * reverse iteration always walks from the head, so cur is accepted
-	 * for API symmetry but unused. */
-	(void)cur;
 	if (map == NULL)
 		return (SM_IDX_MAX);
 	if (__sm_is_small(map)) {
@@ -7948,62 +8059,9 @@ sm_prev_member(const sm_t *map, uint64_t prev_idx, sm_cursor_t *cur)
 		}
 	}
 	__sm_check_invariants(map);
-	{
-		const size_t count = __sm_get_chunk_count(map);
-		/* SM_IDX_MAX as input means "start past the end". */
-		const uint64_t upper_excl =
-		    (prev_idx == SM_IDX_MAX) ? UINT64_MAX : prev_idx;
-		/* Walk forward to the last chunk that starts before upper_excl,
-		 * remembering each chunk so we can step back if needed. */
-		uint8_t *p;
-		/* Track up to `count` candidate chunk pointers. */
-		uint8_t *last = NULL;
-		size_t last_idx = 0;
-		size_t i;
-		if (count == 0)
-			return (SM_IDX_MAX);
-		p = __sm_get_chunk_data(map, 0);
-		for (i = 0; i < count; i++) {
-			const __sm_idx_t start =
-			    __sm_load_idx((const uint8_t *)p);
-			__sm_chunk_t tmp;
-			if (start >= upper_excl)
-				break;
-			last = p;
-			last_idx = i;
-			__sm_chunk_init(&tmp, p + SM_SIZEOF_OVERHEAD);
-			p += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&tmp);
-		}
-		if (last == NULL)
-			return (SM_IDX_MAX);
-
-		/* Step back through chunks until we find a hit. */
-		while (true) {
-			const __sm_idx_t start =
-			    __sm_load_idx((const uint8_t *)last);
-			__sm_chunk_t chunk;
-			uint64_t hit;
-			uint8_t *q;
-			size_t j;
-			__sm_chunk_init(&chunk, last + SM_SIZEOF_OVERHEAD);
-			hit = __sm_chunk_prev_set(&chunk, start, upper_excl);
-			if (hit != SM_IDX_MAX)
-				return (hit);
-			if (last_idx == 0)
-				break;
-			/* Walk forward to find the chunk preceding `last`. */
-			q = __sm_get_chunk_data(map, 0);
-			for (j = 0; j + 1 < last_idx; j++) {
-				__sm_chunk_t tmp;
-				__sm_chunk_init(&tmp, q + SM_SIZEOF_OVERHEAD);
-				q += SM_SIZEOF_OVERHEAD +
-				    __sm_chunk_get_size(&tmp);
-			}
-			last = q;
-			last_idx--;
-		}
-		return (SM_IDX_MAX);
-	}
+	/* SM_IDX_MAX as input means "start past the end". */
+	return (__sm_chunks_prev_member(map,
+	    (prev_idx == SM_IDX_MAX) ? UINT64_MAX : prev_idx, cur));
 }
 
 bool
@@ -9808,6 +9866,21 @@ __sm_host_is_little_endian(void)
 	return (((const uint8_t *)&one)[0] == 1);
 }
 
+/*
+ * Reverse the byte order of a 64-bit word.  Portable shifts and masks,
+ * no compiler builtin; the reader calls it once per body word of a
+ * stream written on a host of the other byte order.
+ */
+static uint64_t
+__sm_bswap64(uint64_t v)
+{
+	v = ((v & UINT64_C(0x00FF00FF00FF00FF)) << 8) |
+	    ((v >> 8) & UINT64_C(0x00FF00FF00FF00FF));
+	v = ((v & UINT64_C(0x0000FFFF0000FFFF)) << 16) |
+	    ((v >> 16) & UINT64_C(0x0000FFFF0000FFFF));
+	return ((v << 32) | (v >> 32));
+}
+
 size_t
 sm_serialized_size(const sm_t *map)
 {
@@ -9855,31 +9928,36 @@ sm_serialize(const sm_t *map, uint8_t *out, size_t out_size)
 sm_t *
 sm_deserialize(const uint8_t *in, size_t n)
 {
-	uint32_t magic;
+	/* The magic "sm10" as a little-endian writer emits it. */
+	static const uint8_t magic_le[4] = { 0x73, 0x6d, 0x31, 0x30 };
 	uint8_t version;
 	uint8_t flags;
 	bool wire_is_le;
-	bool host_is_le;
+	bool swap;
 	size_t body_len;
 	sm_t *map;
+	size_t i;
 	if (in == NULL || n < SM_WIRE_HEADER_LEN + SM_SIZEOF_OVERHEAD) {
 		return (NULL);
 	}
-	memcpy(&magic, in + 0, 4);
-	if (magic != SM_WIRE_MAGIC)
-		return (NULL);
-
 	version = in[4];
 	flags = in[5];
 	if (version != SM_WIRE_VERSION)
 		return (NULL);
 
+	/*
+	 * The writer stored the magic and every body word in its own byte
+	 * order and said which in the flags.  The magic bytes must agree
+	 * with that flag: little-endian 73 6d 31 30, big-endian 30 31 6d 73.
+	 * A stream from the other byte order is accepted and byte-swapped
+	 * below; the cardinality hint at offset 8 is not read.
+	 */
 	wire_is_le = (flags & SM_WIRE_FLAG_LE) != 0;
-	host_is_le = __sm_host_is_little_endian();
-	if (wire_is_le != host_is_le) {
-		/* Cross-endian read not yet supported. */
-		return (NULL);
+	for (i = 0; i < 4; i++) {
+		if (in[i] != magic_le[wire_is_le ? i : 3 - i])
+			return (NULL);
 	}
+	swap = wire_is_le != __sm_host_is_little_endian();
 
 	/* Body: starts at offset SM_WIRE_HEADER_LEN. */
 	body_len = n - SM_WIRE_HEADER_LEN;
@@ -9890,6 +9968,21 @@ sm_deserialize(const uint8_t *in, size_t n)
 	/* Copy the body into the map's data buffer.  The first SM_SIZEOF_OVERHEAD
 	 * bytes are the chunk count; the rest is chunks. */
 	memcpy(map->m_data, in + SM_WIRE_HEADER_LEN, body_len);
+	/* Every body field is a u64 (chunk count or small-set header, chunk
+	 * starts, descriptors, payload and small-set words), so converting a
+	 * foreign-order body is one swap per 8-byte word.  A well-formed body
+	 * is a whole number of words; anything else is rejected here rather
+	 * than half-swapped. */
+	if (swap) {
+		if (body_len % sizeof(uint64_t) != 0) {
+			sm_free(map);
+			return (NULL);
+		}
+		for (i = 0; i < body_len; i += sizeof(uint64_t)) {
+			__sm_store_u64(&map->m_data[i],
+			    __sm_bswap64(__sm_load_u64(&map->m_data[i])));
+		}
+	}
 	/* Force m_data_used to its expected value: the first 4 bytes contain
 	 * chunk_count, then we need to walk to compute total size.
 	 * sm_open's pattern handles this. */
@@ -11721,6 +11814,1027 @@ sm_span(sm_t *map, uint64_t idx, size_t len, bool value)
 	} while (SM_FOUND(offset));
 
 	return (offset);
+}
+
+/* -------------------------------------------------------------------
+ * Lazy iteration over a OP b: members of a combined set without
+ * building it
+ * ------------------------------------------------------------------- */
+
+/*
+ * The first index >= x that is NOT a member of a small-set map.  Bits
+ * past the last stored word are absent.  Returns SM_IDX_MAX only when
+ * every index from x up is a member, which a small map cannot have, so
+ * the result is always below SM_SMALL_MAX_BITS + 1.
+ */
+static uint64_t
+__sm_small_next_absent(const sm_t *map, uint64_t x)
+{
+	const __sm_bitvec_unaligned_t *w = __sm_small_words(map);
+	const size_t n = __sm_small_nwords(map);
+	size_t i = (size_t)(x / 64);
+	uint64_t zeros;
+	if (x >= (uint64_t)n * 64) {
+		return (x);
+	}
+	zeros = ~(uint64_t)w[i] & (~(uint64_t)0 << (x % 64));
+	for (;;) {
+		if (zeros != 0) {
+			return ((uint64_t)i * 64 + (uint64_t)SM_CTZ64(zeros));
+		}
+		if (++i >= n) {
+			return ((uint64_t)n * 64);
+		}
+		zeros = ~(uint64_t)w[i];
+	}
+}
+
+/*
+ * The first index >= x that is NOT a member of the chunk at `chunk`
+ * (starting at `start`), or start + capacity when every bit from x to
+ * the chunk's end is set.  x must lie in [start, start + capacity).
+ * NONE slots are absent, like every reader treats them.
+ */
+static uint64_t
+__sm_chunk_next_absent(const __sm_chunk_t *chunk, uint64_t start,
+    size_t cap, uint64_t x)
+{
+	size_t v;
+	if (__sm_chunk_is_rle(chunk)) {
+		/* Relative, so a run that ends at 2^64 (start + length wraps
+		 * to 0) still compares correctly. */
+		const size_t len = __sm_chunk_rle_get_length(chunk);
+		return (x - start < len ? start + len : x);
+	}
+	for (v = (size_t)((x - start) / SM_BITS_PER_VECTOR);
+	     v < SM_FLAGS_PER_INDEX; v++) {
+		const uint64_t vec_lo = start + v * SM_BITS_PER_VECTOR;
+		const size_t flags = SM_CHUNK_GET_FLAGS(chunk->m_data[0], v);
+		const unsigned skip =
+		    (x > vec_lo) ? (unsigned)(x - vec_lo) : 0u;
+		__sm_bitvec_t zeros;
+		if (flags == SM_PAYLOAD_ONES) {
+			continue;
+		}
+		if (flags != SM_PAYLOAD_MIXED) {
+			return (vec_lo + skip);
+		}
+		zeros = ~(__sm_bitvec_t)chunk->m_data[1 +
+		    __sm_chunk_get_position(chunk, v)] &
+		    (~(__sm_bitvec_t)0 << skip);
+		if (zeros != 0) {
+			return (vec_lo + (uint64_t)SM_CTZ64(zeros));
+		}
+	}
+	return (start + cap);
+}
+
+/*
+ * The first index >= x that is NOT a member of `map`, or SM_IDX_MAX if
+ * every index from x to UINT64_MAX is a member.  The walk locates x's
+ * chunk through __sm_get_chunk_offset (so `cur` accelerates ascending
+ * calls exactly as it does for sm_contains), then follows the run of
+ * set bits across abutting chunks.  Cost is O(chunks walked), never
+ * O(run length): an RLE run of 2^31 bits is one step.
+ */
+static uint64_t
+__sm_next_absent(const sm_t *map, uint64_t x, sm_cursor_t *cur)
+{
+	uint8_t *base;
+	uint8_t *p;
+	size_t stream_end;
+	ssize_t off;
+	if (map == NULL) {
+		return (x);
+	}
+	if (__sm_is_small(map)) {
+		return (__sm_small_next_absent(map, x));
+	}
+	off = __sm_get_chunk_offset(map, x, cur);
+	if (off < 0) {
+		return (x);
+	}
+	base = __sm_get_chunk_data(map, 0);
+	p = base + off;
+	stream_end = map->m_data_used - SM_SIZEOF_OVERHEAD;
+	for (;;) {
+		const uint64_t start = __sm_load_idx((const uint8_t *)p);
+		__sm_chunk_t chunk;
+		size_t cap;
+		uint64_t end;
+		__sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
+		cap = __sm_chunk_get_capacity(&chunk);
+		if (x < start || x - start >= cap) {
+			return (x); /* in a gap or past the last chunk */
+		}
+		end = __sm_chunk_next_absent(&chunk, start, cap, x);
+		if (end != start + cap) {
+			return (end);
+		}
+		/* Set through the chunk's last bit.  A chunk that ends at 2^64
+		 * wraps end to 0: every index from x up is set. */
+		if (end == 0) {
+			return (SM_IDX_MAX);
+		}
+		p += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&chunk);
+		if ((size_t)(p - base) >= stream_end) {
+			return (end);
+		}
+		x = end;
+	}
+}
+
+/* True when an index in exactly the sets flagged by in_a / in_b belongs
+ * to a OP b. */
+static bool
+__sm_op_keep(sm_op_t op, bool in_a, bool in_b)
+{
+	switch (op) {
+	case SM_OP_AND:
+		return (in_a && in_b);
+	case SM_OP_OR:
+		return (in_a || in_b);
+	case SM_OP_ANDNOT:
+		return (in_a && !in_b);
+	case SM_OP_XOR:
+		return (in_a != in_b);
+	default:
+		return (false);
+	}
+}
+
+/* AND: leapfrog the two member streams.  Each round either returns or
+ * moves the lower bound up to the larger candidate, so a run in one map
+ * meeting a sparse other map costs one step per member of the other. */
+static uint64_t
+__sm_next_and(const sm_t *a, const sm_t *b, uint64_t p, sm_cursor_t *ca,
+    sm_cursor_t *cb)
+{
+	uint64_t x = sm_next_member(a, p, ca);
+	for (;;) {
+		uint64_t y;
+		if (x == SM_IDX_MAX) {
+			return (SM_IDX_MAX);
+		}
+		/* x - 1 wraps to the "from the start" sentinel for x == 0. */
+		y = sm_next_member(b, x - 1, cb);
+		if (y == x || y == SM_IDX_MAX) {
+			return (y);
+		}
+		x = sm_next_member(a, y - 1, ca);
+		if (x == y) {
+			return (x);
+		}
+	}
+}
+
+/* ANDNOT: the next member of a that b lacks.  When b holds a's
+ * candidate, jump past b's whole run of set bits at once. */
+static uint64_t
+__sm_next_andnot(const sm_t *a, const sm_t *b, uint64_t p, sm_cursor_t *ca,
+    sm_cursor_t *cb)
+{
+	uint64_t x = sm_next_member(a, p, ca);
+	while (x != SM_IDX_MAX && sm_contains(b, x, cb)) {
+		const uint64_t gap = __sm_next_absent(b, x, cb);
+		if (gap == SM_IDX_MAX) {
+			return (SM_IDX_MAX);
+		}
+		x = sm_next_member(a, gap - 1, ca);
+	}
+	return (x);
+}
+
+/* XOR: the smaller of the two next members, unless both maps hold it.
+ * Then both are set from x up to the first index where either map has
+ * a hole; skip that common stretch in one step and look again. */
+static uint64_t
+__sm_next_xor(const sm_t *a, const sm_t *b, uint64_t p, sm_cursor_t *ca,
+    sm_cursor_t *cb)
+{
+	for (;;) {
+		const uint64_t x = sm_next_member(a, p, ca);
+		const uint64_t y = sm_next_member(b, p, cb);
+		uint64_t ea;
+		uint64_t eb;
+		uint64_t e;
+		if (x != y) {
+			return (x < y ? x : y);
+		}
+		if (x == SM_IDX_MAX) {
+			return (SM_IDX_MAX);
+		}
+		ea = __sm_next_absent(a, x, ca);
+		eb = __sm_next_absent(b, x, cb);
+		if (ea == SM_IDX_MAX && eb == SM_IDX_MAX) {
+			return (SM_IDX_MAX);
+		}
+		e = ea < eb ? ea : eb;
+		if (ea != eb) {
+			/* e is a member of exactly one of the two maps. */
+			return (e);
+		}
+		p = e - 1;
+	}
+}
+
+uint64_t
+sm_next_member_op(const sm_t *a, const sm_t *b, sm_op_t op, uint64_t prev_idx,
+    sm_cursor_t *cur_a, sm_cursor_t *cur_b)
+{
+	/* UINT64_MAX is both "from the start" and the largest index, so no
+	 * member is strictly greater than a real UINT64_MAX bound; the
+	 * sentinel meaning wins, exactly as in sm_next_member. */
+	switch (op) {
+	case SM_OP_AND:
+		if (a == NULL || b == NULL) {
+			return (SM_IDX_MAX);
+		}
+		return (__sm_next_and(a, b, prev_idx, cur_a, cur_b));
+	case SM_OP_OR: {
+		const uint64_t x = sm_next_member(a, prev_idx, cur_a);
+		const uint64_t y = sm_next_member(b, prev_idx, cur_b);
+		return (x < y ? x : y);
+	}
+	case SM_OP_ANDNOT:
+		return (__sm_next_andnot(a, b, prev_idx, cur_a, cur_b));
+	case SM_OP_XOR:
+		return (__sm_next_xor(a, b, prev_idx, cur_a, cur_b));
+	default:
+		errno = EINVAL;
+		return (SM_IDX_MAX);
+	}
+}
+
+/*
+ * Batched delivery for sm_scan_op: members are copied into a 64-entry
+ * buffer and handed to the caller's function whenever it fills, and once
+ * more at the end.  `skip` counts result members still to drop.
+ */
+typedef struct {
+	void (*fn)(uint64_t[], size_t, void *);
+	void *aux;
+	size_t skip;
+	size_t n;
+	uint64_t buf[SM_BITS_PER_VECTOR];
+} __sm_scan_out_t;
+
+/* Buffer one result member, flushing a full batch to the caller. */
+static void
+__sm_scan_out_index(__sm_scan_out_t *o, uint64_t idx)
+{
+	if (o->skip > 0) {
+		o->skip--;
+		return;
+	}
+	o->buf[o->n++] = idx;
+	if (o->n == SM_BITS_PER_VECTOR) {
+		o->fn(o->buf, o->n, o->aux);
+		o->n = 0;
+	}
+}
+
+/* Deliver every index in [lo, hi), less any still to be skipped.  The
+ * skip is taken arithmetically, so a long skipped run costs nothing. */
+static void
+__sm_scan_out_run(__sm_scan_out_t *o, uint64_t lo, uint64_t hi)
+{
+	uint64_t i;
+	if (o->skip > 0) {
+		if ((uint64_t)o->skip >= hi - lo) {
+			o->skip -= (size_t)(hi - lo);
+			return;
+		}
+		lo += o->skip;
+		o->skip = 0;
+	}
+	for (i = lo; i < hi; i++) {
+		__sm_scan_out_index(o, i);
+	}
+}
+
+/*
+ * __sm_run_next with the top of the universe made explicit.  A run that
+ * reaches 2^64 has an exclusive end that wraps below its start; report
+ * it as ending at UINT64_MAX and set *top, so the caller handles the
+ * index UINT64_MAX itself.  Only a map's last run can do this.
+ */
+static bool
+__sm_run_next_top(__sm_run_iter_t *it, uint64_t *lo, uint64_t *hi,
+    bool *top)
+{
+	if (!__sm_run_next(it, lo, hi)) {
+		return (false);
+	}
+	if (*hi < *lo) {
+		*hi = UINT64_MAX;
+		*top = true;
+	}
+	return (true);
+}
+
+void
+sm_scan_op(const sm_t *a, const sm_t *b, sm_op_t op,
+    void (*fn)(uint64_t[], size_t, void *), size_t skip, void *aux)
+{
+	__sm_run_iter_t *ia;
+	__sm_run_iter_t *ib;
+	__sm_scan_out_t out;
+	uint64_t alo = 0, ahi = 0, blo = 0, bhi = 0;
+	bool have_a, have_b;
+	uint64_t pos = 0;
+	bool have_pos = false;
+	bool top_a = false, top_b = false;
+	if (fn == NULL || op > SM_OP_XOR) {
+		errno = EINVAL;
+		return;
+	}
+	/* Two run iterators are about 33 KB; keep them off the stack. */
+	ia = (__sm_run_iter_t *)__sm_alloc(sizeof(*ia));
+	ib = (__sm_run_iter_t *)__sm_alloc(sizeof(*ib));
+	if (ia == NULL || ib == NULL) {
+		__sm_free(ia);
+		__sm_free(ib);
+		errno = ENOMEM;
+		return;
+	}
+	out.fn = fn;
+	out.aux = aux;
+	out.skip = skip;
+	out.n = 0;
+
+	/*
+	 * The interval sweep sm_xor uses: walk both maps run by run, split
+	 * the line at every run edge, and keep each segment [pos, next) whose
+	 * membership (in a, in b) satisfies op.  Run ends are exclusive, so
+	 * UINT64_MAX itself is tracked apart (see __sm_run_next_top) and
+	 * delivered last.
+	 */
+	__sm_run_iter_init(ia, a);
+	__sm_run_iter_init(ib, b);
+	have_a = __sm_run_next_top(ia, &alo, &ahi, &top_a);
+	have_b = __sm_run_next_top(ib, &blo, &bhi, &top_b);
+	while (have_a || have_b) {
+		uint64_t lo = have_a ? alo : blo;
+		uint64_t next = UINT64_MAX;
+		bool in_a;
+		bool in_b;
+		if (have_b && blo < lo)
+			lo = blo;
+		if (!have_pos || pos < lo) {
+			pos = lo;
+			have_pos = true;
+		}
+		in_a = have_a && pos >= alo && pos < ahi;
+		in_b = have_b && pos >= blo && pos < bhi;
+		if (have_a) {
+			if (pos < alo && alo < next)
+				next = alo;
+			if (pos >= alo && ahi < next)
+				next = ahi;
+		}
+		if (have_b) {
+			if (pos < blo && blo < next)
+				next = blo;
+			if (pos >= blo && bhi < next)
+				next = bhi;
+		}
+		if (__sm_op_keep(op, in_a, in_b)) {
+			__sm_scan_out_run(&out, pos, next);
+		}
+		pos = next;
+		if (have_a && pos >= ahi)
+			have_a = __sm_run_next_top(ia, &alo, &ahi, &top_a);
+		if (have_b && pos >= bhi)
+			have_b = __sm_run_next_top(ib, &blo, &bhi, &top_b);
+	}
+	if (__sm_op_keep(op, top_a, top_b)) {
+		__sm_scan_out_index(&out, UINT64_MAX);
+	}
+	if (out.n > 0) {
+		fn(out.buf, out.n, aux);
+	}
+	__sm_free(ia);
+	__sm_free(ib);
+}
+
+/* -------------------------------------------------------------------
+ * Frozen maps: a read-only Elias-Fano copy for very sparse sets
+ * ------------------------------------------------------------------- */
+
+/*
+ * Classic Elias-Fano over the n sorted members x[0] < ... < x[n-1].
+ * With u = x[n-1] + 1 and L = floor(log2(u / n)) (0 when u < 2n, at most
+ * 63), each member splits into a low part x & (2^L - 1), stored packed L
+ * bits apiece in `low`, and a high part h = x >> L, stored in unary in the
+ * bitvector `high`: member i sets bit h[i] + i.  `high` therefore holds n
+ * ones and (x[n-1] >> L) + 1 zeros counted up to its last one, about 2n
+ * bits.  Space is n * (L + 2) bits plus the select samples, about 2 + L
+ * bits per member: the information-theoretic bound for a sorted set.
+ *
+ * select(k) is the position of the k-th one in `high` minus k, shifted up
+ * L bits, or'd with low[k].  The k-th one is found from a sample of the
+ * position of every SM_EF_SAMPLE-th one, then a word scan, so select is
+ * O(1) when the ones are not spread far apart (O(gap / 64) worst case).
+ * Bucket b (all members whose high part is b) begins right after the b-th
+ * zero of `high`; zeros are sampled the same way.  rank, contains, next
+ * and prev find a bucket with select0 and then search it, so they cost
+ * O(1 + bucket size), and a bucket holds about u / 2^L <= 2 members on
+ * average.
+ *
+ * The structure is immutable and owns one allocation; only the public
+ * functions below touch it.
+ */
+#define SM_EF_SAMPLE 256u
+#define SM_EF_MAGIC  UINT64_C(0x3130667a6f72666d) /* "mfrozf01" LE */
+#define SM_EF_VERSION 1u
+#define SM_EF_HEADER_WORDS 4u
+/* The arrays follow the struct in one allocation, at an 8-byte offset
+ * (on ILP32 the struct size need not be a multiple of 8). */
+#define SM_EF_STRUCT_BYTES ((sizeof(sm_frozen_t) + 7) / 8 * 8)
+
+struct sm_frozen {
+	uint64_t n;          /* members */
+	uint64_t max;        /* largest member (0 when n == 0) */
+	uint32_t l;          /* low bits per member */
+	uint64_t high_bits;  /* bits used in high[] */
+	size_t low_words;    /* words in low[] */
+	size_t high_words;   /* words in high[] */
+	size_t s1_count;     /* entries in s1[] */
+	size_t s0_count;     /* entries in s0[] */
+	uint64_t *low;       /* packed low parts */
+	uint64_t *high;      /* unary high parts */
+	uint64_t *s1;        /* position of one number SM_EF_SAMPLE * j */
+	uint64_t *s0;        /* position of zero number SM_EF_SAMPLE * j */
+};
+
+/* Bits [pos, pos + width) of a packed array, width <= 63. */
+static uint64_t
+__sm_ef_get_bits(const uint64_t *a, uint64_t pos, uint32_t width)
+{
+	const size_t w = (size_t)(pos / 64);
+	const unsigned s = (unsigned)(pos % 64);
+	uint64_t v;
+	if (width == 0) {
+		return (0);
+	}
+	v = a[w] >> s;
+	if (s + width > 64) {
+		v |= a[w + 1] << (64 - s);
+	}
+	return (v & ((UINT64_C(1) << width) - 1));
+}
+
+static void
+__sm_ef_set_bits(uint64_t *a, uint64_t pos, uint32_t width, uint64_t v)
+{
+	const size_t w = (size_t)(pos / 64);
+	const unsigned s = (unsigned)(pos % 64);
+	if (width == 0) {
+		return;
+	}
+	a[w] |= v << s;
+	if (s + width > 64) {
+		a[w + 1] |= v >> (64 - s);
+	}
+}
+
+/* Position of the r-th (0-based) set bit of w; w has more than r. */
+static unsigned
+__sm_ef_select_in_word(uint64_t w, unsigned r)
+{
+	while (r-- > 0) {
+		w &= w - 1;
+	}
+	return ((unsigned)SM_CTZ64(w));
+}
+
+/*
+ * Position in high[] of the k-th one (ones == true) or zero, or
+ * f->high_bits when there is none.  Starts at the sample for k and scans
+ * words; zeros past high_bits do not exist.
+ */
+static uint64_t
+__sm_ef_select(const sm_frozen_t *f, uint64_t k, bool ones)
+{
+	const uint64_t *s = ones ? f->s1 : f->s0;
+	const size_t ns = ones ? f->s1_count : f->s0_count;
+	size_t j = (size_t)(k / SM_EF_SAMPLE);
+	uint64_t pos;
+	uint64_t rem;
+	size_t w;
+	uint64_t word;
+	if (j >= ns) {
+		return (f->high_bits);
+	}
+	pos = s[j];
+	rem = k - (uint64_t)j * SM_EF_SAMPLE;
+	w = (size_t)(pos / 64);
+	word = ones ? f->high[w] : ~f->high[w];
+	word &= ~UINT64_C(0) << (pos % 64);
+	for (;;) {
+		const uint64_t c = (uint64_t)SM_POPCOUNT64(word);
+		if (rem < c) {
+			pos = (uint64_t)w * 64 +
+			    __sm_ef_select_in_word(word, (unsigned)rem);
+			return (pos < f->high_bits ? pos : f->high_bits);
+		}
+		rem -= c;
+		if (++w >= f->high_words) {
+			return (f->high_bits);
+		}
+		word = ones ? f->high[w] : ~f->high[w];
+	}
+}
+
+/* Member k (0 <= k < n). */
+static uint64_t
+__sm_ef_get(const sm_frozen_t *f, uint64_t k)
+{
+	const uint64_t hi = __sm_ef_select(f, k, true) - k;
+	return ((hi << f->l) | __sm_ef_get_bits(f->low, k * f->l, f->l));
+}
+
+/*
+ * The number of members strictly below x.  The members whose high part
+ * is h = x >> L (bucket h) occupy indices [k0, k1): bucket h's ones lie
+ * between the (h-1)-th and the h-th zero of high[], and the index of a
+ * one is its position minus the zeros before it.  Within a bucket the
+ * low parts are sorted, so a binary search finds the first one >= x's.
+ */
+static uint64_t
+__sm_ef_rank_lt(const sm_frozen_t *f, uint64_t x)
+{
+	uint64_t h;
+	uint64_t lowx;
+	uint64_t k0;
+	uint64_t k1;
+	if (f->n == 0 || x == 0) {
+		return (0);
+	}
+	if (x > f->max) {
+		return (f->n);
+	}
+	h = x >> f->l;
+	lowx = (f->l == 0) ? 0 : (x & ((UINT64_C(1) << f->l) - 1));
+	k0 = (h == 0) ? 0 : __sm_ef_select(f, h - 1, false) + 1 - h;
+	/* x <= max, so h <= max >> L and the h-th zero exists. */
+	k1 = __sm_ef_select(f, h, false) - h;
+	while (k0 < k1) {
+		const uint64_t mid = k0 + (k1 - k0) / 2;
+		if (__sm_ef_get_bits(f->low, mid * f->l, f->l) < lowx) {
+			k0 = mid + 1;
+		} else {
+			k1 = mid;
+		}
+	}
+	return (k0);
+}
+
+/* Size in words of the arrays for n members with L low bits. */
+static bool
+__sm_ef_shape(uint64_t n, uint64_t max, uint32_t l, uint64_t *high_bits,
+    size_t *low_words, size_t *high_words, size_t *s1, size_t *s0)
+{
+	const uint64_t zeros = n == 0 ? 0 : (max >> l) + 1;
+	uint64_t low_bits;
+	if (n > (UINT64_MAX - 64) / 64 || zeros > UINT64_MAX - n) {
+		return (false);
+	}
+	low_bits = n * l;
+	*high_bits = n + zeros;
+	if (*high_bits > (uint64_t)SIZE_MAX / 2 ||
+	    low_bits / 64 + 2 > (uint64_t)SIZE_MAX / 16) {
+		return (false);
+	}
+	/* One spare word so the two-word read in __sm_ef_get_bits stays in
+	 * bounds at the end of low[]. */
+	*low_words = (size_t)(low_bits / 64) + 2;
+	*high_words = (size_t)((*high_bits + 63) / 64);
+	*s1 = (size_t)((n + SM_EF_SAMPLE - 1) / SM_EF_SAMPLE);
+	*s0 = (size_t)((zeros + SM_EF_SAMPLE - 1) / SM_EF_SAMPLE);
+	return (true);
+}
+
+/* Allocate a frozen map of the given shape with zeroed arrays. */
+static sm_frozen_t *
+__sm_ef_alloc(uint64_t n, uint64_t max, uint32_t l)
+{
+	uint64_t high_bits;
+	size_t lw, hw, s1, s0, total;
+	sm_frozen_t *f;
+	if (!__sm_ef_shape(n, max, l, &high_bits, &lw, &hw, &s1, &s0)) {
+		return (NULL);
+	}
+	total = lw + hw + s1 + s0;
+	if (total > (SIZE_MAX - SM_EF_STRUCT_BYTES) / sizeof(uint64_t)) {
+		return (NULL);
+	}
+	f = (sm_frozen_t *)__sm_alloc_zero(SM_EF_STRUCT_BYTES +
+	    total * sizeof(uint64_t));
+	if (f == NULL) {
+		return (NULL);
+	}
+	f->n = n;
+	f->max = max;
+	f->l = l;
+	f->high_bits = high_bits;
+	f->low_words = lw;
+	f->high_words = hw;
+	f->s1_count = s1;
+	f->s0_count = s0;
+	f->low = (uint64_t *)(void *)((uint8_t *)f + SM_EF_STRUCT_BYTES);
+	f->high = f->low + lw;
+	f->s1 = f->high + hw;
+	f->s0 = f->s1 + s1;
+	return (f);
+}
+
+/* Fill the select samples from high[]. */
+static void
+__sm_ef_build_samples(sm_frozen_t *f)
+{
+	uint64_t ones = 0, zeros = 0, pos;
+	for (pos = 0; pos < f->high_bits; pos++) {
+		if ((f->high[pos / 64] >> (pos % 64)) & 1) {
+			if (ones % SM_EF_SAMPLE == 0) {
+				f->s1[ones / SM_EF_SAMPLE] = pos;
+			}
+			ones++;
+		} else {
+			if (zeros % SM_EF_SAMPLE == 0) {
+				f->s0[zeros / SM_EF_SAMPLE] = pos;
+			}
+			zeros++;
+		}
+	}
+}
+
+/* L = floor(log2(u / n)) with u = max + 1, clamped to [0, 63], computed
+ * without forming u (max may be UINT64_MAX): u / n is max / n, plus one
+ * when max % n == n - 1.  That plus one overflows only when u / n is
+ * 2^64 (n == 1, max == UINT64_MAX), whose log is 64, clamped to 63. */
+static uint32_t
+__sm_ef_low_bits(uint64_t n, uint64_t max)
+{
+	uint64_t q;
+	if (n == 0) {
+		return (0);
+	}
+	q = max / n;
+	if (max % n == n - 1) {
+		if (q == UINT64_MAX) {
+			return (63);
+		}
+		q++;
+	}
+	if (q <= 1) {
+		return (0);
+	}
+	return ((uint32_t)(63 - SM_CLZ64(q)));
+}
+
+typedef struct {
+	sm_frozen_t *f;
+	uint64_t k;
+	uint64_t last;
+	bool fail;
+} __sm_ef_builder_t;
+
+static void
+__sm_ef_add_batch(uint64_t vec[], size_t n, void *aux)
+{
+	__sm_ef_builder_t *b = (__sm_ef_builder_t *)aux;
+	sm_frozen_t *f = b->f;
+	size_t i;
+	for (i = 0; i < n; i++) {
+		const uint64_t x = vec[i];
+		uint64_t pos;
+		if (b->k >= f->n || (b->k > 0 && x <= b->last)) {
+			b->fail = true;
+			return;
+		}
+		pos = (x >> f->l) + b->k;
+		f->high[pos / 64] |= UINT64_C(1) << (pos % 64);
+		if (f->l > 0) {
+			__sm_ef_set_bits(f->low, b->k * f->l, f->l,
+			    x & ((UINT64_C(1) << f->l) - 1));
+		}
+		b->last = x;
+		b->k++;
+	}
+}
+
+sm_frozen_t *
+sm_freeze(const sm_t *map)
+{
+	uint64_t n = 0;
+	uint64_t max = 0;
+	__sm_ef_builder_t b;
+	if (map != NULL && !sm_is_empty(map)) {
+		n = sm_cardinality((sm_t *)map);
+		max = sm_maximum(map);
+	}
+	b.f = __sm_ef_alloc(n, max, __sm_ef_low_bits(n, max));
+	if (b.f == NULL) {
+		return (NULL);
+	}
+	b.k = 0;
+	b.last = 0;
+	b.fail = false;
+	if (n > 0) {
+		sm_scan_op(map, NULL, SM_OP_OR, __sm_ef_add_batch, 0, &b);
+	}
+	if (b.fail || b.k != n) {
+		__sm_free(b.f);
+		return (NULL);
+	}
+	__sm_ef_build_samples(b.f);
+	return (b.f);
+}
+
+void
+sm_frozen_free(sm_frozen_t *f)
+{
+	__sm_free(f);
+}
+
+size_t
+sm_frozen_size(const sm_frozen_t *f)
+{
+	if (f == NULL) {
+		return (0);
+	}
+	return (SM_EF_STRUCT_BYTES + (f->low_words + f->high_words +
+	    f->s1_count + f->s0_count) * sizeof(uint64_t));
+}
+
+size_t
+sm_frozen_cardinality(const sm_frozen_t *f)
+{
+	return (f == NULL ? 0 : (size_t)f->n);
+}
+
+bool
+sm_frozen_contains(const sm_frozen_t *f, uint64_t idx)
+{
+	uint64_t r;
+	if (f == NULL || f->n == 0 || idx > f->max) {
+		return (false);
+	}
+	r = __sm_ef_rank_lt(f, idx);
+	return (r < f->n && __sm_ef_get(f, r) == idx);
+}
+
+size_t
+sm_frozen_rank(const sm_frozen_t *f, uint64_t x, uint64_t y)
+{
+	uint64_t upto;
+	if (f == NULL || x > y) {
+		return (0);
+	}
+	upto = (y >= f->max) ? f->n : __sm_ef_rank_lt(f, y + 1);
+	return ((size_t)(upto - __sm_ef_rank_lt(f, x)));
+}
+
+uint64_t
+sm_frozen_select(const sm_frozen_t *f, uint64_t n)
+{
+	if (f == NULL || n >= f->n) {
+		return (SM_IDX_MAX);
+	}
+	return (__sm_ef_get(f, n));
+}
+
+uint64_t
+sm_frozen_next_member(const sm_frozen_t *f, uint64_t prev_idx)
+{
+	uint64_t r;
+	if (f == NULL || f->n == 0) {
+		return (SM_IDX_MAX);
+	}
+	r = (prev_idx == SM_IDX_MAX) ? 0 : __sm_ef_rank_lt(f, prev_idx + 1);
+	return (r < f->n ? __sm_ef_get(f, r) : SM_IDX_MAX);
+}
+
+uint64_t
+sm_frozen_prev_member(const sm_frozen_t *f, uint64_t prev_idx)
+{
+	uint64_t r;
+	if (f == NULL) {
+		return (SM_IDX_MAX);
+	}
+	/* SM_IDX_MAX is the exclusive bound UINT64_MAX, as in sm_prev_member. */
+	r = __sm_ef_rank_lt(f, prev_idx);
+	return (r > 0 ? __sm_ef_get(f, r - 1) : SM_IDX_MAX);
+}
+
+/*
+ * Visit the members in order: each one of high[] at position pos is
+ * member k = (ones before it) with high part pos - k.  Calls fn(x, aux)
+ * and stops early when it returns false.  Returns false on early stop.
+ */
+static bool
+__sm_ef_each(const sm_frozen_t *f, bool (*fn)(uint64_t, void *), void *aux)
+{
+	uint64_t k = 0;
+	size_t w;
+	for (w = 0; w < f->high_words; w++) {
+		uint64_t bits = f->high[w];
+		while (bits != 0) {
+			const uint64_t pos =
+			    (uint64_t)w * 64 + (uint64_t)SM_CTZ64(bits);
+			const uint64_t x = ((pos - k) << f->l) |
+			    __sm_ef_get_bits(f->low, k * f->l, f->l);
+			bits &= bits - 1;
+			if (!fn(x, aux)) {
+				return (false);
+			}
+			k++;
+		}
+	}
+	return (true);
+}
+
+typedef struct {
+	sm_t *map;
+	sm_cursor_t cur;
+} __sm_ef_thaw_t;
+
+static bool
+__sm_ef_thaw_one(uint64_t x, void *aux)
+{
+	__sm_ef_thaw_t *t = (__sm_ef_thaw_t *)aux;
+	return (sm_add_grow_cursor(&t->map, x, &t->cur) == x);
+}
+
+sm_t *
+sm_thaw(const sm_frozen_t *f)
+{
+	__sm_ef_thaw_t t;
+	t.map = sm_create(0);
+	__sm_cursor_reset(&t.cur);
+	if (t.map == NULL || f == NULL) {
+		return (t.map);
+	}
+	if (!__sm_ef_each(f, __sm_ef_thaw_one, &t)) {
+		sm_free(t.map);
+		return (NULL);
+	}
+	return (t.map);
+}
+
+/* Little-endian u64 load and store, independent of the host order. */
+static uint64_t
+__sm_ef_load_le(const uint8_t *p)
+{
+	uint64_t v = 0;
+	int i;
+	for (i = 7; i >= 0; i--) {
+		v = (v << 8) | p[i];
+	}
+	return (v);
+}
+
+static void
+__sm_ef_store_le(uint8_t *p, uint64_t v)
+{
+	int i;
+	for (i = 0; i < 8; i++) {
+		p[i] = (uint8_t)(v >> (8 * i));
+	}
+}
+
+size_t
+sm_frozen_serialized_size(const sm_frozen_t *f)
+{
+	if (f == NULL) {
+		return (0);
+	}
+	return ((SM_EF_HEADER_WORDS + f->low_words + f->high_words) *
+	    sizeof(uint64_t));
+}
+
+size_t
+sm_frozen_serialize(const sm_frozen_t *f, uint8_t *out, size_t out_size)
+{
+	const size_t need = sm_frozen_serialized_size(f);
+	size_t i;
+	uint8_t *p = out;
+	if (f == NULL || out == NULL || out_size < need) {
+		return (0);
+	}
+	__sm_ef_store_le(p, SM_EF_MAGIC);
+	__sm_ef_store_le(p + 8, (uint64_t)SM_EF_VERSION |
+	    ((uint64_t)f->l << 32));
+	__sm_ef_store_le(p + 16, f->n);
+	__sm_ef_store_le(p + 24, f->max);
+	p += SM_EF_HEADER_WORDS * sizeof(uint64_t);
+	for (i = 0; i < f->low_words + f->high_words; i++) {
+		__sm_ef_store_le(p, f->low[i]);
+		p += sizeof(uint64_t);
+	}
+	return (need);
+}
+
+typedef struct {
+	uint64_t k;
+	uint64_t last;
+	bool ok;
+} __sm_ef_check_t;
+
+static bool
+__sm_ef_check_one(uint64_t x, void *aux)
+{
+	__sm_ef_check_t *c = (__sm_ef_check_t *)aux;
+	if (c->k > 0 && x <= c->last) {
+		c->ok = false;
+		return (false);
+	}
+	c->last = x;
+	c->k++;
+	return (true);
+}
+
+/*
+ * Structural check of a decoded frozen map: high[] has exactly n ones
+ * and nothing past high_bits, the members it decodes to strictly
+ * increase and end at max, and no bit past the packed low parts is set.
+ * Together these make every query stay inside the arrays and return the
+ * member set the header claims.
+ */
+static bool
+__sm_ef_valid(sm_frozen_t *f)
+{
+	__sm_ef_check_t c;
+	uint64_t ones = 0;
+	const uint64_t low_bits = f->n * f->l;
+	size_t w;
+	for (w = 0; w < f->high_words; w++) {
+		ones += (uint64_t)SM_POPCOUNT64(f->high[w]);
+	}
+	if (ones != f->n || (f->high_bits % 64 != 0 &&
+	    (f->high[f->high_words - 1] >> (f->high_bits % 64)) != 0)) {
+		return (false);
+	}
+	for (w = (size_t)(low_bits / 64); w < f->low_words; w++) {
+		const unsigned used = (w == low_bits / 64) ?
+		    (unsigned)(low_bits % 64) : 0u;
+		if (used == 0 ? f->low[w] != 0 : (f->low[w] >> used) != 0) {
+			return (false);
+		}
+	}
+	c.k = 0;
+	c.last = 0;
+	c.ok = true;
+	(void)__sm_ef_each(f, __sm_ef_check_one, &c);
+	return (c.ok && c.k == f->n && (f->n == 0 || c.last == f->max));
+}
+
+sm_frozen_t *
+sm_frozen_deserialize(const uint8_t *in, size_t n)
+{
+	uint64_t ver;
+	uint64_t count;
+	uint64_t max;
+	uint32_t l;
+	uint64_t high_bits;
+	size_t lw, hw, s1, s0, i;
+	sm_frozen_t *f;
+	const uint8_t *p;
+	if (in == NULL || n < SM_EF_HEADER_WORDS * sizeof(uint64_t) ||
+	    n % sizeof(uint64_t) != 0 || __sm_ef_load_le(in) != SM_EF_MAGIC) {
+		return (NULL);
+	}
+	ver = __sm_ef_load_le(in + 8);
+	count = __sm_ef_load_le(in + 16);
+	max = __sm_ef_load_le(in + 24);
+	l = (uint32_t)(ver >> 32);
+	/* The low-bit width is a function of n and max; any other value is
+	 * not something sm_freeze writes. */
+	if ((ver & UINT64_C(0xFFFFFFFF)) != SM_EF_VERSION ||
+	    l != __sm_ef_low_bits(count, max) || (count == 0 && max != 0)) {
+		return (NULL);
+	}
+	if (!__sm_ef_shape(count, max, l, &high_bits, &lw, &hw, &s1, &s0) ||
+	    n / sizeof(uint64_t) - SM_EF_HEADER_WORDS != lw + hw) {
+		return (NULL);
+	}
+	f = __sm_ef_alloc(count, max, l);
+	if (f == NULL) {
+		return (NULL);
+	}
+	p = in + SM_EF_HEADER_WORDS * sizeof(uint64_t);
+	for (i = 0; i < lw + hw; i++) {
+		f->low[i] = __sm_ef_load_le(p);
+		p += sizeof(uint64_t);
+	}
+	if (!__sm_ef_valid(f)) {
+		__sm_free(f);
+		return (NULL);
+	}
+	__sm_ef_build_samples(f);
+	return (f);
 }
 
 /* -------------------------------------------------------------------
