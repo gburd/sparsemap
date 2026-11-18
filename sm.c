@@ -1301,6 +1301,21 @@ __sm_chunk_is_empty(const __sm_chunk_t *chunk)
 	return (true);
 }
 
+/*
+ * True when a chunk of either encoding holds no member: an RLE chunk
+ * with a length-0 run, or a sparse chunk with no ONES or MIXED slot
+ * (exactly the flags whose high bit is set).  __sm_chunk_is_empty is
+ * the sparse-only form the mutators use.
+ */
+static inline bool
+__sm_chunk_is_empty_any(const __sm_chunk_t *chunk)
+{
+	if (__sm_chunk_is_rle(chunk)) {
+		return (__sm_chunk_rle_get_length(chunk) == 0);
+	}
+	return ((chunk->m_data[0] & SM_DESC_HI_BITS) == 0);
+}
+
 /**
  * @brief Retrieves the size of the specified chunk.
  *
@@ -4245,6 +4260,52 @@ sm_init(sm_t *map, uint8_t *data, const size_t size)
 	sm_clear(map);
 }
 
+/*
+ * Drop every chunk that holds no member from a chunk-mode map read from
+ * untrusted bytes, before it is validated.  The writers never leave one
+ * (sm_validate rejects them), but 5.8.5's sm_split could, and the
+ * readers answer inconsistently on one: sm_minimum and sm_maximum
+ * report an empty sparse chunk's edge, and the RLE readers count a
+ * length-0 run as its full capacity.  An empty chunk holds no member,
+ * so dropping it keeps the set.  The walk stops at the first chunk
+ * that does not fit in m_data_used; sm_validate rejects that map.
+ */
+static void
+__sm_drop_empty_chunks(sm_t *map)
+{
+	size_t count;
+	size_t i;
+	size_t off = 0;
+	if (map->m_data_used < SM_SIZEOF_OVERHEAD || __sm_is_small(map)) {
+		return;
+	}
+	count = __sm_get_chunk_count(map);
+	for (i = 0; i < count; i++) {
+		__sm_chunk_t chunk;
+		size_t size;
+		if (SM_SIZEOF_OVERHEAD + off + SM_SIZEOF_OVERHEAD +
+		        sizeof(__sm_bitvec_t) > map->m_data_used) {
+			return;
+		}
+		__sm_chunk_init(&chunk,
+		    __sm_get_chunk_data(map, off) + SM_SIZEOF_OVERHEAD);
+		size = SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&chunk);
+		if (SM_SIZEOF_OVERHEAD + off + size > map->m_data_used) {
+			return;
+		}
+		if (__sm_chunk_is_empty_any(&chunk)) {
+			uint8_t *p = __sm_get_chunk_data(map, off);
+			memmove(p, p + size, map->m_data_used -
+			    (SM_SIZEOF_OVERHEAD + off + size));
+			map->m_data_used -= size;
+			__sm_set_chunk_count(map,
+			    __sm_get_chunk_count(map) - 1);
+		} else {
+			off += size;
+		}
+	}
+}
+
 /**
  * @brief Initializes a sparse map with given data and size.
  *
@@ -4310,6 +4371,9 @@ sm_open(sm_t *map, uint8_t *data, const size_t size)
 	/* An untrusted buffer must be structurally valid or it is replaced
 	 * with an empty (valid) map -- the same contract sm_deserialize
 	 * already enforces. */
+	if (claimed_count == walked_count) {
+		__sm_drop_empty_chunks(map);
+	}
 	if (claimed_count != walked_count || !sm_validate(map)) {
 		__sm_store_u64(&map->m_data[0], 0);
 		map->m_data_used = SM_SIZEOF_OVERHEAD;
@@ -4356,6 +4420,9 @@ sm_open_copy(const uint8_t *data, size_t n, size_t slack)
 		walked_count = __sm_get_chunk_count(m);
 		/* Untrusted bytes: reject anything not structurally valid
 		 * rather than returning a half-parsed map. */
+		if (claimed_count == walked_count) {
+			__sm_drop_empty_chunks(m);
+		}
 		if (claimed_count != walked_count || !sm_validate(m)) {
 			sm_free(m);
 			return (NULL);
@@ -9738,6 +9805,13 @@ sm_validate(const sm_t *map)
 		    __sm_chunk_rle_get_length(&chunk) > capacity) {
 			return (false);
 		}
+		/* (h) every chunk holds a member: the writers drop a chunk
+		 * once it empties, and the readers disagree on an empty one
+		 * (the RLE readers count a length-0 run as its capacity, and
+		 * sm_minimum reports an empty chunk's start). */
+		if (__sm_chunk_is_empty_any(&chunk)) {
+			return (false);
+		}
 		/* (f) sparse descriptor shape: every data-bearing slot
 		 * (SM_PAYLOAD_ONES / SM_PAYLOAD_MIXED) must lie within the
 		 * chunk's measured capacity.  __sm_chunk_get_capacity reports
@@ -10074,6 +10148,7 @@ sm_deserialize(const uint8_t *in, size_t n)
 	map->m_data_used = body_len;
 
 	/* Validate the result; reject malformed input. */
+	__sm_drop_empty_chunks(map);
 	if (!sm_validate(map)) {
 		sm_free(map);
 		return (NULL);
@@ -11498,7 +11573,19 @@ sm_split(sm_t *map, uint64_t idx, sm_t *other)
 				__sm_map_unset(map, j, false);
 			}
 		}
-		dst += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&d_chunk);
+		/* The middle chunk had no member at or above idx: drop the
+		 * empty chunk the zeroed header created in `other`.  It held
+		 * no bits, but sm_minimum and other slot-indexed readers saw
+		 * its start. */
+		__sm_chunk_init(&d_chunk, dst + SM_SIZEOF_OVERHEAD);
+		if (__sm_chunk_is_empty(&d_chunk)) {
+			other->m_data_used = (size_t)(dst - other->m_data);
+			__sm_set_chunk_count(other,
+			    __sm_get_chunk_count(other) - 1);
+		} else {
+			dst += SM_SIZEOF_OVERHEAD +
+			    __sm_chunk_get_size(&d_chunk);
+		}
 		i++;
 
 		/* Re-derive where the moved region begins.  If a chunk still
