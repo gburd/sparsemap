@@ -1417,8 +1417,7 @@ uint64_t sm_next_member_op(const sm_t *a, const sm_t *b, sm_op_t op,
  * members in ascending order, in batches of at most 64; the first
  * \a skip members of the result are not delivered.  The batch sizes
  * may differ from those sm_scan() would use on the built map; the
- * sequence of indices is the same.  Unlike sm_scan(), a member at
- * UINT64_MAX is delivered.
+ * sequence of indices is the same, including a member at UINT64_MAX.
  *
  * Cost is O(runs(a) + runs(b) + delivered members): both maps are read
  * run by run, and skipped members are counted, not visited.  Uses about
