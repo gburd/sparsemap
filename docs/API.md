@@ -217,11 +217,13 @@ header itself.
 | `sm_is_subset()` | Test whether \a a's bits are a subset of \a b's bits. |
 | `sm_is_superset()` | Test whether \a a's bits are a superset of \a b's bits. |
 | `sm_jaccard_index()` | Jaccard similarity index: |a intersect b| / |a union b|. |
-| `sm_locator_build()` | Build a transient sqrt(n) locator over \a map. |
-| `sm_locator_contains()` | O(sqrt n) membership test; equals sm_contains(map, idx, NULL). */ |
+| `sm_locator_build()` | Build a transient chunk directory over \a map. |
+| `sm_locator_contains()` | O(log chunks) membership test; equals sm_contains(map, idx, NULL). |
 | `sm_locator_free()` | Release a locator built by sm_locator_build (NULL-safe). */ |
-| `sm_locator_rank()` | O(sqrt n) rank over inclusive [lo, hi]; equals sm_rank. |
-| `sm_locator_select()` | O(sqrt n) select; equals sm_select(map, n, value). |
+| `sm_locator_next_member()` | O(log chunks) successor; equals sm_next_member(map, x, NULL). |
+| `sm_locator_prev_member()` | O(log chunks) predecessor; equals sm_prev_member(map, x, NULL). |
+| `sm_locator_rank()` | O(log chunks) rank over inclusive [lo, hi]; equals sm_rank. |
+| `sm_locator_select()` | O(log chunks) select of the \a n'th (0-based) matching bit. |
 | `sm_maximum()` | Return the position of the last set bit (maximum). |
 | `sm_membership()` | Classify a sparsemap as empty, singleton, or multi-element. |
 | `sm_minimum()` | Return the position of the first set bit (minimum). |
@@ -237,10 +239,12 @@ header itself.
 | `sm_pop_last()` | Find the highest set bit, clear it, and return it. |
 | `sm_prev_member()` | Find the highest set bit at index < \a prev_idx. |
 | `sm_rank()` | Count matching bits in the inclusive range [\a x, \a y]. |
+| `sm_rank_many()` | Count set bits below many positions in one sweep (batched). |
 | `sm_remove()` | Clear the bit at \a idx (set to 0). |
 | `sm_remove_range()` | Clear every bit in `[lo, hi)`. |
 | `sm_scan()` | Invoke a callback for every set bit in the map. |
 | `sm_select()` | Find the position of the \a n'th matching bit (0-based). |
+| `sm_select_many()` | Select many set bits in one sweep (batched). |
 | `sm_serialize()` | Serialize \a map into \a out (`sm_serialized_size` bytes). |
 | `sm_serialized_size()` | Compute the buffer size needed to serialize \a map. |
 | `sm_set_allocator()` | Set the process-wide allocator hooks. |

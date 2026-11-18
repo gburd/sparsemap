@@ -945,9 +945,9 @@ prop_runs_model(hegel_test_case *tc, void *ctx)
 /*
  * Property: the point-lookup / rank / select accelerators (Ideas 3, 4,
  * 5) agree with both the dense bool[] oracle and the plain sm_contains
- * / sm_rank / sm_select path on a random map.  Also exercises the
- * staleness fallback: after a mutation the locator (not rebuilt) must
- * still return correct results.
+ * / sm_rank / sm_select path on a random map.  (A locator used after a
+ * mutation is a contract violation; tests/test_locator.c covers the
+ * structural staleness fallback.)
  */
 static void
 prop_accel(hegel_test_case *tc, void *ctx)
@@ -1041,21 +1041,6 @@ prop_accel(hegel_test_case *tc, void *ctx)
 		assert(sm_locator_select(loc, card, true)
 		    == sm_select(m, card, true));
 
-		/* Staleness: mutate without rebuilding; stay correct.
-		 * Guarded out under SPARSEMAP_DIAGNOSTIC where a stale query
-		 * asserts by contract. */
-#ifndef SPARSEMAP_DIAGNOSTIC
-		if (card > 0) {
-			uint64_t hole = bits[card / 2];
-			sm_remove(m, hole);
-			for (size_t i = 0; i < np; i++) {
-				assert(sm_locator_contains(loc, probes[i])
-				    == sm_contains(m, probes[i], NULL));
-			}
-			assert(sm_locator_rank(loc, 0, hole, true)
-			    == sm_rank(m, 0, hole, true));
-		}
-#endif
 		sm_locator_free(loc);
 	}
 
