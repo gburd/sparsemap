@@ -228,6 +228,7 @@ header itself.
 | `sm_membership()` | Classify a sparsemap as empty, singleton, or multi-element. |
 | `sm_minimum()` | Return the position of the first set bit (minimum). |
 | `sm_next_member()` | Find the lowest set bit at index > \a prev_idx. |
+| `sm_next_member_op()` | Find the lowest member of (a OP b) at index > \a prev_idx. |
 | `sm_nonempty_difference()` | Test whether `a \ b` has any set bits, without allocating. |
 | `sm_offset()` | Create a new sparsemap with all bits shifted by \a offset. |
 | `sm_open()` | Attach to an existing (serialized) sparsemap buffer. |
@@ -243,6 +244,7 @@ header itself.
 | `sm_remove()` | Clear the bit at \a idx (set to 0). |
 | `sm_remove_range()` | Clear every bit in `[lo, hi)`. |
 | `sm_scan()` | Invoke a callback for every set bit in the map. |
+| `sm_scan_op()` | Invoke a callback for every member of (a OP b). |
 | `sm_select()` | Find the position of the \a n'th matching bit (0-based). |
 | `sm_select_many()` | Select many set bits in one sweep (batched). |
 | `sm_serialize()` | Serialize \a map into \a out (`sm_serialized_size` bytes). |
@@ -289,6 +291,7 @@ header itself.
 | `sm_cursor_t` | type |
 | `sm_locator_t` | type |
 | `sm_membership_t` | type |
+| `sm_op_t` | type |
 | `sm_stats_t` | type |
 | `sm_subset_relation_t` | type |
 | `sm_t` | type |

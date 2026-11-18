@@ -8996,6 +8996,353 @@ sm_span(sm_t *map, uint64_t idx, size_t len, bool value)
 }
 
 /* -------------------------------------------------------------------
+ * Lazy iteration over a OP b: members of a combined set without
+ * building it
+ * ------------------------------------------------------------------- */
+
+/*
+ * The first index >= x that is NOT a member of the chunk at `chunk`
+ * (starting at `start`), or start + capacity (saturated, see __sm_end)
+ * when every bit from x to the chunk's end is set.  x must lie in
+ * [start, start + capacity).  NONE slots are absent, like every reader
+ * treats them.
+ */
+static uint64_t
+__sm_chunk_next_absent(const __sm_chunk_t *chunk, uint64_t start,
+    size_t cap, uint64_t x)
+{
+	size_t v;
+	for (v = (size_t)((x - start) / SM_BITS_PER_VECTOR);
+	     v < SM_FLAGS_PER_INDEX; v++) {
+		const uint64_t vec_lo = start + v * SM_BITS_PER_VECTOR;
+		const size_t flags = SM_CHUNK_GET_FLAGS(chunk->m_data[0], v);
+		const unsigned skip =
+		    (x > vec_lo) ? (unsigned)(x - vec_lo) : 0u;
+		__sm_bitvec_t zeros;
+		if (flags == SM_PAYLOAD_ONES) {
+			continue;
+		}
+		if (flags != SM_PAYLOAD_MIXED) {
+			return (vec_lo + skip);
+		}
+		zeros = ~(__sm_bitvec_t)chunk->m_data[1 +
+		    __sm_chunk_get_position(chunk, v)] &
+		    (~(__sm_bitvec_t)0 << skip);
+		if (zeros != 0) {
+			return (vec_lo + (uint64_t)SM_CTZ64(zeros));
+		}
+	}
+	return (__sm_end(start, cap));
+}
+
+/*
+ * The first index >= x that is NOT a member of `map`, or SM_IDX_MAX if
+ * every index from x to the last member index, 2^64 - 2, is a member.
+ * The walk locates x's chunk through __sm_get_chunk_offset (so `cur`
+ * accelerates ascending calls exactly as it does for sm_contains), then
+ * follows the run of set bits across abutting chunks.  Cost is
+ * O(chunks walked), never one step per bit: an all-ONES chunk is one
+ * step for its 2048 bits.
+ */
+static uint64_t
+__sm_next_absent(const sm_t *map, uint64_t x, sm_cursor_t *cur)
+{
+	uint8_t *base;
+	uint8_t *p;
+	size_t stream_end;
+	ssize_t off;
+	if (map == NULL) {
+		return (x);
+	}
+	if (__sm_is_small(map)) {
+		return (__sm_small_next(map, x, false));
+	}
+	off = __sm_get_chunk_offset(map, x, cur);
+	if (off < 0) {
+		return (x);
+	}
+	base = __sm_get_chunk_data(map, 0);
+	p = base + off;
+	stream_end = map->m_data_used - SM_SIZEOF_OVERHEAD;
+	for (;;) {
+		const uint64_t start = __sm_load_idx((const uint8_t *)p);
+		__sm_chunk_t chunk;
+		size_t cap;
+		uint64_t end;
+		__sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
+		cap = __sm_chunk_get_capacity(&chunk);
+		if (x < start || x - start >= cap) {
+			return (x); /* in a gap or past the last chunk */
+		}
+		end = __sm_chunk_next_absent(&chunk, start, cap, x);
+		if (end != __sm_end(start, cap)) {
+			return (end);
+		}
+		/* Set through the last bit of the chunk that ends at 2^64. */
+		if (end == UINT64_MAX) {
+			return (SM_IDX_MAX);
+		}
+		p += SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&chunk);
+		if ((size_t)(p - base) >= stream_end) {
+			return (end);
+		}
+		x = end;
+	}
+}
+
+/* True when an index in exactly the sets flagged by in_a / in_b belongs
+ * to a OP b. */
+static bool
+__sm_op_keep(sm_op_t op, bool in_a, bool in_b)
+{
+	switch (op) {
+	case SM_OP_AND:
+		return (in_a && in_b);
+	case SM_OP_OR:
+		return (in_a || in_b);
+	case SM_OP_ANDNOT:
+		return (in_a && !in_b);
+	case SM_OP_XOR:
+		return (in_a != in_b);
+	}
+	/* An out-of-range op keeps nothing.  The fallback sits after the
+	 * switch, not in a default label, so a new enumerator without a
+	 * case draws a -Wswitch warning. */
+	return (false);
+}
+
+/* AND: leapfrog the two member streams.  Each round either returns or
+ * moves the lower bound up to the larger candidate, so a run in one map
+ * meeting a sparse other map costs one step per member of the other. */
+static uint64_t
+__sm_next_and(const sm_t *a, const sm_t *b, uint64_t p, sm_cursor_t *ca,
+    sm_cursor_t *cb)
+{
+	uint64_t x = sm_next_member(a, p, ca);
+	for (;;) {
+		uint64_t y;
+		if (x == SM_IDX_MAX) {
+			return (SM_IDX_MAX);
+		}
+		/* x - 1 wraps to the "from the start" sentinel for x == 0. */
+		y = sm_next_member(b, x - 1, cb);
+		if (y == x || y == SM_IDX_MAX) {
+			return (y);
+		}
+		x = sm_next_member(a, y - 1, ca);
+		if (x == y) {
+			return (x);
+		}
+	}
+}
+
+/* ANDNOT: the next member of a that b lacks.  When b holds a's
+ * candidate, jump past b's whole run of set bits at once. */
+static uint64_t
+__sm_next_andnot(const sm_t *a, const sm_t *b, uint64_t p, sm_cursor_t *ca,
+    sm_cursor_t *cb)
+{
+	uint64_t x = sm_next_member(a, p, ca);
+	while (x != SM_IDX_MAX && sm_contains(b, x, cb)) {
+		const uint64_t gap = __sm_next_absent(b, x, cb);
+		if (gap == SM_IDX_MAX) {
+			return (SM_IDX_MAX);
+		}
+		x = sm_next_member(a, gap - 1, ca);
+	}
+	return (x);
+}
+
+/* XOR: the smaller of the two next members, unless both maps hold it.
+ * Then both are set from x up to the first index where either map has
+ * a hole; skip that common stretch in one step and look again. */
+static uint64_t
+__sm_next_xor(const sm_t *a, const sm_t *b, uint64_t p, sm_cursor_t *ca,
+    sm_cursor_t *cb)
+{
+	for (;;) {
+		const uint64_t x = sm_next_member(a, p, ca);
+		const uint64_t y = sm_next_member(b, p, cb);
+		uint64_t ea;
+		uint64_t eb;
+		uint64_t e;
+		if (x != y) {
+			return (x < y ? x : y);
+		}
+		if (x == SM_IDX_MAX) {
+			return (SM_IDX_MAX);
+		}
+		ea = __sm_next_absent(a, x, ca);
+		eb = __sm_next_absent(b, x, cb);
+		if (ea == SM_IDX_MAX && eb == SM_IDX_MAX) {
+			return (SM_IDX_MAX);
+		}
+		e = ea < eb ? ea : eb;
+		if (ea != eb) {
+			/* e is a member of exactly one of the two maps. */
+			return (e);
+		}
+		p = e - 1;
+	}
+}
+
+uint64_t
+sm_next_member_op(const sm_t *a, const sm_t *b, sm_op_t op, uint64_t prev_idx,
+    sm_cursor_t *cur_a, sm_cursor_t *cur_b)
+{
+	/* UINT64_MAX is both "from the start" and the largest index, so no
+	 * member is strictly greater than a real UINT64_MAX bound; the
+	 * sentinel meaning wins, exactly as in sm_next_member. */
+	switch (op) {
+	case SM_OP_AND:
+		if (a == NULL || b == NULL) {
+			return (SM_IDX_MAX);
+		}
+		return (__sm_next_and(a, b, prev_idx, cur_a, cur_b));
+	case SM_OP_OR: {
+		const uint64_t x = sm_next_member(a, prev_idx, cur_a);
+		const uint64_t y = sm_next_member(b, prev_idx, cur_b);
+		return (x < y ? x : y);
+	}
+	case SM_OP_ANDNOT:
+		return (__sm_next_andnot(a, b, prev_idx, cur_a, cur_b));
+	case SM_OP_XOR:
+		return (__sm_next_xor(a, b, prev_idx, cur_a, cur_b));
+	}
+	/* An out-of-range op (after the switch so -Wswitch still checks
+	 * the enum is covered). */
+	errno = EINVAL;
+	return (SM_IDX_MAX);
+}
+
+/*
+ * Batched delivery for sm_scan_op: members are copied into a 64-entry
+ * buffer and handed to the caller's function whenever it fills, and once
+ * more at the end.  `skip` counts result members still to drop.
+ */
+typedef struct {
+	void (*fn)(uint64_t[], size_t, void *);
+	void *aux;
+	size_t skip;
+	size_t n;
+	uint64_t buf[SM_BITS_PER_VECTOR];
+} __sm_scan_out_t;
+
+/* Buffer one result member, flushing a full batch to the caller. */
+static void
+__sm_scan_out_index(__sm_scan_out_t *o, uint64_t idx)
+{
+	if (o->skip > 0) {
+		o->skip--;
+		return;
+	}
+	o->buf[o->n++] = idx;
+	if (o->n == SM_BITS_PER_VECTOR) {
+		o->fn(o->buf, o->n, o->aux);
+		o->n = 0;
+	}
+}
+
+/* Deliver every index in [lo, hi), less any still to be skipped.  The
+ * skip is taken arithmetically, so a long skipped run costs nothing. */
+static void
+__sm_scan_out_run(__sm_scan_out_t *o, uint64_t lo, uint64_t hi)
+{
+	uint64_t i;
+	if (o->skip > 0) {
+		if ((uint64_t)o->skip >= hi - lo) {
+			o->skip -= (size_t)(hi - lo);
+			return;
+		}
+		lo += o->skip;
+		o->skip = 0;
+	}
+	for (i = lo; i < hi; i++) {
+		__sm_scan_out_index(o, i);
+	}
+}
+
+void
+sm_scan_op(const sm_t *a, const sm_t *b, sm_op_t op,
+    void (*fn)(uint64_t[], size_t, void *), size_t skip, void *aux)
+{
+	__sm_run_iter_t *ia;
+	__sm_run_iter_t *ib;
+	__sm_scan_out_t out;
+	uint64_t alo = 0, ahi = 0, blo = 0, bhi = 0;
+	bool have_a, have_b;
+	uint64_t pos = 0;
+	bool have_pos = false;
+	if (fn == NULL || op > SM_OP_XOR) {
+		errno = EINVAL;
+		return;
+	}
+	/* Two run iterators are about 33 KB; keep them off the stack. */
+	ia = (__sm_run_iter_t *)__sm_alloc(sizeof(*ia));
+	ib = (__sm_run_iter_t *)__sm_alloc(sizeof(*ib));
+	if (ia == NULL || ib == NULL) {
+		__sm_free(ia);
+		__sm_free(ib);
+		errno = ENOMEM;
+		return;
+	}
+	out.fn = fn;
+	out.aux = aux;
+	out.skip = skip;
+	out.n = 0;
+
+	/*
+	 * The interval sweep sm_xor uses: walk both maps run by run, split
+	 * the line at every run edge, and keep each segment [pos, next) whose
+	 * membership (in a, in b) satisfies op.  Run ends are exclusive and
+	 * never wrap: the last member is at most 2^64 - 2.
+	 */
+	__sm_run_iter_init(ia, a);
+	__sm_run_iter_init(ib, b);
+	have_a = __sm_run_next(ia, &alo, &ahi);
+	have_b = __sm_run_next(ib, &blo, &bhi);
+	while (have_a || have_b) {
+		uint64_t lo = have_a ? alo : blo;
+		uint64_t next = UINT64_MAX;
+		bool in_a;
+		bool in_b;
+		if (have_b && blo < lo)
+			lo = blo;
+		if (!have_pos || pos < lo) {
+			pos = lo;
+			have_pos = true;
+		}
+		in_a = have_a && pos >= alo && pos < ahi;
+		in_b = have_b && pos >= blo && pos < bhi;
+		if (have_a) {
+			if (pos < alo && alo < next)
+				next = alo;
+			if (pos >= alo && ahi < next)
+				next = ahi;
+		}
+		if (have_b) {
+			if (pos < blo && blo < next)
+				next = blo;
+			if (pos >= blo && bhi < next)
+				next = bhi;
+		}
+		if (__sm_op_keep(op, in_a, in_b)) {
+			__sm_scan_out_run(&out, pos, next);
+		}
+		pos = next;
+		if (have_a && pos >= ahi)
+			have_a = __sm_run_next(ia, &alo, &ahi);
+		if (have_b && pos >= bhi)
+			have_b = __sm_run_next(ib, &blo, &bhi);
+	}
+	if (out.n > 0) {
+		fn(out.buf, out.n, aux);
+	}
+	__sm_free(ia);
+	__sm_free(ib);
+}
+
+/* -------------------------------------------------------------------
  * Point-lookup / rank / select acceleration (Ideas 3, 4, 5)
  *
  * These add caller-owned, transient acceleration state on TOP of the
