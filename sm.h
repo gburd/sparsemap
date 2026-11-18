@@ -1192,8 +1192,9 @@ uint64_t sm_span(sm_t *map, uint64_t start, size_t len, bool value);
  *
  * @param[in] map  The sparsemap to index.  It must outlive the locator.
  * @returns A heap-allocated locator (free with sm_locator_free), or
- *          NULL on allocation failure or when \a map is NULL or a
- *          chunk-mode map with no chunks.  A small-set map gets a
+ *          NULL on allocation failure or when \a map is NULL.  An empty
+ *          map, whether fresh or emptied by removals, gets a locator
+ *          that answers as the empty map.  A small-set map gets a
  *          locator that queries its words directly.
  */
 sm_locator_t *sm_locator_build(const sm_t *map);

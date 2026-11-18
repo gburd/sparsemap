@@ -13272,6 +13272,9 @@ __sm_locator_is_stale(const sm_locator_t *loc)
 	    __sm_get_chunk_count(map) != loc->count) {
 		return (true);
 	}
+	if (loc->count == 0) {
+		return (false); /* still empty: no chunk start to read */
+	}
 	base = __sm_get_chunk_data(map, 0);
 	first = __sm_load_idx((const uint8_t *)base);
 	if (first != loc->first_start) {
@@ -13423,8 +13426,10 @@ sm_locator_build(const sm_t *map)
 	}
 	count = __sm_get_chunk_count(map);
 	if (count == 0) {
-		__sm_free(loc);
-		return (NULL);
+		/* No directory: every query finds no chunk, which answers
+		 * for the empty map. */
+		__sm_loc_fingerprint(loc, map);
+		return (loc);
 	}
 	loc->count = count;
 	loc->n_grp = (count + SM_LOC_GROUP - 1) >> SM_LOC_GROUP_SHIFT;
@@ -13549,12 +13554,19 @@ __sm_loc_word_select0(uint64_t from, __sm_bitvec_t w, uint64_t rem)
 	return (from + (uint64_t)SM_CTZ64(z));
 }
 
-/* The rem-th unset position at or after `tail`, where every position
- * from `tail` on is unset, or SM_IDX_MAX when that is past 2^64 - 2. */
+/* The rem-th unset position at or after s + n, where every position
+ * from there on is unset, or SM_IDX_MAX when that is past 2^64 - 2.
+ * Taking the start and length rather than their sum keeps "the span
+ * reaches 2^64" (no positions left) apart from an empty span at 0. */
 static uint64_t
-__sm_loc_tail_select0(uint64_t tail, uint64_t rem)
+__sm_loc_tail_select0(uint64_t s, uint64_t n, uint64_t rem)
 {
-	if (tail == 0 || rem >= UINT64_MAX - tail) {
+	uint64_t tail;
+	if (n > UINT64_MAX - s) {
+		return (SM_IDX_MAX);
+	}
+	tail = s + n;
+	if (rem >= UINT64_MAX - tail) {
 		return (SM_IDX_MAX);
 	}
 	return (tail + rem);
@@ -13575,7 +13587,7 @@ __sm_loc_small_select0(const sm_t *map, uint64_t k)
 		}
 		k -= z;
 	}
-	return (__sm_loc_tail_select0((uint64_t)nw * 64, k));
+	return (__sm_loc_tail_select0(0, (uint64_t)nw * 64, k));
 }
 
 /* The k-th unset position of a fresh chunk-mode locator's map.  Chunk i,
@@ -13600,7 +13612,7 @@ __sm_loc_select0(const sm_locator_t *loc, uint64_t k)
 	rem = k - (s - __sm_loc_set(loc, i));
 	if (__sm_chunk_is_rle(&chunk)) {
 		const uint64_t len = __sm_chunk_rle_get_length(&chunk);
-		return (__sm_loc_tail_select0(s + len, rem));
+		return (__sm_loc_tail_select0(s, len, rem));
 	}
 	__sm_expand_sparse_chunk(&chunk, words, cap_flags);
 	for (v = 0; v < SM_FLAGS_PER_INDEX; v++) {
@@ -13612,7 +13624,7 @@ __sm_loc_select0(const sm_locator_t *loc, uint64_t k)
 		}
 		rem -= z;
 	}
-	return (__sm_loc_tail_select0(s + SM_CHUNK_MAX_CAPACITY, rem));
+	return (__sm_loc_tail_select0(s, SM_CHUNK_MAX_CAPACITY, rem));
 }
 
 bool
