@@ -68,9 +68,14 @@ Layout in the data buffer:
 
 Each chunk's *start offset* is an absolute bit index, aligned to a
 chunk-capacity boundary.  Chunks are stored in increasing-offset
-order so binary search and merge-style algorithms work.  Duplicate
-or out-of-order start offsets are a corrupt map: `sm_validate()`
-rejects them, and the readers assume the ordering.
+order so merge-style algorithms (the set operations) can walk two maps
+in step.  The stream cannot be binary-searched: chunks vary in size,
+so the only way to reach chunk k is to walk chunks 0 through k - 1.
+Lookups, rank and select are therefore O(chunks).  Binary search
+exists only through the optional `sm_locator_t`, which records the
+start and byte offset of every chunk.  Duplicate or out-of-order
+start offsets are a corrupt map: `sm_validate()` rejects them, and
+the readers assume the ordering.
 
 The count and the start offsets were 4 bytes each before v4.0.0,
 which silently truncated any index at or above 2^32.  Both are
