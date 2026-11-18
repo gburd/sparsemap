@@ -10069,7 +10069,10 @@ sm_serialize(const sm_t *map, uint8_t *out, size_t out_size)
 	memcpy(out + 0, &magic, 4);
 	out[4] = SM_WIRE_VERSION;
 	out[5] = flags;
-	out[6] = (map != NULL && __sm_is_small(map)) ? SM_WIRE_FLAG_SMALL : 0;
+	/* The flag mirrors the body written below, which for an empty map is
+	 * the chunk-mode header whichever mode the map is in. */
+	out[6] = (map != NULL && !sm_is_empty(map) && __sm_is_small(map)) ?
+	    SM_WIRE_FLAG_SMALL : 0;
 	out[7] = 0;
 	memcpy(out + 8, &cardinality, 8);
 
