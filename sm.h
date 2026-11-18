@@ -526,10 +526,21 @@ typedef struct sm_cursor_cached {
  *
  * Contract:
  *   - Build with sm_locator_build(map); free with sm_locator_free().
- *   - ANY mutation of the map invalidates the locator: REBUILD it.
- *   - A stale locator still returns CORRECT results (it detects the
- *     mismatch and falls back to the plain O(n) sm_contains / sm_rank /
- *     sm_select path) but loses the speedup.
+ *   - ANY mutation of the map (sm_add / sm_remove / sm_assign /
+ *     sm_add_range / sm_set_data_size / sm_clear / sm_split / the
+ *     *_inplace ops / ...) invalidates the locator: REBUILD it.  A
+ *     stale locator gives unspecified answers, possibly WRONG ones, not
+ *     merely slow ones.
+ *   - Each query first compares a cheap fingerprint of the map (the
+ *     data pointer, the used size, the chunk count, the first and last
+ *     chunk starts, and the cardinality cache when it was populated at
+ *     build time) with the one recorded at build time.  A mismatch
+ *     means the map's shape changed, and the query falls back to the
+ *     plain sm_contains / sm_rank / sm_select path on the live map.
+ *     This catches a mutation that inserts, removes, or moves a chunk,
+ *     but not one that flips a bit inside an existing chunk without
+ *     moving any bytes: sm_t has no change counter, so that case
+ *     cannot be detected in O(1).  Do not rely on the fallback.
  *   - rank/select for value == false fall back to the plain path
  *     (correct, not accelerated); the sqrt speedup is for value==true.
  *
@@ -538,6 +549,9 @@ typedef struct sm_cursor_cached {
  */
 typedef struct sm_locator {
 	const sm_t *map;      /* the map this locator indexes */
+	const uint8_t *data;  /* map->m_data at build (fingerprint) */
+	size_t used;          /* map->m_data_used at build (fingerprint) */
+	size_t card_plus1;    /* map's cardinality cache at build, or 0 */
 	size_t count;         /* chunk count at build time */
 	uint64_t first_start; /* first chunk start (staleness fingerprint) */
 	uint64_t last_start;  /* last chunk start (staleness fingerprint) */

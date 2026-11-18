@@ -197,8 +197,9 @@ upgrading, and reset it after any mutation.  `sm_locator_t` (the 5.3.0
 transient O(sqrt n) point-lookup / rank / select index) is opaque --
 build it with `sm_locator_build`, use it only through the `sm_locator_*`
 functions, free it with `sm_locator_free`, and rebuild it after any
-mutation (a stale locator still returns correct results, just without
-the speedup).
+mutation.  A stale locator can return wrong answers: its cheap
+fingerprint check catches a mutation that adds, removes or moves a
+chunk, but not a bit flipped inside an existing chunk.
 
 The **wire format** produced by `sm_serialize` and consumed by
 `sm_open`/`sm_deserialize` *is* stable and is preserved across the

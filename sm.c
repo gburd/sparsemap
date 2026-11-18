@@ -11599,34 +11599,43 @@ __sm_isqrt(size_t x)
 	return (r);
 }
 
-/* True when the locator's cached shape no longer matches its map, i.e. the
+/* True when the locator's fingerprint no longer matches its map, i.e. the
  * caller mutated the map without rebuilding.  A stale locator is a usage
- * error; queries fall back to the plain path so results stay correct. */
+ * error.  The check is O(1) and catches any mutation that inserts,
+ * removes, or moves a chunk, or that changes the buffer or its used
+ * size; it cannot see a bit flipped in place inside an existing chunk
+ * (see the sm_locator_t contract in sm.h). */
 static bool
 __sm_locator_is_stale(const sm_locator_t *loc)
 {
+	const sm_t *map;
 	uint8_t *base;
 	__sm_idx_t first;
 	__sm_idx_t last;
 	if (loc == NULL || loc->map == NULL || loc->n_sb == 0) {
 		return (true);
 	}
-	if (__sm_get_chunk_count(loc->map) != loc->count) {
+	map = loc->map;
+	if (map->m_data != loc->data || map->m_data_used != loc->used) {
 		return (true);
 	}
-	/* First and last chunk starts are cheap O(1) fingerprints: a
-	 * mutation that preserves the chunk count but shifts, splits, or
-	 * coalesces chunks almost always moves one of them.  This is a
-	 * best-effort check, not a proof of freshness -- but any miss still
-	 * yields a correct answer via the fine-walk, which self-validates
-	 * against the actual chunk bytes it reads. */
-	base = __sm_get_chunk_data(loc->map, 0);
+	/* A cardinality cached at build time that is now invalid or
+	 * different means a membership-changing call ran since.  The cache
+	 * is filled lazily, so an unpopulated one at build proves nothing. */
+	if (loc->card_plus1 != 0 && map->m_card_plus1 != loc->card_plus1) {
+		return (true);
+	}
+	if (__sm_is_small(map) ||
+	    __sm_get_chunk_count(map) != loc->count) {
+		return (true);
+	}
+	base = __sm_get_chunk_data(map, 0);
 	first = __sm_load_idx((const uint8_t *)base);
 	if (first != loc->first_start) {
 		return (true);
 	}
 	if ((size_t)loc->last_offset + sizeof(__sm_idx_t) >
-	    (size_t)loc->map->m_data_used - SM_SIZEOF_OVERHEAD) {
+	    (size_t)map->m_data_used - SM_SIZEOF_OVERHEAD) {
 		return (true);
 	}
 	last =
@@ -11735,6 +11744,9 @@ sm_locator_build(const sm_t *map)
 	}
 
 	loc->map = map;
+	loc->data = map->m_data;
+	loc->used = map->m_data_used;
+	loc->card_plus1 = map->m_card_plus1;
 	loc->count = count;
 	loc->first_start = (uint64_t)sb_start[0];
 	loc->last_start = (uint64_t)last_start;
@@ -11863,7 +11875,7 @@ sm_locator_contains(const sm_locator_t *loc, uint64_t idx)
 		if (idx < (uint64_t)s) {
 			return (false); /* gap before this chunk */
 		}
-		if (idx < (uint64_t)s + cap) {
+		if (idx - (uint64_t)s < cap) {
 			return (__sm_chunk_is_set(&chunk, idx - (uint64_t)s));
 		}
 		next_off = (size_t)(p - base) +
