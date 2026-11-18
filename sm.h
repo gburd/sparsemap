@@ -80,6 +80,17 @@
  * transparent and lossless.  Every public `sm_*` function behaves
  * identically in both modes.  See the design notes under docs/.
  *
+ * ## The member universe
+ *
+ * A member is any index in [0, 2^64 - 1), that is 0 through 2^64 - 2.
+ * Index 2^64 - 1 is `SM_IDX_MAX`, the "not found" value every lookup
+ * returns, so it is never a member: sm_add() and the other adders reject
+ * it with `errno` = `EINVAL`, the bulk builders reject an input that
+ * holds it, sm_contains() is false for it, and sm_validate() (and so
+ * sm_open(), sm_open_copy() and sm_deserialize()) rejects a buffer that
+ * sets it.  Every run therefore ends at or below 2^64 - 1 exclusive, and
+ * a half-open range [lo, hi) with hi <= UINT64_MAX covers only members.
+ *
  * ## Encoding transitions
  *
  * - A sparse chunk whose vectors are all ones (2048 consecutive set bits)
@@ -555,7 +566,10 @@ typedef struct sm_locator {
 	size_t *sb_prefix;    /* [n_sb] cumulative SET bits BEFORE it */
 } sm_locator_t;
 
-/** Sentinel value returned when a lookup finds no matching bit. */
+/** Sentinel value returned when a lookup finds no matching bit.
+ *
+ * Also the one index that is not a member: the member universe is
+ * [0, SM_IDX_MAX), see "The member universe" above. */
 #define SM_IDX_MAX UINT64_MAX
 
 /** Evaluates to true when \a x represents a valid (found) index. */
@@ -820,7 +834,8 @@ void *sm_get_data(const sm_t *map);
  * @param[in] idx  0-based bit position.
  * @param[in] cur  Optional read cursor for sequential acceleration, or
  *                 NULL.  See sm_cursor_t.
- * @returns true if bit \a idx is 1, false if 0 or out of range.
+ * @returns true if bit \a idx is 1, false if 0 or out of range.  Always
+ *          false for SM_IDX_MAX, which is not a member.
  */
 bool sm_contains(const sm_t *map, uint64_t idx, sm_cursor_t *cur);
 
@@ -859,7 +874,9 @@ bool sm_contains_cached(const sm_t *map, uint64_t idx,
  * @param[in,out] map    The sparsemap to modify.
  * @param[in]     idx    0-based bit position.
  * @param[in]     value  true to set, false to clear.
- * @returns \a idx on success, or SM_IDX_MAX with errno=ENOSPC.
+ * @returns \a idx on success, or SM_IDX_MAX with errno=ENOSPC, or
+ *          with errno=EINVAL when \a value is true and \a idx is
+ *          SM_IDX_MAX (not a member; the map is unchanged).
  *
  * Example:
  * @code
@@ -884,8 +901,10 @@ uint64_t sm_assign(sm_t *map, uint64_t idx, bool value);
  * construction.
  *
  * @param[in,out] map  The sparsemap to modify.
- * @param[in]     idx  0-based bit position to set.
- * @returns \a idx on success, or SM_IDX_MAX with errno=ENOSPC.
+ * @param[in]     idx  0-based bit position to set, below SM_IDX_MAX.
+ * @returns \a idx on success, or SM_IDX_MAX with errno=ENOSPC, or with
+ *          errno=EINVAL when \a idx is SM_IDX_MAX (not a member; the map
+ *          is unchanged).
  *
  * Example:
  * @code
@@ -913,12 +932,15 @@ uint64_t sm_add(sm_t *map, uint64_t idx);
  *
  * On ENOSPC, doubles the buffer (with a 4 KiB floor) and retries.
  * If the grow succeeds but the retry still ENOSPCs, returns
- * SM_IDX_MAX and leaves *map valid (and possibly grown).
+ * SM_IDX_MAX and leaves *map valid (and possibly grown).  Any other
+ * failure is returned without growing: \a idx == SM_IDX_MAX gives
+ * SM_IDX_MAX with errno=EINVAL and leaves the map unchanged.
  *
  * @param[in,out] map  Pointer to the map pointer.  Updated to the
  *                     possibly-relocated map after a grow.
- * @param[in]     idx  Bit to set.
- * @returns idx on success, or SM_IDX_MAX on allocation failure.
+ * @param[in]     idx  Bit to set, below SM_IDX_MAX.
+ * @returns idx on success, or SM_IDX_MAX on allocation failure or
+ *          EINVAL.
  */
 uint64_t sm_add_grow(sm_t **map, uint64_t idx);
 
@@ -941,7 +963,8 @@ uint64_t sm_add_grow(sm_t **map, uint64_t idx);
  * @param[in,out] cur  Caller-owned cursor (SM_CURSOR_INIT before the
  *                     first call).  May be NULL to opt out of the
  *                     acceleration.
- * @returns idx on success, or SM_IDX_MAX on allocation failure.
+ * @returns idx on success, or SM_IDX_MAX on allocation failure, or with
+ *          errno=EINVAL (no grow) when \a idx is SM_IDX_MAX.
  */
 uint64_t sm_add_grow_cursor(sm_t **map, uint64_t idx, sm_cursor_t *cur);
 
@@ -956,7 +979,9 @@ uint64_t sm_add_grow_cursor(sm_t **map, uint64_t idx, sm_cursor_t *cur);
  *
  * @param[in,out] map  The sparsemap to modify.
  * @param[in]     idx  0-based bit position to clear.
- * @returns \a idx on success, or SM_IDX_MAX with errno=ENOSPC.
+ * @returns \a idx on success, or SM_IDX_MAX with errno=ENOSPC.  For
+ *          \a idx == SM_IDX_MAX, which is never a member, the map is
+ *          unchanged and the result is SM_IDX_MAX with errno=EINVAL.
  */
 uint64_t sm_remove(sm_t *map, uint64_t idx);
 
@@ -1203,12 +1228,15 @@ uint64_t sm_split(sm_t *map, uint64_t idx, sm_t *other);
  *
  * Every set bit at position i in \a map appears at position i + offset in
  * the result.  Bits shifted below 0 are silently dropped (matching
- * CRoaring and PostgreSQL semantics).
+ * CRoaring and PostgreSQL semantics).  A positive shift that would move
+ * the largest member to SM_IDX_MAX or past it leaves the member universe
+ * and fails as a whole with errno=ERANGE; no member is dropped at the
+ * top.
  *
  * @param[in] map     The source sparsemap.
  * @param[in] offset  Signed shift amount (positive = right, negative = left).
  * @returns A newly allocated sparsemap (caller must free()), or NULL if all
- *          bits are shifted away or on allocation failure.
+ *          bits are shifted away, on ERANGE, or on allocation failure.
  */
 sm_t *sm_offset(const sm_t *map, ssize_t offset);
 
@@ -1387,7 +1415,9 @@ double sm_jaccard_index(const sm_t *a, const sm_t *b);
  * @param[in]     n    Length of `arr`.
  * @returns true if every add succeeded; false if a scratch allocation
  *          failed or any add returned SPARSEMAP_IDX_MAX (capacity
- *          exhausted -- use sm_add_many_grow to grow instead).
+ *          exhausted -- use sm_add_many_grow to grow instead).  An
+ *          input holding SM_IDX_MAX is rejected whole: false with
+ *          errno=EINVAL and the map unchanged.
  */
 bool sm_add_many(sm_t *map, const uint64_t *arr, size_t n);
 
@@ -1403,7 +1433,9 @@ bool sm_add_many(sm_t *map, const uint64_t *arr, size_t n);
  * @param[in]     arr  Array of indices (any order).
  * @param[in]     n    Length of `arr`.
  * @returns true on success; false if a scratch allocation failed or
- *          sm_add_grow exhausted its grow retries.
+ *          sm_add_grow exhausted its grow retries.  An input holding
+ *          SM_IDX_MAX is rejected whole: false with errno=EINVAL and the
+ *          map unchanged.
  */
 bool sm_add_many_grow(sm_t **map, const uint64_t *arr, size_t n);
 
@@ -1434,24 +1466,35 @@ void sm_to_array(const sm_t *map, uint64_t *out, size_t *n_out);
 
 /** @brief Set every bit in `[lo, hi)`.
  *
- * Equivalent to looping `sm_add(map, i)` for i in [lo, hi).
- * Implementation is currently the naive loop; a chunk-aware fast
- * path may land in a future release.
+ * Equivalent to looping `sm_add(map, i)` for i in [lo, hi), but
+ * run-based: one pass over the map's runs, O(runs + output chunks).  The
+ * output holds one all-ONES chunk (16 bytes) per 2048 bits of a run, so
+ * a 2^31-bit run is 2^20 chunks, 16 MiB.  The map is rewritten in place
+ * and never relocates.
+ *
+ * The range is half open and hi is at most UINT64_MAX, so it never
+ * includes SM_IDX_MAX: [lo, UINT64_MAX) reaches the last member.
  *
  * @param[in,out] map  Destination.
  * @param[in]     lo   Inclusive lower bound.
- * @param[in]     hi   Exclusive upper bound (lo == hi is a no-op).
- * @returns true if every bit was added; false if any add returned
- *          SPARSEMAP_IDX_MAX (capacity exhausted).
+ * @param[in]     hi   Exclusive upper bound (lo >= hi is a no-op).
+ * @returns true on success (and for lo >= hi); false for a NULL map,
+ *          on allocation failure, or with errno=ENOSPC when the result
+ *          does not fit the map's buffer (the map is then unchanged).
  */
 bool sm_add_range(sm_t *map, uint64_t lo, uint64_t hi);
 
 /** @brief Clear every bit in `[lo, hi)`.
  *
+ * Run-based: O(runs + output chunks) however wide the range, never one
+ * step per bit.  The map is rewritten in place and never relocates.
+ *
  * @param[in,out] map  Destination.
  * @param[in]     lo   Inclusive lower bound.
- * @param[in]     hi   Exclusive upper bound.
- * @returns true if every bit was cleared; false if any remove failed.
+ * @param[in]     hi   Exclusive upper bound (lo >= hi is a no-op).
+ * @returns true on success (and for lo >= hi); false for a NULL map,
+ *          on allocation failure, or with errno=ENOSPC when the result
+ *          does not fit the map's buffer (the map is then unchanged).
  */
 bool sm_remove_range(sm_t *map, uint64_t lo, uint64_t hi);
 
@@ -1505,12 +1548,15 @@ size_t sm_xor_cardinality(const sm_t *a, const sm_t *b);
  * Convenience wrapper around `sm_create()` + `sm_add()`.  Mirrors
  * PostgreSQL's `bms_make_singleton`.
  *
- * @param[in] idx  The single bit to set.
- * @returns A new owned-contiguous sparsemap, or NULL on alloc failure.
+ * @param[in] idx  The single bit to set, below SM_IDX_MAX.
+ * @returns A new owned-contiguous sparsemap, or NULL on alloc failure,
+ *          or NULL with errno=EINVAL when \a idx is SM_IDX_MAX.
  */
 sm_t *sm_create_singleton(uint64_t idx);
 
 /** @brief Create a sparsemap containing every bit in `[lo, hi)`.
+ *
+ * Half open with hi <= UINT64_MAX, so it never includes SM_IDX_MAX.
  *
  * @param[in] lo  Inclusive lower bound.
  * @param[in] hi  Exclusive upper bound.
@@ -1523,7 +1569,8 @@ sm_t *sm_create_from_range(uint64_t lo, uint64_t hi);
  *
  * @param[in] arr  Array of indices.
  * @param[in] n    Length of `arr`.
- * @returns A new owned-contiguous sparsemap, or NULL on alloc failure.
+ * @returns A new owned-contiguous sparsemap, or NULL on alloc failure,
+ *          or NULL with errno=EINVAL when `arr` holds SM_IDX_MAX.
  */
 sm_t *sm_create_from_array(const uint64_t *arr, size_t n);
 
@@ -1637,9 +1684,13 @@ sm_t *sm_xor_inplace(sm_t *dst, const sm_t *src);
 
 /** @brief Complement every bit in `[lo, hi)`: set bits become unset and vice versa.
  *
- * In-place.  Naive implementation: O(hi-lo) sm_assign calls.
+ * In-place and run-based: O(runs + output chunks) however wide the
+ * range, and the map never relocates.  The range is half open with
+ * hi <= UINT64_MAX, so it never reaches SM_IDX_MAX.
  *
- * @returns true on success, false if the buffer was too small to grow.
+ * @returns true on success (and for lo >= hi); false for a NULL map,
+ *          on allocation failure, or with errno=ENOSPC when the result
+ *          does not fit the map's buffer (the map is then unchanged).
  */
 bool sm_flip_range(sm_t *map, uint64_t lo, uint64_t hi);
 
@@ -1655,6 +1706,9 @@ bool sm_flip_range(sm_t *map, uint64_t lo, uint64_t hi);
  *   - each chunk's claimed size fits within m_data_used
  *   - chunk start offsets are monotonically increasing
  *   - sum of chunk sizes + SM_SIZEOF_OVERHEAD == m_data_used
+ *   - no chunk overlaps the span of the one before it
+ *   - every chunk holds a member
+ *   - bit SM_IDX_MAX is not set (it is not a member)
  *
  * Useful as an after-deserialize sanity check.
  *

@@ -24,6 +24,11 @@
  *  - Seeded randomized add/remove churn crossing the boundary
  *    repeatedly: membership == oracle, sm_validate true, round-trip
  *    equal at every step, using the grow-safe handle idiom throughout.
+ *  - Empty bytes: a map emptied in small-set mode, in chunk mode, and
+ *    by sm_clear serializes to the same bytes as a fresh map, and a
+ *    deserialize + reserialize round trip keeps them.  Through 5.8.5 an
+ *    emptied small map set the SMALL header flag over a chunk-mode body,
+ *    so two equal maps serialized differently.
  *
  * Clean under plain, ASan+UBSan, and valgrind.
  */
@@ -391,6 +396,46 @@ test_churn(void)
 	sm_free(m);
 }
 
+/* ------------------------------------------------------------------ */
+/* Empty maps serialize to one byte string                            */
+/* ------------------------------------------------------------------ */
+static void
+test_empty_bytes(void)
+{
+	sm_t *m[4];
+	uint8_t want[64], got[64], again[64];
+	size_t nw, ng, na;
+	int i;
+
+	m[0] = sm_create(1024);
+	m[1] = sm_create(1024);
+	m[2] = sm_create(4096);
+	m[3] = sm_create(1024);
+	sm_add(m[1], 5);
+	sm_remove(m[1], 5);
+	CHECK(is_small(m[1]));
+	sm_add(m[2], 1 << 20);
+	sm_remove(m[2], 1 << 20);
+	sm_add(m[3], 7);
+	sm_clear(m[3]);
+	nw = sm_serialize(m[0], want, sizeof(want));
+	CHECK(nw > 0);
+	for (i = 1; i < 4; i++) {
+		sm_t *back;
+		ng = sm_serialize(m[i], got, sizeof(got));
+		CHECK(ng == nw && memcmp(got, want, nw) == 0);
+		back = sm_deserialize(got, ng);
+		CHECK(back != NULL);
+		if (back != NULL) {
+			na = sm_serialize(back, again, sizeof(again));
+			CHECK(na == ng && memcmp(again, got, ng) == 0);
+			sm_free(back);
+		}
+	}
+	for (i = 0; i < 4; i++)
+		sm_free(m[i]);
+}
+
 int
 main(void)
 {
@@ -402,6 +447,7 @@ main(void)
 	test_boundary();
 	test_dense_promote();
 	test_churn();
+	test_empty_bytes();
 
 	fprintf(stderr, "test_smallset_transitions: %d checks, %d failure(s)\n",
 	    checks, failures);

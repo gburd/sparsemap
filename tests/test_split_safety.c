@@ -27,6 +27,7 @@
 #define SM_EXPOSE_STRUCT 1
 #include <sm.h>
 
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -125,6 +126,65 @@ main(void)
 		sm_free(tiny);
 		sm_free(m2);
 		sm_free(m);
+	}
+
+	/* -----------------------------------------------------------------
+	 * Partition regressions (mainline 5.7.0, missing here through
+	 * 5.8.5).  A|B = [0,3000) + [6000,8000) split at 1500, inside the
+	 * low run: both halves valid, each bit on the documented side. ---- */
+	{
+		sm_t *m = sm_create(1 << 20);
+		CHECK(m != NULL);
+		for (uint64_t i = 0; i < 3000; i++)
+			CHECK(sm_add_grow(&m, i) == i);
+		for (uint64_t i = 6000; i < 8000; i++)
+			CHECK(sm_add_grow(&m, i) == i);
+		CHECK(sm_validate(m));
+
+		sm_t *o = sm_create(1 << 20);
+		CHECK(o != NULL);
+		CHECK(sm_split(m, 1500, o) != SM_IDX_MAX);
+		CHECK(sm_validate(m));
+		CHECK(sm_validate(o));
+		CHECK(sm_cardinality(m) == 1500);  /* [0, 1500) */
+		CHECK(sm_cardinality(o) == 3500);  /* [1500,3000) + [6000,8000) */
+		for (uint64_t i = 0; i < 8500; i++) {
+			bool lo = i < 3000 || (i >= 6000 && i < 8000);
+			bool want_m = lo && i < 1500;
+			bool want_o = lo && i >= 1500;
+			CHECK(sm_contains(m, i, NULL) == want_m);
+			CHECK(sm_contains(o, i, NULL) == want_o);
+		}
+		sm_t *u = sm_union(m, o);
+		CHECK(u != NULL);
+		CHECK(sm_cardinality(u) == 5000);
+		sm_free(u);
+		sm_free(m);
+		sm_free(o);
+	}
+
+	/* Split at a point that lands in a GAP between two chunks: the run
+	 * just below the split must stay in `map`, not move to `other`.
+	 * Through no-rle 5.8.5 the skip loop stepped back one chunk here. */
+	{
+		sm_t *m = sm_create(1 << 18);
+		CHECK(m != NULL);
+		/* run in chunk window 1, run in chunk window 6 */
+		CHECK(sm_add_range(m, 2100, 3100));
+		CHECK(sm_add_range(m, 13000, 14000));
+		CHECK(sm_validate(m));
+		sm_t *o = sm_create(1 << 18);
+		CHECK(o != NULL);
+		CHECK(sm_split(m, 5502, o) != SM_IDX_MAX); /* 5502 is in a gap */
+		CHECK(sm_validate(m));
+		CHECK(sm_validate(o));
+		CHECK(sm_cardinality(m) == 1000); /* [2100,3100) stays */
+		CHECK(sm_cardinality(o) == 1000); /* [13000,14000) moves */
+		CHECK(sm_contains(m, 2100, NULL));
+		CHECK(!sm_contains(o, 2100, NULL));
+		CHECK(sm_contains(o, 13000, NULL));
+		sm_free(m);
+		sm_free(o);
 	}
 
 	printf("test_split_safety: S3 sm_split memory safety OK\n");

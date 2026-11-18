@@ -172,6 +172,23 @@ main(void)
 	}
 	CHECK(reject("RLE-flagged chunks", o) == 0);
 
+	/* (h) a chunk with no member (here all-NONE).  The writers never
+	 * leave one, and through 5.8.5 sm_split could; sm_minimum then
+	 * reported 0.  sm_open_copy drops it so the rest of the map opens. */
+	memset(body, 0, sizeof body);
+	o = put(0, 2);
+	o = put(o, 4096);
+	o = put(o, UINT64_C(0x5555555555555555));
+	o = put(o, 8192);
+	o = put(o, 2);
+	o = put(o, 1);
+	{
+		sm_t *m = sm_open_copy(body, o, 64);
+		CHECK(m != NULL && sm_validate(m) && sm_cardinality(m) == 1 &&
+		    sm_minimum(m) == 8192);
+		sm_free(m);
+	}
+
 	/* A legitimate map at the very top of the index space must NOT be
 	 * rejected: the last valid chunk ends exactly at 2^64. */
 	{
