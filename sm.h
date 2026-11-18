@@ -1801,10 +1801,16 @@ bool sm_add_range(sm_t *map, uint64_t lo, uint64_t hi);
 
 /** @brief Clear every bit in `[lo, hi)`.
  *
+ * Run-based: O(runs + output chunks) however wide the range, so
+ * clearing a span of a 2^31-bit run costs a few chunks.  The map is
+ * rewritten in place and never relocates.
+ *
  * @param[in,out] map  Destination.
  * @param[in]     lo   Inclusive lower bound.
- * @param[in]     hi   Exclusive upper bound.
- * @returns true if every bit was cleared; false if any remove failed.
+ * @param[in]     hi   Exclusive upper bound (lo >= hi is a no-op).
+ * @returns true on success (and for lo >= hi); false for a NULL map,
+ *          on allocation failure, or with errno=ENOSPC when the result
+ *          does not fit the map's buffer (the map is then unchanged).
  */
 bool sm_remove_range(sm_t *map, uint64_t lo, uint64_t hi);
 
@@ -1994,11 +2000,13 @@ sm_t *sm_xor_inplace(sm_t *dst, const sm_t *src);
 
 /** @brief Complement every bit in `[lo, hi)`: set bits become unset and vice versa.
  *
- * In-place.  Naive implementation: O(hi-lo) sm_assign calls.  The
- * range is half open with hi <= UINT64_MAX, so it never reaches
- * SM_IDX_MAX.
+ * In-place and run-based: O(runs + output chunks) however wide the
+ * range, and the map never relocates.  The range is half open with
+ * hi <= UINT64_MAX, so it never reaches SM_IDX_MAX.
  *
- * @returns true on success, false if the buffer was too small to grow.
+ * @returns true on success (and for lo >= hi); false for a NULL map,
+ *          on allocation failure, or with errno=ENOSPC when the result
+ *          does not fit the map's buffer (the map is then unchanged).
  */
 bool sm_flip_range(sm_t *map, uint64_t lo, uint64_t hi);
 

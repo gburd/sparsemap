@@ -8176,26 +8176,14 @@ sm_prev_member(const sm_t *map, uint64_t prev_idx, sm_cursor_t *cur)
 	    (prev_idx == SM_IDX_MAX) ? UINT64_MAX : prev_idx, cur));
 }
 
+/* Defined with the run iterator below. */
+static bool __sm_run_pair_any(const sm_t *a, const sm_t *b,
+    bool want_shared);
+
 bool
 sm_is_subset(const sm_t *a, const sm_t *b)
 {
-	uint64_t ia, ib;
-	if (a == NULL || sm_is_empty(a))
-		return (true);
-	if (b == NULL || sm_is_empty(b))
-		return (false);
-
-	ia = sm_next_member(a, SM_IDX_MAX, NULL);
-	ib = sm_next_member(b, SM_IDX_MAX, NULL);
-	while (ia != SM_IDX_MAX) {
-		while (ib != SM_IDX_MAX && ib < ia) {
-			ib = sm_next_member(b, ib, NULL);
-		}
-		if (ib != ia)
-			return (false);
-		ia = sm_next_member(a, ia, NULL);
-	}
-	return (true);
+	return (!__sm_run_pair_any(a, b, false));
 }
 
 bool
@@ -8207,23 +8195,7 @@ sm_is_superset(const sm_t *a, const sm_t *b)
 bool
 sm_overlap(const sm_t *a, const sm_t *b)
 {
-	uint64_t ia, ib;
-	if (a == NULL || b == NULL)
-		return (false);
-	if (sm_is_empty(a) || sm_is_empty(b))
-		return (false);
-
-	ia = sm_next_member(a, SM_IDX_MAX, NULL);
-	ib = sm_next_member(b, SM_IDX_MAX, NULL);
-	while (ia != SM_IDX_MAX && ib != SM_IDX_MAX) {
-		if (ia == ib)
-			return (true);
-		if (ia < ib)
-			ia = sm_next_member(a, ia, NULL);
-		else
-			ib = sm_next_member(b, ib, NULL);
-	}
-	return (false);
+	return (__sm_run_pair_any(a, b, true));
 }
 
 sm_membership_t
@@ -8584,6 +8556,46 @@ __sm_run_pair_counts(const sm_t *a, const sm_t *b, uint64_t *cnt_a,
 		*uni = ca + cb - ci;
 }
 
+/*
+ * One early-exit lockstep pass over two maps' runs.  With want_shared
+ * it reports whether a and b share a member; otherwise whether a holds
+ * a member b lacks.  Either answer is found at the first run of a that
+ * proves it, so the cost is O(runs) up to that point: a 2^31-bit run is
+ * one step, and a disjoint pair with one long run stops after a few.
+ * NULL or empty maps have no runs.
+ */
+static bool
+__sm_run_pair_any(const sm_t *a, const sm_t *b, bool want_shared)
+{
+	__sm_run_iter_t ia, ib;
+	uint64_t alo = 0, ahi = 0, blo = 0, bhi = 0;
+	bool have_a, have_b;
+	__sm_run_iter_init(&ia, a);
+	__sm_run_iter_init(&ib, b);
+	have_a = __sm_run_next(&ia, &alo, &ahi);
+	have_b = __sm_run_next(&ib, &blo, &bhi);
+	while (have_a) {
+		/* Drop b's runs that end at or before alo: they cannot meet
+		 * this run of a or any later one. */
+		while (have_b && bhi <= alo) {
+			have_b = __sm_run_next(&ib, &blo, &bhi);
+		}
+		if (want_shared) {
+			if (have_b && blo < ahi) {
+				return (true); /* [alo, ahi) meets [blo, bhi) */
+			}
+		} else if (!have_b || blo > alo) {
+			return (true); /* alo itself is not in b */
+		} else if (bhi < ahi) {
+			/* b covers [alo, bhi) of this run: test the rest. */
+			alo = bhi;
+			continue;
+		}
+		have_a = __sm_run_next(&ia, &alo, &ahi);
+	}
+	return (false);
+}
+
 size_t
 sm_union_cardinality(const sm_t *a, const sm_t *b)
 {
@@ -8621,13 +8633,7 @@ sm_difference_cardinality(const sm_t *a, const sm_t *b)
 bool
 sm_nonempty_difference(const sm_t *a, const sm_t *b)
 {
-	uint64_t ca = 0, inter = 0;
-	if (sm_is_empty(a))
-		return (false);
-	if (sm_is_empty(b))
-		return (true);
-	__sm_run_pair_counts(a, b, &ca, NULL, &inter, NULL);
-	return (ca > inter);
+	return (__sm_run_pair_any(a, b, false));
 }
 
 double
@@ -9154,18 +9160,83 @@ sm_add_range(sm_t *map, uint64_t lo, uint64_t hi)
 	return (true);
 }
 
+/*
+ * Rewrite `map` in place with the bits of [lo, hi) cleared (flip false)
+ * or complemented (flip true), lo < hi.  The map's runs are swept once
+ * and the result goes out through the ordered emitter, so the cost is
+ * O(runs + output chunks), never O(hi - lo): clearing or flipping a
+ * 2^31-bit span is a few chunks of work.
+ *
+ * NB: like sm_add_range, the map is written in place and never
+ * relocates (the callers return bool).  If the result does not fit the
+ * map's buffer this fails with ENOSPC and leaves the map unchanged.
+ */
+static bool
+__sm_rewrite_range(sm_t *map, uint64_t lo, uint64_t hi, bool flip)
+{
+	__sm_emitter_t em;
+	__sm_run_iter_t it;
+	sm_t *r;
+	size_t cap;
+	uint64_t rlo = 0, rhi = 0;
+	/* The part of [lo, hi) not yet complemented (flip only). */
+	uint64_t gap = lo;
+	bool ok = true;
+
+	__sm_check_invariants(map);
+	/* Worst case: every run splits in two, plus the flipped gaps. */
+	cap = sm_get_size(map) * 2 + 1024;
+	r = sm_create(cap);
+	if (r == NULL)
+		return (false);
+	memset(&em, 0, sizeof(em));
+	em.resultp = &r;
+	__sm_run_iter_init(&it, map);
+
+	/* Each run keeps its parts outside [lo, hi).  Under flip, the
+	 * unset stretch of [lo, hi) before the run is emitted first, so
+	 * the output stays ascending. */
+	while (ok && __sm_run_next(&it, &rlo, &rhi)) {
+		if (flip && gap < hi && gap < rlo)
+			ok = __sm_emit_run(&em, gap, rlo < hi ? rlo : hi);
+		if (rhi > gap)
+			gap = rhi;
+		if (ok && rlo < lo)
+			ok = __sm_emit_run(&em, rlo, rhi < lo ? rhi : lo);
+		if (ok && rhi > hi)
+			ok = __sm_emit_run(&em, rlo > hi ? rlo : hi, rhi);
+	}
+	if (ok && flip && gap < hi)
+		ok = __sm_emit_run(&em, gap, hi);
+	if (ok)
+		ok = __sm_emit_flush(&em);
+	r = *em.resultp;
+	if (!ok) {
+		sm_free(r);
+		return (false);
+	}
+	__sm_coalesce_map(r);
+	/* Demote first: a small-set map in a buffer sized for its words
+	 * must not fail just because the chunk form is larger. */
+	__sm_try_demote(r);
+	if (r->m_data_used > __sm_cap(map)) {
+		sm_free(r);
+		errno = ENOSPC;
+		return (false);
+	}
+	memcpy(map->m_data, r->m_data, r->m_data_used);
+	map->m_data_used = r->m_data_used;
+	__sm_card_invalidate(map);
+	sm_free(r);
+	return (true);
+}
+
 bool
 sm_remove_range(sm_t *map, uint64_t lo, uint64_t hi)
 {
-	uint64_t i;
 	if (map == NULL || lo >= hi)
 		return (lo >= hi);
-	for (i = lo; i < hi; i++) {
-		if (sm_remove(map, i) == SM_IDX_MAX) {
-			return (false);
-		}
-	}
-	return (true);
+	return (__sm_rewrite_range(map, lo, hi, false));
 }
 
 sm_t *
@@ -9716,16 +9787,9 @@ sm_xor_inplace(sm_t *dst, const sm_t *src)
 bool
 sm_flip_range(sm_t *map, uint64_t lo, uint64_t hi)
 {
-	uint64_t i;
 	if (map == NULL || lo >= hi)
 		return (lo >= hi);
-	for (i = lo; i < hi; i++) {
-		const bool was_set = sm_contains(map, i, NULL);
-		if (sm_assign(map, i, !was_set) == SM_IDX_MAX) {
-			return (false);
-		}
-	}
-	return (true);
+	return (__sm_rewrite_range(map, lo, hi, true));
 }
 
 bool
