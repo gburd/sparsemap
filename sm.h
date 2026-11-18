@@ -71,11 +71,10 @@
  * ## Small-set mode
  *
  * When every set index is below a small threshold, the map instead
- * stores a bare `uint64_t` bitmapword[] from bit 0 (bit i in word i/64),
- * exactly like PostgreSQL's Bitmapset, behind an 8-byte header.  This
- * matches or beats Bitmapset's footprint for near-zero sets while chunk
- * mode still wins once indices spread.  The map **promotes**
- * small->chunk when an added index leaves the small span (or the small
+ * stores a bare `uint64_t` bitmapword[] from bit 0 (bit i in word i/64)
+ * behind an 8-byte header, so a near-zero set pays no per-chunk start
+ * or descriptor; chunk mode is smaller once indices spread.  The map
+ * **promotes** small->chunk when an added index leaves the small span (or the small
  * form would exceed chunk form) and **demotes** chunk->small when
  * removals bring every index back under the threshold; transitions are
  * transparent and lossless.  Every public `sm_*` function behaves

@@ -1954,10 +1954,9 @@ __sm_set_chunk_count(const sm_t *map, const size_t new_count)
  * Small-set mode
  *
  * When every set index is below SM_SMALL_MAX_BITS, the map stores a bare
- * uint64 bitmapword[] from bit 0 (bit i in word i/64) -- exactly like
- * PostgreSQL's Bitmapset -- behind an 8-byte header that ties
- * Bitmapset's 8-byte header, so the footprint matches or beats it for
- * near-zero sets.  Chunk mode keeps winning once indices spread.
+ * uint64 bitmapword[] from bit 0 (bit i in word i/64) behind an 8-byte
+ * header, so a near-zero set pays no per-chunk start or descriptor.
+ * Chunk mode is smaller once indices spread.
  *
  * The mode is self-describing in the m_data byte stream: the same
  * 8-byte header word that holds the chunk count in chunk mode has its
@@ -1976,8 +1975,8 @@ __sm_set_chunk_count(const sm_t *map, const size_t new_count)
  * bytes.  It is preferred over the chunk form whenever it is not larger
  * and fits in place; in a tightly-sized buffer a growth-to-shrink is
  * skipped, so the small form can occasionally sit up to one word larger
- * than the chunk equivalent -- never larger than a Bitmapset.  Above
- * this cap the map is always in chunk mode. */
+ * than the chunk equivalent.  Above this cap the map is always in chunk
+ * mode. */
 #define SM_SMALL_MAX_WORDS 16u
 #define SM_SMALL_MAX_BITS  (SM_SMALL_MAX_WORDS * 64u)
 

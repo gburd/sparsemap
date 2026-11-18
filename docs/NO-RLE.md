@@ -57,15 +57,14 @@ at all).
 ## Small-set mode
 
 Chunk mode carries an 8-byte chunk-count header plus, per 2048-bit
-chunk, an 8-byte chunk-start and an 8-byte descriptor.  That overhead
-loses to PostgreSQL's `Bitmapset` (a flat `uint64` word array from bit 0
-behind an 8-byte header) for sets whose indices all sit near zero.
+chunk, an 8-byte chunk-start and an 8-byte descriptor.  For a set whose
+indices all sit near zero, that per-chunk addressing is most of the
+footprint.
 
-The no-rle variant closes that gap: when every set index is below a
-small threshold **and** the small form is no larger than the equivalent
-single chunk, the map is stored exactly like `Bitmapset` — a bare
-`uint64 bitmapword[]` from bit 0 (bit *i* lives in word *i*/64) — behind
-an 8-byte header that ties Bitmapset's 8-byte header.
+Small-set mode removes it: when every set index is below a small
+threshold **and** the small form is no larger than the equivalent single
+chunk, the map is stored as a bare `uint64 bitmapword[]` from bit 0
+(bit *i* lives in word *i*/64) behind an 8-byte header.
 
 ### Layout
 
@@ -88,28 +87,29 @@ would force a grow just to shrink the representation, the map stays in
 the small form rather than reallocating.  So the small form is normally
 the smaller of the two, but a set built by ascending inserts into a
 tightly-sized buffer can sit in a small form up to one word (8 bytes)
-larger than its chunk equivalent.  Either way the footprint stays at or
-below an equivalent `Bitmapset` (verified over two million random
-near-zero sets), which is the guarantee that matters to a consumer.
+larger than its chunk equivalent.
 
 ### Footprint (bytes)
 
-`Bitmapset` = 8-byte header + `ceil((maxbit+1)/64) * 8`.
+Small-set form = 8-byte header + `ceil((maxbit+1)/64) * 8`.
 
-| set        | small-set | chunk mode | Bitmapset |
-|------------|-----------|------------|-----------|
-| `{0}`      | **16**    | 32         | 16        |
-| `{0..63}`  | **16**    | 24         | 16        |
-| `{5,70}`   | **24**    | 40         | 24        |
-| `{0,200}`  | **40**    | 40         | 40        |
-| `{0,2000}` | (chunk)   | **40**     | 264       |
-| `{200}`    | (chunk)   | **32**     | 40        |
+| set        | small-set | chunk mode |
+|------------|-----------|------------|
+| `{0}`      | **16**    | 32         |
+| `{0..63}`  | **16**    | 24         |
+| `{5,70}`   | **24**    | 40         |
+| `{0,200}`  | **40**    | 40         |
+| `{0,2000}` | (chunk)   | **40**     |
+| `{200}`    | (chunk)   | **32**     |
 
-Small-set ties Bitmapset on the near-zero / dense-low cases and never
-exceeds it; sparsemap beats Bitmapset outright once the index span
-crosses the small cap (chunk mode wins by a wide margin — 40 vs 264 at
-`{0,2000}`) or when a lone high index makes the flat-from-zero
-`Bitmapset` wasteful (`{200}`: 32 vs 40).
+The small form is used while it is the smaller of the two; once the
+index span crosses the small cap, or a lone high index makes a flat
+array from bit 0 wasteful, the map is in chunk mode.
+
+An earlier version of this page compared both forms against PostgreSQL's
+`Bitmapset`.  Measured on PostgreSQL workloads (TID sets for bitmap heap
+scans, posting lists), sparsemap was neither smaller nor faster than
+`Bitmapset`, so that comparison has been removed.
 
 ### Transitions
 
