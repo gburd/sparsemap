@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc af985e679a52934027fa6bea29587ea228d5203da63863c2d1aa011455625492 # shrinks to ops = [InsertRange(0, 4096), InsertRange(0, 4096)]
+cc fd8c76984325dd8157f331c4f36fc5fda6e8126a23d74ebf19225192e12745f9 # shrinks to ops = [Insert(18446744073709551615)]
