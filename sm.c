@@ -509,6 +509,11 @@ enum __SM_CHUNK_INFO {
 	/* maximum length of a __sm_chunk_t (31 bits of the RLE) */
 	SM_CHUNK_RLE_MAX_LENGTH = 0x7FFFFFFF,
 
+	/* largest RLE capacity (and so length) a writer produces: the
+	 * largest multiple of SM_CHUNK_MAX_CAPACITY within the 31-bit
+	 * fields, so the chunk after it starts on a chunk boundary */
+	SM_CHUNK_RLE_MAX_BODY = 0x7FFFF800,
+
 	/* __sm_bitvec_t payload is all zeros (2#00) */
 	SM_PAYLOAD_ZEROS = 0,
 
@@ -2144,9 +2149,10 @@ __sm_chunk_rle_capacity_limit(const sm_t *map, const __sm_idx_t start,
 		capacity = length;
 	}
 
-	/* Clamp to RLE max */
-	if (capacity > SM_CHUNK_RLE_MAX_CAPACITY) {
-		capacity = SM_CHUNK_RLE_MAX_CAPACITY;
+	/* Clamp to the largest chunk-aligned RLE capacity.  The caller
+	 * checks the result still holds the run. */
+	if (capacity > SM_CHUNK_RLE_MAX_BODY) {
+		capacity = SM_CHUNK_RLE_MAX_BODY;
 	}
 
 	return (capacity);
@@ -3014,9 +3020,9 @@ __sm_coalesce_chunk(sm_t *map, __sm_chunk_t *chunk, size_t offset,
 								    new_length;
 							}
 							if (new_capacity >
-							    SM_CHUNK_RLE_MAX_CAPACITY) {
+							    SM_CHUNK_RLE_MAX_BODY) {
 								new_capacity =
-								    SM_CHUNK_RLE_MAX_CAPACITY;
+								    SM_CHUNK_RLE_MAX_BODY;
 							}
 
 							/* Validate that new length fits in available capacity */
@@ -3183,9 +3189,9 @@ __sm_coalesce_chunk(sm_t *map, __sm_chunk_t *chunk, size_t offset,
 								    new_length;
 							}
 							if (new_capacity >
-							    SM_CHUNK_RLE_MAX_CAPACITY) {
+							    SM_CHUNK_RLE_MAX_BODY) {
 								new_capacity =
-								    SM_CHUNK_RLE_MAX_CAPACITY;
+								    SM_CHUNK_RLE_MAX_BODY;
 							}
 
 							/* Validate that new length fits in available capacity */
@@ -5541,16 +5547,23 @@ __sm_map_set(sm_t *map, uint64_t idx, const bool coalesce, sm_cursor_t *cur)
 				goto done;
 			}
 			if (idx - start == length) {
-				/* Extend the run by one. If length == capacity, grow capacity first. */
-				if (length == capacity) {
+				/* Extend the run by one.  If length == capacity,
+				 * grow capacity first; a run already at the
+				 * largest RLE capacity cannot grow, and idx starts
+				 * a new chunk below.  Through 5.8.5 the capacity
+				 * grew to 2^31 - 1 and the next extension wrote
+				 * 2^31 into the 31-bit length field as 0. */
+				const size_t grown = length < capacity ?
+				    capacity :
+				    __sm_chunk_rle_capacity_limit(map, start,
+				        length + 1, offset);
+				if (grown > length) {
 					__sm_chunk_rle_set_capacity(&chunk,
-					    __sm_chunk_rle_capacity_limit(map,
-					        start, length + 1, offset));
+					    grown);
+					__sm_chunk_rle_set_length(&chunk,
+					    length + 1);
+					goto done;
 				}
-				__sm_chunk_rle_set_length(&chunk, length + 1);
-				__sm_assert(__sm_chunk_rle_get_length(&chunk) ==
-				    length + 1);
-				goto done;
 			}
 		}
 
@@ -6891,10 +6904,7 @@ __sm_append_window_bits(sm_t **resultp, size_t wstart, size_t lo, size_t hi,
 static bool
 __sm_append_run(sm_t **resultp, size_t lo, size_t hi)
 {
-	/* Largest whole-chunk RLE capacity. */
-	const size_t max_body = (SM_CHUNK_RLE_MAX_CAPACITY /
-	                            SM_CHUNK_MAX_CAPACITY) *
-	    SM_CHUNK_MAX_CAPACITY;
+	const size_t max_body = SM_CHUNK_RLE_MAX_BODY;
 	/* Whether the next RLE append may coalesce with the last chunk.  Set
 	 * from what the head emitted, so a run walks the result at most once
 	 * (each walk is O(chunks)). */
@@ -7070,25 +7080,32 @@ __sm_emit_rle(__sm_emitter_t *e, __sm_idx_t start, size_t capacity,
 	(void)capacity;
 
 	{
-		const size_t full = (length / SM_CHUNK_MAX_CAPACITY) *
+		/* A body longer than the 31-bit RLE fields hold goes out as
+		 * several RLE chunks, as in __sm_append_run.  Through 5.8.5 it
+		 * was written whole and the field kept only its low 31 bits. */
+		const size_t max_body = SM_CHUNK_RLE_MAX_BODY;
+		size_t full = (length / SM_CHUNK_MAX_CAPACITY) *
 		    SM_CHUNK_MAX_CAPACITY;
 		const size_t rem = length - full;
 		__sm_bitvec_t w[32];
 		int c[32];
 		int i;
 		size_t bit;
-		if (full > 0) {
-			if (!__sm_emit_flush(e)) {
-				return (false);
-			}
-			if (!__sm_append_rle_chunk(e->resultp, start, full,
-			        full)) {
+		if (full > 0 && !__sm_emit_flush(e)) {
+			return (false);
+		}
+		while (full > 0) {
+			const size_t piece = full < max_body ? full : max_body;
+			if (!__sm_append_rle_chunk(e->resultp, start, piece,
+			        piece)) {
 				return (false);
 			}
 			e->rle_start = start;
-			e->rle_end = (size_t)__sm_end(start, full);
-			e->rle_len = full;
+			e->rle_end = (size_t)__sm_end(start, piece);
+			e->rle_len = piece;
 			e->have_rle = true;
+			start += piece;
+			full -= piece;
 		}
 
 		if (rem == 0) {
@@ -7115,8 +7132,7 @@ __sm_emit_rle(__sm_emitter_t *e, __sm_idx_t start, size_t capacity,
 		 * __sm_emit_words (which forbids a start *inside* the span) is not
 		 * confused by the boundary case. */
 		e->have_rle = false;
-		return (__sm_emit_words(e,
-		    (__sm_idx_t)((size_t)start + full), w, c));
+		return (__sm_emit_words(e, start, w, c));
 	}
 }
 
