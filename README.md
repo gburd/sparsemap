@@ -115,11 +115,12 @@ Sparsemap is vendored by:
 
 - **[pg_tre](https://github.com/pg-tre/pg_tre)** — PostgreSQL trigram
   search extension.
-- **[postgres/undo](https://github.com/EnterpriseDB/postgres-undo)** —
-  EnterpriseDB's PostgreSQL undo-log fork.
+- **pg_fts** — a PostgreSQL full-text-search extension.
+- **pg_weave** — a PostgreSQL extension using sparsemap for its
+  posting/TID sets.
 
-`contrib/pg_tre_sync.sh` and `contrib/postgres_undo_sync.sh` keep the
-vendored copies in sync with upstream.
+`contrib/pg_tre_sync.sh` keeps the pg_tre vendored copy in sync with
+upstream.
 
 ### Vendoring and symbol prefixing
 
