@@ -320,10 +320,12 @@ typedef SSIZE_T ssize_t;
 #define sm_pop_last                 SM__P(sm_pop_last)
 #define sm_prev_member              SM__P(sm_prev_member)
 #define sm_rank                     SM__P(sm_rank)
+#define sm_rank_many                SM__P(sm_rank_many)
 #define sm_remove                   SM__P(sm_remove)
 #define sm_remove_range             SM__P(sm_remove_range)
 #define sm_scan                     SM__P(sm_scan)
 #define sm_select                   SM__P(sm_select)
+#define sm_select_many              SM__P(sm_select_many)
 #define sm_serialize                SM__P(sm_serialize)
 #define sm_serialized_size          SM__P(sm_serialized_size)
 #define sm_set_allocator            SM__P(sm_set_allocator)
@@ -1045,6 +1047,52 @@ size_t sm_rank(sm_t *map, uint64_t x, uint64_t y, bool value);
  * @endcode
  */
 uint64_t sm_select(sm_t *map, uint64_t n, bool value);
+
+/** @brief Count set bits below many positions in one sweep (batched).
+ *
+ * out[i] receives the number of set bits strictly below idxs[i], i.e.
+ * in [0, idxs[i]).  That is the rank1 of the succinct-structure
+ * literature, and it differs from sm_rank()'s inclusive range: for
+ * idxs[i] > 0, out[i] == sm_rank(map, 0, idxs[i] - 1, true), and for
+ * idxs[i] == 0, out[i] == 0.  The exclusive form needs no special case
+ * at 0, and the count of set bits in [x, y] is out[j] - out[i] for
+ * queries x and y + 1.  Unset bits below x are x - out[i].
+ *
+ * Done in a single O(chunks + n) pass instead of n independent
+ * O(chunks) calls.
+ *
+ * @param[in]  map   The sparsemap to query (NULL -> all 0).
+ * @param[in]  idxs  Query positions, MUST be sorted ascending.
+ * @param[out] out   out[i] receives the rank of idxs[i].
+ * @param[in]  n     Number of queries (0 is a no-op).
+ *
+ * The ascending-order requirement is a hard precondition (debug-asserted
+ * under SPARSEMAP_DIAGNOSTIC); unsorted input yields unspecified but
+ * memory-safe results.  NULL \a idxs or \a out with n > 0 sets errno to
+ * EINVAL and writes nothing.
+ */
+void sm_rank_many(const sm_t *map, const uint64_t *idxs, size_t *out,
+    size_t n);
+
+/** @brief Select many set bits in one sweep (batched).
+ *
+ * out[i] receives sm_select(map, ks[i], true): the position of the
+ * ks[i]-th (0-based) set bit, or SM_IDX_MAX when the map has ks[i] or
+ * fewer members.  Done in a single O(chunks + n) pass instead of n
+ * independent O(chunks) calls.  There is no unset-bit variant.
+ *
+ * @param[in]  map  The sparsemap to query (NULL -> all SM_IDX_MAX).
+ * @param[in]  ks   0-based member ranks, MUST be sorted ascending.
+ * @param[out] out  out[i] receives the position for ks[i].
+ * @param[in]  n    Number of queries (0 is a no-op).
+ *
+ * The ascending-order requirement is a hard precondition (debug-asserted
+ * under SPARSEMAP_DIAGNOSTIC); unsorted input yields unspecified but
+ * memory-safe results.  NULL \a ks or \a out with n > 0 sets errno to
+ * EINVAL and writes nothing.
+ */
+void sm_select_many(const sm_t *map, const uint64_t *ks, uint64_t *out,
+    size_t n);
 
 /** @brief Find the first contiguous run of \a len bits matching \a value.
  *

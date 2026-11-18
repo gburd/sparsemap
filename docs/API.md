@@ -237,10 +237,12 @@ header itself.
 | `sm_pop_last()` | Find the highest set bit, clear it, and return it. |
 | `sm_prev_member()` | Find the highest set bit at index < \a prev_idx. |
 | `sm_rank()` | Count matching bits in the inclusive range [\a x, \a y]. |
+| `sm_rank_many()` | Count set bits below many positions in one sweep (batched). |
 | `sm_remove()` | Clear the bit at \a idx (set to 0). |
 | `sm_remove_range()` | Clear every bit in `[lo, hi)`. |
 | `sm_scan()` | Invoke a callback for every set bit in the map. |
 | `sm_select()` | Find the position of the \a n'th matching bit (0-based). |
+| `sm_select_many()` | Select many set bits in one sweep (batched). |
 | `sm_serialize()` | Serialize \a map into \a out (`sm_serialized_size` bytes). |
 | `sm_serialized_size()` | Compute the buffer size needed to serialize \a map. |
 | `sm_set_allocator()` | Set the process-wide allocator hooks. |

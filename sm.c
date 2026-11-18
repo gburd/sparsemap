@@ -11996,6 +11996,230 @@ sm_locator_select(const sm_locator_t *loc, uint64_t n, bool value)
 }
 
 /* -------------------------------------------------------------------
+ * Batch rank and select: one left-to-right sweep, like sm_contains_many.
+ * ------------------------------------------------------------------- */
+
+/* Set bits strictly below idx in a small-set map: popcount of the whole
+ * words below idx's word plus the masked part of that word. */
+static size_t
+__sm_batch_small_rank(const sm_t *map, uint64_t idx)
+{
+	const __sm_bitvec_unaligned_t *w = __sm_small_words(map);
+	const size_t nw = __sm_small_nwords(map);
+	const uint64_t full = idx / SM_BITS_PER_VECTOR;
+	const size_t whole = full < (uint64_t)nw ? (size_t)full : nw;
+	size_t set = 0;
+	size_t i;
+	for (i = 0; i < whole; i++) {
+		set += (size_t)SM_POPCOUNT64(w[i]);
+	}
+	if (whole < nw && idx % SM_BITS_PER_VECTOR != 0) {
+		const __sm_bitvec_t mask = ((__sm_bitvec_t)1
+		    << (idx % SM_BITS_PER_VECTOR)) - 1;
+		set += (size_t)SM_POPCOUNT64(w[whole] & mask);
+	}
+	return (set);
+}
+
+/* Position of the k-th (0-based) set bit of a small-set map, or
+ * SM_IDX_MAX when it has k or fewer members.  Skips whole words by
+ * popcount, then clears the low set bits of the target word. */
+static uint64_t
+__sm_batch_small_select(const sm_t *map, uint64_t k)
+{
+	const __sm_bitvec_unaligned_t *w = __sm_small_words(map);
+	const size_t nw = __sm_small_nwords(map);
+	size_t i;
+	for (i = 0; i < nw; i++) {
+		__sm_bitvec_t word = w[i];
+		const uint64_t pc = (uint64_t)SM_POPCOUNT64(word);
+		if (k >= pc) {
+			k -= pc;
+			continue;
+		}
+		while (k > 0) {
+			word &= word - 1;
+			k--;
+		}
+		return ((uint64_t)i * SM_BITS_PER_VECTOR +
+		    (uint64_t)SM_CTZ64(word));
+	}
+	return (SM_IDX_MAX);
+}
+
+/*
+ * sm_rank_many: out[q] = set bits strictly below idxs[q], for ascending
+ * idxs.  One sweep over the chunks carries the set bits in every chunk
+ * already passed; a query below a chunk's start takes that running
+ * count, a query inside the chunk adds the chunk's set bits below it,
+ * and a query at or past the chunk's end waits for a later chunk.
+ * O(chunks + n).
+ */
+void
+sm_rank_many(const sm_t *map, const uint64_t *idxs, size_t *out, size_t n)
+{
+	size_t count;
+	uint8_t *base;
+	uint8_t *p;
+	size_t stream_end;
+	size_t running = 0; /* set bits in the chunks before p */
+	size_t q = 0;
+	size_t i;
+	if (n == 0) {
+		return;
+	}
+	if (idxs == NULL || out == NULL) {
+		errno = EINVAL;
+		return;
+	}
+	if (map == NULL) {
+		for (q = 0; q < n; q++) {
+			out[q] = 0;
+		}
+		return;
+	}
+
+#ifdef SPARSEMAP_DIAGNOSTIC
+	/* Contract: idxs MUST be sorted ascending. */
+	for (q = 1; q < n; q++) {
+		__sm_assert(idxs[q] >= idxs[q - 1]);
+	}
+#endif
+
+	if (__sm_is_small(map)) {
+		for (q = 0; q < n; q++) {
+			out[q] = __sm_batch_small_rank(map, idxs[q]);
+		}
+		return;
+	}
+
+	count = __sm_get_chunk_count(map);
+	base = count ? __sm_get_chunk_data(map, 0) : NULL;
+	p = base;
+	stream_end = (size_t)map->m_data_used - SM_SIZEOF_OVERHEAD;
+	for (i = 0; i < count && q < n; i++) {
+		const __sm_idx_t s = __sm_load_idx((const uint8_t *)p);
+		__sm_chunk_t chunk;
+		__sm_chunk_rank_t rank;
+		size_t cap;
+		size_t next_off;
+		__sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
+		cap = __sm_chunk_get_capacity(&chunk);
+
+		/* Queries at or below this chunk's start: nothing of it is
+		 * below them. */
+		while (q < n && idxs[q] <= (uint64_t)s) {
+			out[q] = running;
+			q++;
+		}
+		/* Queries inside the chunk.  idx - s < cap rather than
+		 * idx < s + cap: the chunk that ends at 2^64 wraps s + cap. */
+		while (q < n && idxs[q] - (uint64_t)s < cap) {
+			out[q] = running + __sm_chunk_rank(&rank, true, &chunk,
+			    0, (size_t)(idxs[q] - (uint64_t)s) - 1);
+			q++;
+		}
+		running += __sm_chunk_rank(&rank, true, &chunk, 0, cap - 1);
+
+		next_off = (size_t)(p - base) +
+		    SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&chunk);
+		if (next_off >= stream_end) {
+			break;
+		}
+		p = base + next_off;
+	}
+
+	/* Queries past the last chunk see every set bit. */
+	for (; q < n; q++) {
+		out[q] = running;
+	}
+}
+
+/*
+ * sm_select_many: out[q] = sm_select(map, ks[q], true), for ascending
+ * ks.  One sweep over the chunks carries the set bits before the
+ * current chunk; a k below running + this chunk's set bits is answered
+ * by __sm_chunk_select inside the chunk, otherwise the sweep advances.
+ * O(chunks + n).
+ */
+void
+sm_select_many(const sm_t *map, const uint64_t *ks, uint64_t *out, size_t n)
+{
+	size_t count;
+	uint8_t *base;
+	uint8_t *p;
+	size_t stream_end;
+	uint64_t running = 0; /* set bits in the chunks before p */
+	size_t q = 0;
+	size_t i;
+	if (n == 0) {
+		return;
+	}
+	if (ks == NULL || out == NULL) {
+		errno = EINVAL;
+		return;
+	}
+	if (map == NULL) {
+		for (q = 0; q < n; q++) {
+			out[q] = SM_IDX_MAX;
+		}
+		return;
+	}
+
+#ifdef SPARSEMAP_DIAGNOSTIC
+	/* Contract: ks MUST be sorted ascending. */
+	for (q = 1; q < n; q++) {
+		__sm_assert(ks[q] >= ks[q - 1]);
+	}
+#endif
+
+	if (__sm_is_small(map)) {
+		for (q = 0; q < n; q++) {
+			out[q] = __sm_batch_small_select(map, ks[q]);
+		}
+		return;
+	}
+
+	count = __sm_get_chunk_count(map);
+	base = count ? __sm_get_chunk_data(map, 0) : NULL;
+	p = base;
+	stream_end = (size_t)map->m_data_used - SM_SIZEOF_OVERHEAD;
+	for (i = 0; i < count && q < n; i++) {
+		const __sm_idx_t s = __sm_load_idx((const uint8_t *)p);
+		__sm_chunk_t chunk;
+		__sm_chunk_rank_t rank;
+		size_t cap;
+		uint64_t set;
+		size_t next_off;
+		__sm_chunk_init(&chunk, p + SM_SIZEOF_OVERHEAD);
+		cap = __sm_chunk_get_capacity(&chunk);
+		set = (uint64_t)__sm_chunk_rank(&rank, true, &chunk, 0, cap - 1);
+
+		/* Every k in [running, running + set) is in this chunk. */
+		while (q < n && ks[q] >= running && ks[q] - running < set) {
+			ssize_t rem = (ssize_t)(ks[q] - running);
+			const size_t at =
+			    __sm_chunk_select(&chunk, rem, &rem, true);
+			out[q] = (uint64_t)s + at;
+			q++;
+		}
+		running += set;
+
+		next_off = (size_t)(p - base) +
+		    SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&chunk);
+		if (next_off >= stream_end) {
+			break;
+		}
+		p = base + next_off;
+	}
+
+	/* Every remaining k is at or past the cardinality. */
+	for (; q < n; q++) {
+		out[q] = SM_IDX_MAX;
+	}
+}
+
+/* -------------------------------------------------------------------
  * Idea 3: sm_cursor_cached_t -- fixed 8-way MRU chunk cache.
  * ------------------------------------------------------------------- */
 
