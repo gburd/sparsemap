@@ -5,9 +5,9 @@
  *
  * Unlike test_hegel.c (which drives the public API), this file
  * #includes ../sm.c so the properties can reach the file-static chunk
- * primitives __sm_chunk_calc_vector_size, __sm_chunk_get_position,
- * __sm_chunk_get_capacity, and the RLE descriptor helpers.  It is the
- * hegel replacement for the QCC-driven _tst_chunk_* properties that
+ * primitives __sm_chunk_get_position and __sm_chunk_get_capacity, and
+ * checks how RLE-shaped wire input is handled.  It is the hegel
+ * replacement for the QCC-driven _tst_chunk_* properties that
  * used to live in sm_white.c / test.c.
  *
  * Generators build raw chunk buffers from hegel draws instead of the
@@ -34,35 +34,6 @@
  * after <assert.h> since it redefines assert().  Owns the run-state. */
 #define HEGEL_COMPAT_IMPL
 #include "hegel_compat.h"
-
-/*
- * Reference popcount-of-MIXED-pairs over a flag byte: count how many
- * of the four 2-bit fields equal SM_PAYLOAD_MIXED (0b10).  This is the
- * independent oracle for __sm_chunk_calc_vector_size.
- */
-static int
-ref_calc_vector_size(uint8_t b)
-{
-	int count = 0;
-	for (int i = 0; i < 4; i++) {
-		if (((b >> (i * 2)) & 0x03) == 0x02)
-			count++;
-	}
-	return (count);
-}
-
-/*
- * Property: __sm_chunk_calc_vector_size agrees with the reference for
- * every possible flag byte.  Drawing the full 0..255 range lets hegel
- * shrink a disagreement to the smallest offending byte.
- */
-static void
-prop_calc_vector_size(hegel_test_case *tc, void *ctx)
-{
-	(void)ctx;
-	uint8_t b = (uint8_t)hegel_draw_int(tc, hegel_integers(0, 255));
-	assert(__sm_chunk_calc_vector_size(b) == (size_t)ref_calc_vector_size(b));
-}
 
 /*
  * Build a raw RLE chunk stream (start-offset prefix + single RLE
@@ -264,7 +235,6 @@ main(void)
 		return (1);
 	}
 	int rc = 0;
-	rc |= run(s, prop_calc_vector_size, "calc_vector_size");
 	rc |= run(s, prop_get_position, "get_position");
 	rc |= run(s, prop_get_capacity, "get_capacity");
 	rc |= run(s, prop_reject_rle_wire, "reject_rle_wire");

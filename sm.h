@@ -1021,13 +1021,25 @@ size_t sm_rank(sm_t *map, uint64_t x, uint64_t y, bool value);
  * select(map, 0, true) returns the index of the first set bit.
  * select(map, 2, false) returns the index of the third unset bit.
  *
- * For sparse chunks this scans bit vectors; an all-ONES chunk is O(1).
+ * Both values are selected over the universe [0, 2^64 - 1), that is
+ * every position except SM_IDX_MAX itself, which is the "not found"
+ * return.  For value == true the answer is the n'th member.  For
+ * value == false it is the n'th position that is not a member,
+ * counting the unset bits before the first chunk, inside chunks,
+ * between chunks, and after the last chunk; so select0 is defined for
+ * every n below 2^64 - 1 - cardinality, and sm_select(map, n, false)
+ * equals n plus the number of members <= the answer.  The identity
+ * sm_select(map, sm_rank(map, 0, x - 1, false), false) == x holds for
+ * every unset x > 0 (and select0(0) is the first unset bit).
  *
- * @param[in] map    The sparsemap to query.
+ * O(chunks): whole chunks are skipped by their population count; only
+ * the chunk holding the answer is scanned, one 64-bit word at a time.
+ *
+ * @param[in] map    The sparsemap to query (NULL is the empty map).
  * @param[in] n      Number of matching bits to skip (0 = first match).
  * @param[in] value  true to find set bits, false to find unset bits.
  * @returns 0-based index of the matching bit, or SM_IDX_MAX if
- *          fewer than n+1 matching bits exist.
+ *          fewer than n+1 matching bits exist in [0, 2^64 - 1).
  *
  * Example:
  * @code

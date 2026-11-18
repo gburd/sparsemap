@@ -36,9 +36,9 @@ if grep -nE '^[[:space:]]*(register[[:space:]]+)?(const[[:space:]]+)?uint8_t[[:s
 	status=1
 fi
 
-# SM_CHUNK_GET_FLAGS / __sm_chunk_calc_vector_size applied to a
+# SM_CHUNK_GET_FLAGS applied to a
 # dereferenced byte pointer (the other half of the same mistake).
-if grep -nE '(SM_CHUNK_GET_FLAGS|__sm_chunk_calc_vector_size)\([[:space:]]*\*[a-z_]+[[:space:]]*[,)]' sm.c |
+if grep -nE '(SM_CHUNK_GET_FLAGS)\([[:space:]]*\*[a-z_]+[[:space:]]*[,)]' sm.c |
     grep -vE '\*[a-z_]+(->|\.)?m_data'; then
 	echo "ERROR: flag extraction from a dereferenced byte pointer." >&2
 	echo "       Use __sm_desc_flag_byte(desc, n)." >&2

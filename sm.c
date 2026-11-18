@@ -31,6 +31,10 @@
  * SM_EXPOSE_STRUCT. */
 #define SM_INTERNAL
 #include "sm.h"
+#if defined(__BMI2__) && defined(__x86_64__)
+#include <immintrin.h>
+#define SM_HAVE_PDEP64 1
+#endif
 #include <errno.h>
 #include <stdarg.h>
 #include <stdbool.h>
@@ -52,7 +56,8 @@
  *
  *	SM_PREFETCH(addr)   Hot-loop prefetch hint.  Non-binding; safe
  *			    to drop on toolchains without the intrinsic.
- *	SM_POPCOUNT64(x)    Population count of a 64-bit value.
+ *	SM_POPCOUNT64(x)    Population count of a 64-bit value (see the
+ *			    note on x86 below).
  *	SM_CTZ64(x)	    Count trailing zeros (undefined on x == 0;
  *			    the caller must guard).
  *	SM_CLZ64(x)	    Count leading zeros (undefined on x == 0;
@@ -85,8 +90,17 @@
 #endif
 #endif /* SM_PREFETCH */
 
+/*
+ * On x86 without POPCNT (the default x86-64 target), gcc turns
+ * __builtin_popcountll into a call to libgcc's __popcountdi2.  The
+ * inline SWAR form below measured 6-34% faster than that call on
+ * contains, rank and select over chunks, so x86 uses it unless the
+ * build enables POPCNT (e.g., -mpopcnt or -march=x86-64-v2), where the
+ * builtin is one instruction.  Other gcc/clang targets keep the builtin.
+ */
 #ifndef SM_POPCOUNT64
-#if defined(__GNUC__) || defined(__clang__)
+#if (defined(__GNUC__) || defined(__clang__)) &&                     \
+    (defined(__POPCNT__) || !(defined(__x86_64__) || defined(__i386__)))
 #define SM_POPCOUNT64(x) ((int)__builtin_popcountll((uint64_t)(x)))
 #elif defined(_MSC_VER) && (defined(_M_X64) || defined(_M_ARM64))
 #include <intrin.h>
@@ -99,10 +113,11 @@
 static inline int
 sm_swar_popcount64(uint64_t x)
 {
-	x = x - ((x >> 1) & 0x5555555555555555ULL);
-	x = (x & 0x3333333333333333ULL) + ((x >> 2) & 0x3333333333333333ULL);
-	x = (x + (x >> 4)) & 0x0F0F0F0F0F0F0F0FULL;
-	return ((int)((x * 0x0101010101010101ULL) >> 56));
+	x = x - ((x >> 1) & UINT64_C(0x5555555555555555));
+	x = (x & UINT64_C(0x3333333333333333)) +
+	    ((x >> 2) & UINT64_C(0x3333333333333333));
+	x = (x + (x >> 4)) & UINT64_C(0x0F0F0F0F0F0F0F0F);
+	return ((int)((x * UINT64_C(0x0101010101010101)) >> 56));
 }
 #define SM_POPCOUNT64(x) sm_swar_popcount64((uint64_t)(x))
 #endif
@@ -752,46 +767,42 @@ __sm_check_invariants(const struct sparsemap *map)
 	});
 }
 
-/**
- * @brief Calculates the vector size for a given byte value.
+/*
+ * Descriptor flag masks.
  *
- * This function uses a lookup table to determine the vector size associated
- * with a given byte value.
- *
- * Each entry in the lookup table represents a possible combination of 4 2-bit
- * values (00, 01, 10, 11).  The value at each index corresponds to the count
- * of "10" patterns in that 4-bit combination.  For example, lookup[10] is 2
- * because the binary representation of 10 (0000 1010) contains the "1010"
- * pattern twice.
- *
- * @param[in] b The byte value for which the vector size needs to be calculated.
- * @return The vector size associated with the given byte value.
- * @see scripts/gen_chunk_vector_size_table.py
+ * A sparse descriptor packs thirty-two 2-bit flags, flag i in bits
+ * [2i, 2i+1].  Splitting the word into the high bit (SM_DESC_HI_BITS)
+ * and the low bit (SM_DESC_LO_BITS) of every flag lets one popcount
+ * count all flags of a kind at once.  The bit that represents flag i
+ * in the masks below is the flag's high bit, 2i+1.
  */
-static size_t
-__sm_chunk_calc_vector_size(const uint8_t b)
+#define SM_DESC_HI_BITS UINT64_C(0xAAAAAAAAAAAAAAAA)
+#define SM_DESC_LO_BITS UINT64_C(0x5555555555555555)
+
+/**
+ * @brief Marks every SM_PAYLOAD_MIXED (2#10) flag of a sparse descriptor.
+ *
+ * @param[in] desc A chunk descriptor.
+ * @return A word with bit 2i+1 set exactly when flag i is MIXED; every
+ *         other bit is clear.
+ */
+static inline __sm_bitvec_t
+__sm_desc_mixed_mask(const __sm_bitvec_t desc)
 {
-	/* clang-format off */
-  static int lookup[] = {
-    0,  0,  1,  0,  0,  0,  1,  0,  1,  1,  2,  1,  0,  0,  1,  0,
-    0,  0,  1,  0,  0,  0,  1,  0,  1,  1,  2,  1,  0,  0,  1,  0,
-    1,  1,  2,  1,  1,  1,  2,  1,  2,  2,  3,  2,  1,  1,  2,  1,
-    0,  0,  1,  0,  0,  0,  1,  0,  1,  1,  2,  1,  0,  0,  1,  0,
-    0,  0,  1,  0,  0,  0,  1,  0,  1,  1,  2,  1,  0,  0,  1,  0,
-    0,  0,  1,  0,  0,  0,  1,  0,  1,  1,  2,  1,  0,  0,  1,  0,
-    1,  1,  2,  1,  1,  1,  2,  1,  2,  2,  3,  2,  1,  1,  2,  1,
-    0,  0,  1,  0,  0,  0,  1,  0,  1,  1,  2,  1,  0,  0,  1,  0,
-    1,  1,  2,  1,  1,  1,  2,  1,  2,  2,  3,  2,  1,  1,  2,  1,
-    1,  1,  2,  1,  1,  1,  2,  1,  2,  2,  3,  2,  1,  1,  2,  1,
-    2,  2,  3,  2,  2,  2,  3,  2,  3,  3,  4,  3,  2,  2,  3,  2,
-    1,  1,  2,  1,  1,  1,  2,  1,  2,  2,  3,  2,  1,  1,  2,  1,
-    0,  0,  1,  0,  0,  0,  1,  0,  1,  1,  2,  1,  0,  0,  1,  0,
-    0,  0,  1,  0,  0,  0,  1,  0,  1,  1,  2,  1,  0,  0,  1,  0,
-    1,  1,  2,  1,  1,  1,  2,  1,  2,  2,  3,  2,  1,  1,  2,  1,
-    0,  0,  1,  0,  0,  0,  1,  0,  1,  1,  2,  1,  0,  0,  1,  0
-  };
-	/* clang-format on */
-	return ((size_t)lookup[b]);
+	return ((desc & SM_DESC_HI_BITS) & ~((desc & SM_DESC_LO_BITS) << 1));
+}
+
+/**
+ * @brief Marks every SM_PAYLOAD_NONE (2#01) flag of a sparse descriptor.
+ *
+ * @param[in] desc A chunk descriptor.
+ * @return A word with bit 2i+1 set exactly when flag i is NONE; every
+ *         other bit is clear.
+ */
+static inline __sm_bitvec_t
+__sm_desc_none_mask(const __sm_bitvec_t desc)
+{
+	return (((desc & SM_DESC_LO_BITS) << 1) & ~(desc & SM_DESC_HI_BITS));
 }
 
 /**
@@ -833,43 +844,25 @@ __sm_desc_flag_byte(const __sm_bitvec_t desc, const size_t n)
 SM_ALWAYS_INLINE size_t
 __sm_chunk_get_position(const __sm_chunk_t *chunk, size_t bv)
 {
-	size_t position;
+	__sm_bitvec_t below;
 	/* Defense-in-depth: callers compute `bv` as `idx / SM_BITS_PER_VECTOR`
 	 * after subtracting the chunk's start offset; on a corrupt buffer
 	 * (sm_open of attacker-controlled bytes) the start offset can be
 	 * wildly wrong, making `bv` arbitrarily large.  Clamp to the
-	 * physical chunk capacity so the loop below never walks past the
-	 * 8-byte header word.  Returning 0 here causes the caller to read
+	 * physical chunk capacity so the mask shift below stays defined.
+	 * Returning 0 here causes the caller to read
 	 * chunk->m_data[1] which is also bounded by the chunk_size that
 	 * __sm_get_size_impl validated. */
-	if (bv >= SM_FLAGS_PER_INDEX) {
+	if (bv >= SM_FLAGS_PER_INDEX || bv == 0) {
 		return (0);
 	}
 
-	/* Handle 4 indices (1 byte) at a time. */
-	position = 0;
-
-	{
-		size_t i;
-		const __sm_bitvec_t desc = *chunk->m_data;
-		const size_t num_bytes =
-		    bv / ((size_t)SM_FLAGS_PER_INDEX_BYTE * SM_BITS_PER_VECTOR);
-		for (i = 0; i < num_bytes; i++) {
-			position += __sm_chunk_calc_vector_size(
-			    __sm_desc_flag_byte(desc, i));
-		}
-
-		bv -= num_bytes * SM_FLAGS_PER_INDEX_BYTE;
-		for (i = 0; i < bv; i++) {
-			const size_t flags =
-			    SM_CHUNK_GET_FLAGS(*chunk->m_data, i);
-			if (flags == SM_PAYLOAD_MIXED) {
-				position++;
-			}
-		}
-	}
-
-	return (position);
+	/* The payload word of flag bv follows one stored word per MIXED
+	 * flag below it, so count the MIXED flags in [0, bv).  bv < 32
+	 * here, so the mask shift is in [2, 64) and well defined. */
+	below = ~(__sm_bitvec_t)0 >> (SM_BITS_PER_VECTOR - 2 * bv);
+	return ((size_t)SM_POPCOUNT64(
+	    __sm_desc_mixed_mask(*chunk->m_data) & below));
 }
 
 /**
@@ -900,24 +893,9 @@ __sm_chunk_init(__sm_chunk_t *chunk, uint8_t *data)
 SM_ALWAYS_INLINE size_t
 __sm_chunk_get_capacity(const __sm_chunk_t *chunk)
 {
-	size_t i;
-	size_t capacity = SM_CHUNK_MAX_CAPACITY;
-	const __sm_bitvec_t desc = *chunk->m_data;
-
-	for (i = 0; i < sizeof(__sm_bitvec_t); i++) {
-		int j;
-		const uint8_t b = __sm_desc_flag_byte(desc, i);
-		if (!b || b == 0xff) {
-			continue;
-		}
-		for (j = 0; j < SM_FLAGS_PER_INDEX_BYTE; j++) {
-			const size_t flags = SM_CHUNK_GET_FLAGS(b, j);
-			if (flags == SM_PAYLOAD_NONE) {
-				capacity -= SM_BITS_PER_VECTOR;
-			}
-		}
-	}
-	return (capacity);
+	/* Every NONE flag removes one vector from the full capacity. */
+	return (SM_CHUNK_MAX_CAPACITY - SM_BITS_PER_VECTOR *
+	    (size_t)SM_POPCOUNT64(__sm_desc_none_mask(*chunk->m_data)));
 }
 
 /**
@@ -1018,7 +996,7 @@ __sm_chunk_is_empty(const __sm_chunk_t *chunk)
  * @brief Retrieves the size of the specified chunk.
  *
  * Computes the byte size of the chunk.  A chunk's size is the descriptor
- * word plus one payload word per MIXED vector (via a lookup table).  The
+ * word plus one payload word per MIXED vector (one masked popcount).  The
  * result is bounded (at most 8 bytes of descriptor plus 32 payload
  * words), so the pre-validate stride walk can never be driven to
  * over-read by a crafted descriptor.
@@ -1029,17 +1007,9 @@ __sm_chunk_is_empty(const __sm_chunk_t *chunk)
 SM_ALWAYS_INLINE size_t
 __sm_chunk_get_size(const __sm_chunk_t *chunk)
 {
-	size_t i;
-	/* At least one __sm_bitvec_t is required for the flags (m_data[0]) */
-	size_t size = sizeof(__sm_bitvec_t);
-	/* Use a lookup table for each byte of the flags */
-	const __sm_bitvec_t desc = *chunk->m_data;
-	for (i = 0; i < sizeof(__sm_bitvec_t); i++) {
-		size += sizeof(__sm_bitvec_t) *
-		    __sm_chunk_calc_vector_size(
-		        __sm_desc_flag_byte(desc, i));
-	}
-	return (size);
+	/* The descriptor word plus one payload word per MIXED flag. */
+	return (sizeof(__sm_bitvec_t) * ((size_t)1 +
+	    (size_t)SM_POPCOUNT64(__sm_desc_mixed_mask(*chunk->m_data))));
 }
 
 /**
@@ -1219,11 +1189,73 @@ __sm_chunk_set_bit(const __sm_chunk_t *chunk, const uint64_t idx, size_t *pos)
 }
 
 /**
+ * @brief Counts the set bits of a chunk.
+ *
+ * A chunk holds 64 bits per ONES flag plus the set bits of every stored
+ * MIXED payload word.  The payload words are contiguous after the
+ * descriptor, so the count needs no per-slot position lookup.
+ *
+ * @param[in] chunk The chunk to count; it must be valid (no data-bearing
+ *            slot past its payload words).
+ * @return The number of set bits in the chunk.
+ */
+static size_t
+__sm_chunk_popcount(const __sm_chunk_t *chunk)
+{
+	const __sm_bitvec_t desc = chunk->m_data[0];
+	size_t nmixed;
+	size_t count;
+	size_t i;
+
+	/* ONES (2#11) flags: both bits of the flag set. */
+	count = SM_BITS_PER_VECTOR * (size_t)SM_POPCOUNT64((desc &
+	    SM_DESC_HI_BITS) & ((desc & SM_DESC_LO_BITS) << 1));
+	nmixed = (size_t)SM_POPCOUNT64(__sm_desc_mixed_mask(desc));
+	for (i = 0; i < nmixed; i++) {
+		count += (size_t)SM_POPCOUNT64(chunk->m_data[1 + i]);
+	}
+	return (count);
+}
+
+/**
+ * @brief Returns the position of the n-th (0-based) set bit of a word.
+ *
+ * With BMI2, pdep deposits the single bit 1 << n onto the n-th set bit of
+ * @a w and tzcnt reads its position.  The portable form clears the @a n
+ * lowest set bits and counts the trailing zeros of what is left; it runs
+ * fewer than 64 iterations.
+ *
+ * NB: the caller guarantees n < popcount(w); the result is meaningless
+ * otherwise.
+ *
+ * @param[in] w The word to search.
+ * @param[in] n The 0-based rank of the set bit to find.
+ * @return The bit position, in [0, 64).
+ */
+static inline size_t
+__sm_word_select(__sm_bitvec_t w, size_t n)
+{
+	__sm_assert(n < (size_t)SM_POPCOUNT64(w));
+#if defined(SM_HAVE_PDEP64)
+	return ((size_t)SM_CTZ64(_pdep_u64(UINT64_C(1) << n, w)));
+#else
+	while (n > 0) {
+		w &= w - 1;
+		n--;
+	}
+	return ((size_t)SM_CTZ64(w));
+#endif
+}
+
+/**
  * @brief Selects the nth bit with the specified value from a chunk.
  *
  * This function scans a chunk of data to find the nth occurrence of a bit
  * with the specified value (true for 1, false for 0) after skipping offset
  * bits (of any value).
+ *
+ * The chunk is scanned over its whole 2048-bit window, slot by slot; the
+ * positions of a NONE slot count as unset.
  *
  * @param[in] chunk The chunk to scan for the bit.
  * @param[in] n The number of bits of value to count before returning.
@@ -1259,16 +1291,13 @@ __sm_chunk_select(const __sm_chunk_t *chunk, ssize_t n, ssize_t *offset,
 
 		for (j = 0; j < SM_FLAGS_PER_INDEX_BYTE; j++) {
 			const size_t flags = SM_CHUNK_GET_FLAGS(b, j);
-			if (flags == SM_PAYLOAD_NONE) {
-				/* No payload, but the slot still occupies its
-				 * index range: __sm_chunk_is_set addresses
-				 * flags positionally as flags[idx / 64], so
-				 * advance to keep the position we report in
-				 * step with membership (see sm_minimum). */
-				ret += SM_BITS_PER_VECTOR;
-				continue;
-			}
-			if (flags == SM_PAYLOAD_ZEROS) {
+			if (flags == SM_PAYLOAD_NONE ||
+			    flags == SM_PAYLOAD_ZEROS) {
+				/* Neither holds a set bit.  A NONE slot has no
+				 * payload but still occupies its index range:
+				 * __sm_chunk_is_set addresses flags positionally
+				 * as flags[idx / 64], so its 64 positions are
+				 * unset, exactly like a ZEROS slot's. */
 				if (value == true) {
 					ret += SM_BITS_PER_VECTOR;
 					continue;
@@ -1315,20 +1344,16 @@ __sm_chunk_select(const __sm_chunk_t *chunk, ssize_t n, ssize_t *offset,
 				const __sm_bitvec_t w = chunk->m_data[1 +
 				    __sm_chunk_get_position(chunk,
 				        (i * SM_FLAGS_PER_INDEX_BYTE) + (size_t)j)];
-				/* Use ctzll for fast bit extraction */
-				__sm_bitvec_t target_bits = value ? w : ~w;
-				__sm_bitvec_t remaining = target_bits;
-				while (remaining) {
-					int k = SM_CTZ64(remaining);
-					if (n == 0) {
-						*offset = -1;
-						return (ret + (size_t)k);
-					}
-					n--;
-					remaining &= remaining -
-					    1; /* clear lowest set bit */
+				const __sm_bitvec_t target_bits = value ? w : ~w;
+				const ssize_t pc = SM_POPCOUNT64(target_bits);
+				if (n >= pc) {
+					n -= pc;
+					ret += SM_BITS_PER_VECTOR;
+					continue;
 				}
-				ret += SM_BITS_PER_VECTOR;
+				*offset = -1;
+				return (ret +
+				    __sm_word_select(target_bits, (size_t)n));
 			}
 		}
 	}
@@ -8200,6 +8225,8 @@ sm_select(sm_t *map, uint64_t n, bool value)
 	size_t count;
 	uint8_t * p;
 	size_t i;
+	uint64_t pos = 0;    /* first position not yet counted */
+	bool at_end = false; /* a chunk reached 2^64 - 1 */
 	if (map == NULL) {
 		/* Empty map: no set bits; unset bits are the whole line, so
 		 * the n-th unset bit is n.  Matches the count == 0 path. */
@@ -8224,29 +8251,67 @@ sm_select(sm_t *map, uint64_t n, bool value)
 
 	p = __sm_get_chunk_data(map, 0);
 
-	for (i = 0; i < count; i++) {
+	/*
+	 * Walk the chunks, counting the matching positions of each one's
+	 * window and of the gap before it.  A chunk's window is its full
+	 * 2048 bits, NONE slots included (they are unset), and the next
+	 * start is at least 2048 further on.  Unset bits also fill every
+	 * gap between windows and the rest of the universe past the last
+	 * one.  A whole chunk is skipped by its popcount, so
+	 * __sm_chunk_select only runs on the chunk that holds the answer,
+	 * with an n below 2048 (n is 64-bit; its ssize_t parameter is not,
+	 * on ILP32).
+	 */
+	for (i = 0; i < count && !at_end; i++) {
 		__sm_chunk_t chunk;
-		ssize_t new_n;
-		size_t index;
+		size_t set;
+		size_t matching;
 		const __sm_idx_t start = __sm_load_idx((const uint8_t *)p);
-		/* Start of this chunk is greater than n meaning there are a set of 0s
-		 * before the first 1 sufficient to consume n. */
-		if (value == false && i == 0 && start > n) {
-			return (n);
-		}
+
 		p += SM_SIZEOF_OVERHEAD;
 		__sm_chunk_init(&chunk, p);
 
-		new_n = (ssize_t)n;
-		index = __sm_chunk_select(&chunk, (ssize_t)n, &new_n, value);
-		if (new_n == -1) {
+		if (value == false && start > pos) {
+			const uint64_t gap = start - pos;
+			if (n < gap) {
+				return (pos + n);
+			}
+			n -= gap;
+		}
+
+		set = __sm_chunk_popcount(&chunk);
+		if (value) {
+			matching = set;
+		} else {
+			matching = set >= SM_CHUNK_MAX_CAPACITY ?
+			    0 :
+			    (size_t)SM_CHUNK_MAX_CAPACITY - set;
+		}
+		if (n < (uint64_t)matching) {
+			ssize_t new_n = (ssize_t)n;
+			const size_t index = __sm_chunk_select(&chunk,
+			    (ssize_t)n, &new_n, value);
+			__sm_assert(new_n == -1);
+			if (new_n != -1) {
+				return (SM_IDX_MAX);
+			}
 			return (start + index);
 		}
-		n = (uint64_t)new_n;
+		n -= (uint64_t)matching;
 
+		if (UINT64_MAX - start < (uint64_t)SM_CHUNK_MAX_CAPACITY) {
+			at_end = true;
+		} else {
+			pos = start + SM_CHUNK_MAX_CAPACITY;
+		}
 		p += __sm_chunk_get_size(&chunk);
 	}
-	return (SM_IDX_MAX);
+	/* Past the last window every bit is unset.  Position SM_IDX_MAX
+	 * itself is the "not found" sentinel, not an answer. */
+	if (value || at_end || n >= SM_IDX_MAX - pos) {
+		return (SM_IDX_MAX);
+	}
+	return (pos + n);
 }
 
 static size_t
