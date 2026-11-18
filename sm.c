@@ -1191,6 +1191,23 @@ __sm_chunk_get_capacity(const __sm_chunk_t *chunk)
 	    (size_t)SM_POPCOUNT64(__sm_desc_none_mask(*chunk->m_data)));
 }
 
+/*
+ * The exclusive end of the index window a chunk starting at `start`
+ * owns, saturated at UINT64_MAX.  An RLE chunk owns its capacity.  A
+ * sparse chunk owns its whole aligned window [start, start + 2048) even
+ * when NONE slots reduce its capacity (sm_offset emits such chunks):
+ * the uncovered tail holds no members, but no other chunk may start
+ * there, so a lookup for an index in the tail must stop at this chunk.
+ * Its capacity still bounds which bits are members.
+ */
+static inline uint64_t
+__sm_chunk_window_end(const __sm_chunk_t *chunk, uint64_t start)
+{
+	return (__sm_end(start,
+	    __sm_chunk_is_rle(chunk) ? __sm_chunk_get_capacity(chunk) :
+	                               SM_CHUNK_MAX_CAPACITY));
+}
+
 /**
  * @brief Increases the capacity of a chunk to the specified value.
  *
@@ -2387,7 +2404,7 @@ __sm_get_chunk_offset(const sm_t *map, const uint64_t idx, sm_cursor_t *cur)
 		__sm_assert(s == __sm_get_chunk_aligned_offset(s));
 		next_off = (size_t)(p - base) +
 		    SM_SIZEOF_OVERHEAD + __sm_chunk_get_size(&chunk);
-		if (idx >= __sm_end(s, __sm_chunk_get_capacity(&chunk)) &&
+		if (idx >= __sm_chunk_window_end(&chunk, s) &&
 		    next_off < stream_end) {
 			prev2_off = prev_off;
 			prev_off = (size_t)(p - base);
