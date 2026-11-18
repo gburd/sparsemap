@@ -9983,8 +9983,10 @@ __sm_small_statistics(const sm_t *map, sm_stats_t *stats)
 		stats->chunks_sparse = 1;
 		stats->bits_in_sparse = card;
 	}
-	stats->bytes_per_set_bit =
-	    (double)__sm_small_chunk_bytes(map) / (double)card;
+	{
+		const size_t bytes = __sm_small_chunk_bytes(map);
+		stats->bytes_per_set_bit = (double)bytes / (double)card;
+	}
 }
 
 void
@@ -12190,9 +12192,11 @@ __sm_op_keep(sm_op_t op, bool in_a, bool in_b)
 		return (in_a && !in_b);
 	case SM_OP_XOR:
 		return (in_a != in_b);
-	default:
-		return (false);
 	}
+	/* An out-of-range op keeps nothing.  The fallback sits after the
+	 * switch, not in a default label, so a new enumerator without a
+	 * case draws a -Wswitch warning. */
+	return (false);
 }
 
 /* AND: leapfrog the two member streams.  Each round either returns or
@@ -12292,10 +12296,11 @@ sm_next_member_op(const sm_t *a, const sm_t *b, sm_op_t op, uint64_t prev_idx,
 		return (__sm_next_andnot(a, b, prev_idx, cur_a, cur_b));
 	case SM_OP_XOR:
 		return (__sm_next_xor(a, b, prev_idx, cur_a, cur_b));
-	default:
-		errno = EINVAL;
-		return (SM_IDX_MAX);
 	}
+	/* An out-of-range op (after the switch so -Wswitch still checks
+	 * the enum is covered). */
+	errno = EINVAL;
+	return (SM_IDX_MAX);
 }
 
 /*
@@ -12610,16 +12615,32 @@ __sm_ef_shape(uint64_t n, uint64_t max, uint32_t l, uint64_t *high_bits,
 	}
 	low_bits = n * l;
 	*high_bits = n + zeros;
-	if (*high_bits > (uint64_t)SIZE_MAX / 2 ||
-	    low_bits / 64 + 2 > (uint64_t)SIZE_MAX / 16) {
+	if (*high_bits > (uint64_t)SIZE_MAX / 2) {
 		return (false);
 	}
-	/* One spare word so the two-word read in __sm_ef_get_bits stays in
-	 * bounds at the end of low[]. */
-	*low_words = (size_t)(low_bits / 64) + 2;
-	*high_words = (size_t)((*high_bits + 63) / 64);
-	*s1 = (size_t)((n + SM_EF_SAMPLE - 1) / SM_EF_SAMPLE);
-	*s0 = (size_t)((zeros + SM_EF_SAMPLE - 1) / SM_EF_SAMPLE);
+	{
+		/* Word counts in 64 bits (none overflows: n <= 2^58, so
+		 * low_bits < 2^64 - 128, and zeros <= high_bits <= 2^63).
+		 * Their sum must fit in size_t as a count of words;
+		 * __sm_ef_alloc checks the byte size.  Comparing in uint64_t
+		 * against a size_t limit is exact on every width, and never a
+		 * constant test on LP64. */
+		const uint64_t lw = low_bits / 64 + 2;
+		const uint64_t hw = *high_bits / 64 + (*high_bits % 64 != 0);
+		const uint64_t c1 = (n + SM_EF_SAMPLE - 1) / SM_EF_SAMPLE;
+		const uint64_t c0 = (zeros + SM_EF_SAMPLE - 1) / SM_EF_SAMPLE;
+		const uint64_t words_max = (uint64_t)SIZE_MAX;
+		if (hw > words_max - lw || c1 > words_max - lw - hw ||
+		    c0 > words_max - lw - hw - c1) {
+			return (false);
+		}
+		/* One spare word so the two-word read in __sm_ef_get_bits
+		 * stays in bounds at the end of low[]. */
+		*low_words = (size_t)lw;
+		*high_words = (size_t)hw;
+		*s1 = (size_t)c1;
+		*s0 = (size_t)c0;
+	}
 	return (true);
 }
 
@@ -12739,7 +12760,9 @@ sm_freeze(const sm_t *map)
 	uint64_t max = 0;
 	__sm_ef_builder_t b;
 	if (map != NULL && !sm_is_empty(map)) {
-		n = sm_cardinality((sm_t *)map);
+		/* Count without sm_cardinality, which fills the cache through
+		 * the const map. */
+		__sm_run_pair_counts(map, NULL, &n, NULL, NULL, NULL);
 		max = sm_maximum(map);
 	}
 	b.f = __sm_ef_alloc(n, max, __sm_ef_low_bits(n, max));
