@@ -4,7 +4,7 @@
  *
  * For maps of every shape (empty, NULL, one member, small set, sparse with
  * gaps, clustered on chunk boundaries, RLE runs of up to a few million
- * bits, dense, the top of the 64-bit universe including UINT64_MAX), every
+ * bits, dense, the top of the 64-bit universe up to 2^64 - 2), every
  * query on the frozen copy equals the sm_t answer and a sorted-array
  * oracle: cardinality, contains, rank, select, next and prev at members,
  * neighbours, chunk boundaries, out-of-range indices and SM_IDX_MAX.  The
@@ -101,14 +101,14 @@ gen(int shape, uint64_t *v)
 		for (k = 0; k < 20000; k++)
 			v[n++] = rnd() % 30000;
 		break;
-	case 7: /* top of the universe, including UINT64_MAX */
+	case 7: /* top of the universe, up to the last member 2^64 - 2 */
 		v[n++] = 0;
 		for (k = 0; k < 1 + rnd() % 50; k++)
-			v[n++] = UINT64_MAX - rnd() % 5000;
-		v[n++] = UINT64_MAX;
+			v[n++] = UINT64_MAX - 1 - rnd() % 5000;
+		v[n++] = UINT64_MAX - 1;
 		break;
-	default: /* UINT64_MAX alone: u = 2^64, L clamps to 63 */
-		v[n++] = UINT64_MAX;
+	default: /* the last member alone: u = 2^64 - 1, L = 63 */
+		v[n++] = UINT64_MAX - 1;
 		break;
 	}
 	return (uniq(v, n));

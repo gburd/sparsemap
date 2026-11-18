@@ -14,13 +14,26 @@
  * chunk at an unaligned start that sm_validate rejects and that
  * sm_next_member skips.
  *
+ * Index 2^64 - 1 is SM_IDX_MAX, the "not found" value, and is not a
+ * member (5.9.0).  Through 5.8.5 sm_add stored it but returned the
+ * failure sentinel with errno 0, so sm_add_grow grew the buffer on every
+ * call, sm_add_many returned false with the bit set, iteration could not
+ * report it, and a run ending at it had an exclusive end that wrapped to
+ * 0 and was dropped (W2).
+ *
  * Checks, each against a sorted-array oracle:
  *   1. the minimized regression cases from the 5.8.5 investigation;
- *   2. a randomized differential over maps whose members lie in the top
+ *   2. SM_IDX_MAX: every adder rejects it with EINVAL and changes
+ *      nothing, the bulk builders reject an input holding it, sm_remove
+ *      and sm_contains treat it as absent, sm_validate rejects a buffer
+ *      that sets it, sm_frozen_deserialize rejects a stream claiming it,
+ *      and members up to 2^64 - 2 behave;
+ *   3. a randomized differential over maps whose members lie in the top
  *      two chunks (and a few low ones), for every set operation, its
  *      in-place and _cardinality variants, and the predicates, with
  *      sm_validate and a full read-back of every result.
  */
+#define SM_EXPOSE_STRUCT 1
 #include <sm.h>
 
 #include <errno.h>
@@ -482,7 +495,258 @@ regressions_rle(void)
 	}
 }
 
-/* ---- 2. randomized differential in the top two chunks --------------- */
+/* ---- 2. SM_IDX_MAX is not a member --------------------------------- */
+
+/* A deep copy of m's bytes, for "unchanged" checks. */
+static int
+bytes_equal(sm_t *m, const uint8_t *was, size_t len)
+{
+	return (sm_get_size(m) == len && memcmp(sm_get_data(m), was, len) == 0);
+}
+
+static void
+idx_max_adders(void)
+{
+	const uint64_t base[] = { 5, T(1) };
+	uint8_t was[256];
+	size_t len, cap;
+	sm_t *m = by_add(base, 2);
+	sm_cursor_t c = SM_CURSOR_INIT;
+	int k;
+
+	CHECK(same(m, base, 2, "base") == 0, "base map");
+	len = sm_get_size(m);
+	memcpy(was, sm_get_data(m), len);
+	cap = sm_get_capacity(m);
+	errno = 0;
+	CHECK(sm_add(m, UINT64_MAX) == SM_IDX_MAX && errno == EINVAL,
+	    "sm_add(SM_IDX_MAX)");
+	errno = 0;
+	CHECK(sm_assign(m, UINT64_MAX, true) == SM_IDX_MAX && errno == EINVAL,
+	    "sm_assign(SM_IDX_MAX, true)");
+	/* 15: sm_add_grow must not take EINVAL for ENOSPC and grow. */
+	for (k = 0; k < 4; k++) {
+		errno = 0;
+		CHECK(sm_add_grow(&m, UINT64_MAX) == SM_IDX_MAX &&
+		        errno == EINVAL,
+		    "sm_add_grow(SM_IDX_MAX)");
+		errno = 0;
+		CHECK(sm_add_grow_cursor(&m, UINT64_MAX, &c) == SM_IDX_MAX &&
+		        errno == EINVAL,
+		    "sm_add_grow_cursor(SM_IDX_MAX)");
+	}
+	CHECK(sm_get_capacity(m) == cap, "capacity grew to %zu from %zu",
+	    sm_get_capacity(m), cap);
+	CHECK(bytes_equal(m, was, len), "map changed by a rejected add");
+	/* sm_remove and sm_contains: absent. */
+	errno = 0;
+	CHECK(sm_remove(m, UINT64_MAX) == SM_IDX_MAX && errno == EINVAL,
+	    "sm_remove(SM_IDX_MAX)");
+	CHECK(!sm_contains(m, UINT64_MAX, NULL), "contains(SM_IDX_MAX)");
+	CHECK(bytes_equal(m, was, len), "map changed by sm_remove");
+	CHECK(same(m, base, 2, "after rejects") == 0, "base after rejects");
+	sm_free(m);
+
+	errno = 0;
+	CHECK(sm_create_singleton(UINT64_MAX) == NULL && errno == EINVAL,
+	    "sm_create_singleton(SM_IDX_MAX)");
+	m = sm_create_singleton(T(1));
+	CHECK(same(m, base + 1, 1, "singleton 2^64-2") == 0,
+	    "singleton(2^64 - 2)");
+	sm_free(m);
+}
+
+/* 4, 5, 6: the bulk builders reject an input holding SM_IDX_MAX whole,
+ * and the same inputs without it keep every member. */
+static void
+idx_max_bulk(void)
+{
+	static uint64_t run[3000];
+	const uint64_t v4[] = { 0, T(5), UINT64_MAX };
+	const uint64_t v5[] = { T(1), UINT64_MAX };
+	const uint64_t base[] = { 7, T(1) };
+	const uint64_t w6[] = { 5, 6, 7, 8, 9, T(1) };
+	const uint64_t pair[] = { 5, 6 };
+	uint8_t was[256];
+	size_t len, n;
+	sm_t *m;
+
+	errno = 0;
+	CHECK(sm_create_from_array(v4, 3) == NULL && errno == EINVAL,
+	    "from_array with SM_IDX_MAX");
+	m = sm_create_from_array(v4, 2);
+	CHECK(same(m, v4, 2, "from_array 4") == 0, "case 4 from_array");
+	sm_free(m);
+	m = by_add(base, 2);
+	len = sm_get_size(m);
+	memcpy(was, sm_get_data(m), len);
+	errno = 0;
+	CHECK(!sm_add_many_grow(&m, v4, 3) && errno == EINVAL,
+	    "add_many_grow with SM_IDX_MAX");
+	errno = 0;
+	CHECK(!sm_add_many(m, v5, 2) && errno == EINVAL,
+	    "add_many with SM_IDX_MAX");
+	errno = 0;
+	CHECK(!sm_add_many(m, v5 + 1, 1) && errno == EINVAL,
+	    "add_many of SM_IDX_MAX alone");
+	CHECK(bytes_equal(m, was, len), "map changed by a rejected bulk add");
+	sm_free(m);
+
+	/* 5: [2^64 - 3000, 2^64 - 1) through sm_add_many_grow. */
+	n = fill(run, UINT64_MAX - 3000, UINT64_MAX);
+	m = sm_create(256);
+	CHECK(m != NULL && sm_add_many_grow(&m, run, n), "case 5 build");
+	CHECK(same(m, run, n, "add_many_grow top run") == 0, "case 5");
+	sm_free(m);
+	m = sm_create_from_array(v5, 1);
+	CHECK(same(m, v5, 1, "from_array 2^64-2") == 0, "case 5 single");
+	sm_free(m);
+
+	/* 6: the last member survives sm_add_range and sm_add_many. */
+	m = by_add(base + 1, 1);
+	CHECK(m != NULL && sm_add_range(m, 5, 10), "case 6 add_range");
+	CHECK(same(m, w6, 6, "add_range keeps top") == 0, "case 6 range");
+	sm_free(m);
+	m = by_add(base + 1, 1);
+	CHECK(m != NULL && sm_add_many(m, pair, 2), "case 6 add_many");
+	{
+		const uint64_t w[] = { 5, 6, T(1) };
+
+		CHECK(same(m, w, 3, "add_many keeps top") == 0, "case 6 many");
+	}
+	sm_free(m);
+	/* sm_add_range reaching the last member, sm_flip_range and
+	 * sm_remove_range up to UINT64_MAX. */
+	n = fill(run, T(99), UINT64_MAX);
+	m = by_range(T(99), UINT64_MAX);
+	CHECK(same(m, run, n, "add_range to the top") == 0, "range to top");
+	CHECK(sm_remove_range(m, T(9), UINT64_MAX), "remove_range to top");
+	CHECK(same(m, run, n - 9, "remove_range to top") == 0,
+	    "remove_range result");
+	CHECK(sm_flip_range(m, T(9), UINT64_MAX), "flip_range to top");
+	CHECK(same(m, run, n, "flip_range to top") == 0, "flip_range result");
+	sm_free(m);
+}
+
+/* 13 and the comparisons, with the last member in place of UINT64_MAX. */
+static void
+idx_max_compare(void)
+{
+	const uint64_t top[] = { T(1) }, two[] = { T(2), T(1) };
+	sm_t *M = by_add(top, 1), *N = by_add(two, 2), *L = by_add(two, 1);
+
+	CHECK(sm_union_cardinality(M, M) == 1, "union_card");
+	CHECK(sm_intersection_cardinality(M, M) == 1, "inter_card");
+	CHECK(sm_xor_cardinality(M, M) == 0, "xor_card");
+	CHECK(sm_jaccard_index(M, M) == 1.0, "jaccard");
+	CHECK(sm_compare(N, L) > 0 && sm_compare(L, N) < 0, "compare");
+	CHECK(sm_subset_compare(M, N) == SM_REL_SUBSET_A, "subset_compare");
+	CHECK(sm_is_subset(M, N) && !sm_is_subset(N, M), "is_subset");
+	CHECK(sm_overlap(M, N), "overlap");
+	CHECK(sm_membership(M) == SM_SINGLETON, "membership");
+	CHECK(sm_singleton_member(M) == T(1), "singleton_member");
+	CHECK(sm_pop_last(N) == T(1) && sm_pop_first(N) == T(2) &&
+	        sm_is_empty(N),
+	    "pop");
+	sm_free(M);
+	sm_free(N);
+	sm_free(L);
+}
+
+/* sm_validate (and the decoders) reject a buffer with bit 2^64 - 1 set;
+ * sm_frozen_deserialize rejects a stream whose maximum is SM_IDX_MAX;
+ * sm_offset onto SM_IDX_MAX is ERANGE. */
+static void
+idx_max_decoders(void)
+{
+	const uint64_t top[] = { T(1) };
+	sm_t *m = by_add(top, 1), *o;
+	sm_frozen_t *f;
+	uint8_t *buf, *data;
+	size_t len, i;
+	uint64_t mx;
+
+	CHECK(m != NULL && sm_validate(m), "map with 2^64 - 2");
+	/* Set bit 2^64 - 1 by hand: the payload word of the last slot. */
+	data = sm_get_data(m);
+	len = sm_get_size(m);
+	CHECK(len == 32, "one sparse chunk with one payload word (%zu)", len);
+	data[len - 1] |= 0x80;
+	CHECK(!sm_validate(m), "sm_validate accepts bit 2^64 - 1");
+	o = sm_open_copy(data, len, 0);
+	CHECK(o == NULL || sm_is_empty(o), "sm_open_copy accepts it");
+	sm_free(o);
+	{
+		sm_t w;
+		uint8_t copy[64];
+
+		memcpy(copy, data, len);
+		memset(&w, 0, sizeof(w));
+		sm_open(&w, copy, sizeof(copy));
+		CHECK(sm_is_empty(&w), "sm_open accepts it");
+	}
+	buf = malloc(16 + len);
+	CHECK(buf != NULL, "alloc");
+	if (buf != NULL) {
+		const uint32_t magic = 0x30316d73u;
+		const uint64_t card = 2;
+
+		memset(buf, 0, 16);
+		memcpy(buf, &magic, 4);
+		buf[4] = 2;
+		buf[5] = 1;
+		memcpy(buf + 8, &card, 8);
+		memcpy(buf + 16, data, len);
+		o = sm_deserialize(buf, 16 + len);
+		CHECK(o == NULL, "sm_deserialize accepts it");
+		sm_free(o);
+		free(buf);
+	}
+	data[len - 1] &= 0x7f;
+	CHECK(sm_validate(m), "restored");
+
+	/* A frozen stream claiming maximum SM_IDX_MAX. */
+	f = sm_freeze(m);
+	CHECK(f != NULL && sm_frozen_cardinality(f) == 1, "freeze");
+	len = sm_frozen_serialized_size(f);
+	buf = malloc(len);
+	CHECK(buf != NULL && sm_frozen_serialize(f, buf, len) == len,
+	    "frozen serialize");
+	sm_frozen_free(f);
+	if (buf != NULL) {
+		f = sm_frozen_deserialize(buf, len);
+		CHECK(f != NULL && sm_frozen_select(f, 0) == T(1),
+		    "frozen round trip");
+		sm_frozen_free(f);
+		mx = UINT64_MAX;
+		for (i = 0; i < 8; i++)
+			buf[24 + i] = (uint8_t)(mx >> (8 * i));
+		f = sm_frozen_deserialize(buf, len);
+		CHECK(f == NULL, "frozen stream with max SM_IDX_MAX accepted");
+		sm_frozen_free(f);
+		free(buf);
+	}
+
+	/* sm_offset: onto SM_IDX_MAX or past it is ERANGE; to 2^64 - 2 is
+	 * fine. */
+	{
+		const uint64_t v[] = { 5, T(11) };
+		const uint64_t w[] = { 15, T(1) };
+
+		sm_free(m);
+		m = by_add(v, 2);
+		errno = 0;
+		o = sm_offset(m, 11);
+		CHECK(o == NULL && errno == ERANGE, "offset onto SM_IDX_MAX");
+		sm_free(o);
+		o = sm_offset(m, 10);
+		CHECK(same(o, w, 2, "offset to 2^64 - 2") == 0, "offset +10");
+		sm_free(o);
+	}
+	sm_free(m);
+}
+
+/* ---- 3. randomized differential in the top two chunks --------------- */
 
 /* Up to MAXN / 2 members: a few low, some in the chunk below the top,
  * some in the top chunk (below SM_IDX_MAX), sometimes short runs. */
@@ -622,6 +886,10 @@ main(void)
 {
 	regressions_setops();
 	regressions_rle();
+	idx_max_adders();
+	idx_max_bulk();
+	idx_max_compare();
+	idx_max_decoders();
 	differential(3000);
 	if (failures != 0) {
 		fprintf(stderr, "test_top_universe: %d failure(s)\n", failures);

@@ -5020,7 +5020,7 @@ sm_contains(const sm_t *map, uint64_t idx, sm_cursor_t *cur)
 	 * cheap insurance for consumers that pass the result of
 	 * sm_intersection / sm_difference / sm_xor unchecked, which
 	 * legitimately return NULL when the result is empty. */
-	if (map == NULL) {
+	if (map == NULL || idx == SM_IDX_MAX) {
 		return (false);
 	}
 	if (__sm_is_small(map)) {
@@ -5266,6 +5266,12 @@ SM_HOT uint64_t
 sm_remove(sm_t *map, const uint64_t idx)
 {
 	if (map == NULL) {
+		errno = EINVAL;
+		return (SM_IDX_MAX);
+	}
+	/* SM_IDX_MAX is never a member: nothing to clear, but the return
+	 * value is the failure sentinel, so say why. */
+	if (idx == SM_IDX_MAX) {
 		errno = EINVAL;
 		return (SM_IDX_MAX);
 	}
@@ -5710,6 +5716,11 @@ __sm_add_dispatch(sm_t *map, uint64_t idx, sm_cursor_t *cur)
 	    (map->m_data_used < SM_SIZEOF_OVERHEAD ||
 	        __sm_get_chunk_count(map) == 0);
 
+	/* SM_IDX_MAX is the "not found" sentinel, not a member. */
+	if (idx == SM_IDX_MAX) {
+		errno = EINVAL;
+		return (SM_IDX_MAX);
+	}
 	__sm_card_invalidate(map);
 
 	if ((small || empty_chunk) && idx < SM_SMALL_MAX_BITS) {
@@ -5820,7 +5831,7 @@ sm_add_grow(sm_t **mapp, uint64_t idx)
 		return (SM_IDX_MAX);
 	m = *mapp;
 	rc = sm_add(m, idx);
-	if (rc != SM_IDX_MAX)
+	if (rc != SM_IDX_MAX || errno != ENOSPC)
 		return (rc);
 
 	/* ENOSPC: grow geometrically with a 4 KiB floor. */
@@ -5845,7 +5856,7 @@ sm_add_grow_cursor(sm_t **mapp, uint64_t idx, sm_cursor_t *cur)
 		return (SM_IDX_MAX);
 	m = *mapp;
 	rc = __sm_add_c(m, idx, cur);
-	if (rc != SM_IDX_MAX)
+	if (rc != SM_IDX_MAX || errno != ENOSPC)
 		return (rc);
 
 	/* ENOSPC: grow geometrically with a 4 KiB floor. */
@@ -7284,10 +7295,12 @@ sm_offset(const sm_t *map, ssize_t offset)
 		return (NULL);
 	}
 
-	/* Check for overflow: if shifting right and max bit would overflow */
+	/* A shift that moves the top member onto SM_IDX_MAX or past it
+	 * leaves the member universe [0, 2^64 - 1): ERANGE, as for any
+	 * other out-of-range shift. */
 	if (offset > 0) {
 		uint64_t max = sm_maximum(map);
-		if (max > SM_IDX_MAX - (uint64_t)offset) {
+		if (max >= SM_IDX_MAX - (uint64_t)offset) {
 			errno = ERANGE;
 			return (NULL);
 		}
@@ -8690,6 +8703,24 @@ __sm_union_runs(const sm_t *map, const uint64_t *run_lo,
  * result into *mapp with __sm_replace_buffer (which grows, demotes to
  * small-set mode when the result fits, and frees the scratch buffer).
  */
+/*
+ * True when arr[0..n) holds SM_IDX_MAX, which is not a member.  The bulk
+ * builders reject such an input whole, before touching the map, with
+ * errno = EINVAL.
+ */
+static bool
+__sm_holds_idx_max(const uint64_t *arr, size_t n)
+{
+	size_t i;
+	for (i = 0; i < n; i++) {
+		if (arr[i] == SM_IDX_MAX) {
+			errno = EINVAL;
+			return (true);
+		}
+	}
+	return (false);
+}
+
 static bool
 __sm_add_many_core(sm_t **mapp, const uint64_t *arr, size_t n, bool may_grow)
 {
@@ -8751,6 +8782,8 @@ sm_add_many(sm_t *map, const uint64_t *arr, size_t n)
 		return (false);
 	if (n == 0)
 		return (true);
+	if (__sm_holds_idx_max(arr, n))
+		return (false);
 	if (n == 1)
 		return (sm_add(map, arr[0]) != SM_IDX_MAX);
 
@@ -8787,6 +8820,8 @@ sm_add_many_grow(sm_t **map, const uint64_t *arr, size_t n)
 		return (false);
 	if (n == 0)
 		return (true);
+	if (__sm_holds_idx_max(arr, n))
+		return (false);
 	if (n == 1)
 		return (sm_add_grow(map, arr[0]) != SM_IDX_MAX);
 	return (__sm_add_many_core(map, arr, n, true));
@@ -9229,7 +9264,12 @@ sm_xor_cardinality(const sm_t *a, const sm_t *b)
 sm_t *
 sm_create_singleton(uint64_t idx)
 {
-	sm_t *m = sm_create(1024);
+	sm_t *m;
+	if (idx == SM_IDX_MAX) {
+		errno = EINVAL;
+		return (NULL);
+	}
+	m = sm_create(1024);
 	if (m && sm_add(m, idx) == SM_IDX_MAX) {
 		sm_free(m);
 		return (NULL);
@@ -9267,7 +9307,10 @@ sm_create_from_range(uint64_t lo, uint64_t hi)
 sm_t *
 sm_create_from_array(const uint64_t *arr, size_t n)
 {
-	sm_t *m = sm_create(1024);
+	sm_t *m;
+	if ((arr == NULL && n > 0) || __sm_holds_idx_max(arr, n))
+		return (NULL);
+	m = sm_create(1024);
 	if (m == NULL)
 		return (NULL);
 	if (!sm_add_many_grow(&m, arr, n)) {
@@ -9607,6 +9650,7 @@ sm_validate(const sm_t *map)
 	uint8_t *end;
 	__sm_idx_t prev_start = 0;
 	uint64_t prev_end = 0; /* start + capacity of the previous chunk */
+	bool prev_top = false; /* the previous chunk reached 2^64 */
 	bool first = true;
 	size_t i;
 	if (map == NULL)
@@ -9723,15 +9767,24 @@ sm_validate(const sm_t *map)
 		if (chunk_end != 0 && chunk_end < start) {
 			return (false);
 		}
+		/* (g) bit 2^64 - 1 is SM_IDX_MAX, not a member, so no chunk
+		 * may set it: the writers never do, and every reader assumes
+		 * it.  Only a chunk that reaches 2^64 can hold it, as its
+		 * last bit. */
+		if (chunk_end == 0 && capacity > 0 &&
+		    __sm_chunk_is_set(&chunk, capacity - 1)) {
+			return (false);
+		}
 		/* (d) [start, start + capacity) must not overlap the span of
-		 * the preceding chunk.  prev_end == 0 means the previous chunk
-		 * reached 2^64, so every later start lies inside it. */
-		if (!first && (prev_end == 0 || start < prev_end)) {
+		 * the preceding chunk.  If the previous chunk reached 2^64,
+		 * every later start lies inside it. */
+		if (!first && (prev_top || start < prev_end)) {
 			return (false);
 		}
 		p += SM_SIZEOF_OVERHEAD + chunk_size;
 		prev_start = start;
 		prev_end = chunk_end;
+		prev_top = chunk_end == 0 && capacity > 0;
 		first = false;
 	}
 	/* (e) the stored chunk count must match the walk exactly: the walk
@@ -11904,7 +11957,7 @@ __sm_chunk_next_absent(const __sm_chunk_t *chunk, uint64_t start,
 
 /*
  * The first index >= x that is NOT a member of `map`, or SM_IDX_MAX if
- * every index from x to UINT64_MAX is a member.  The walk locates x's
+ * every index from x to the last member index, 2^64 - 2, is a member.  The walk locates x's
  * chunk through __sm_get_chunk_offset (so `cur` accelerates ascending
  * calls exactly as it does for sm_contains), then follows the run of
  * set bits across abutting chunks.  Cost is O(chunks walked), never
@@ -12125,26 +12178,6 @@ __sm_scan_out_run(__sm_scan_out_t *o, uint64_t lo, uint64_t hi)
 	}
 }
 
-/*
- * __sm_run_next with the top of the universe made explicit.  A run that
- * reaches 2^64 has an exclusive end that wraps below its start; report
- * it as ending at UINT64_MAX and set *top, so the caller handles the
- * index UINT64_MAX itself.  Only a map's last run can do this.
- */
-static bool
-__sm_run_next_top(__sm_run_iter_t *it, uint64_t *lo, uint64_t *hi,
-    bool *top)
-{
-	if (!__sm_run_next(it, lo, hi)) {
-		return (false);
-	}
-	if (*hi < *lo) {
-		*hi = UINT64_MAX;
-		*top = true;
-	}
-	return (true);
-}
-
 void
 sm_scan_op(const sm_t *a, const sm_t *b, sm_op_t op,
     void (*fn)(uint64_t[], size_t, void *), size_t skip, void *aux)
@@ -12156,7 +12189,6 @@ sm_scan_op(const sm_t *a, const sm_t *b, sm_op_t op,
 	bool have_a, have_b;
 	uint64_t pos = 0;
 	bool have_pos = false;
-	bool top_a = false, top_b = false;
 	if (fn == NULL || op > SM_OP_XOR) {
 		errno = EINVAL;
 		return;
@@ -12178,14 +12210,13 @@ sm_scan_op(const sm_t *a, const sm_t *b, sm_op_t op,
 	/*
 	 * The interval sweep sm_xor uses: walk both maps run by run, split
 	 * the line at every run edge, and keep each segment [pos, next) whose
-	 * membership (in a, in b) satisfies op.  Run ends are exclusive, so
-	 * UINT64_MAX itself is tracked apart (see __sm_run_next_top) and
-	 * delivered last.
+	 * membership (in a, in b) satisfies op.  Run ends are exclusive and
+	 * never wrap: the last member is at most 2^64 - 2.
 	 */
 	__sm_run_iter_init(ia, a);
 	__sm_run_iter_init(ib, b);
-	have_a = __sm_run_next_top(ia, &alo, &ahi, &top_a);
-	have_b = __sm_run_next_top(ib, &blo, &bhi, &top_b);
+	have_a = __sm_run_next(ia, &alo, &ahi);
+	have_b = __sm_run_next(ib, &blo, &bhi);
 	while (have_a || have_b) {
 		uint64_t lo = have_a ? alo : blo;
 		uint64_t next = UINT64_MAX;
@@ -12216,12 +12247,9 @@ sm_scan_op(const sm_t *a, const sm_t *b, sm_op_t op,
 		}
 		pos = next;
 		if (have_a && pos >= ahi)
-			have_a = __sm_run_next_top(ia, &alo, &ahi, &top_a);
+			have_a = __sm_run_next(ia, &alo, &ahi);
 		if (have_b && pos >= bhi)
-			have_b = __sm_run_next_top(ib, &blo, &bhi, &top_b);
-	}
-	if (__sm_op_keep(op, top_a, top_b)) {
-		__sm_scan_out_index(&out, UINT64_MAX);
+			have_b = __sm_run_next(ib, &blo, &bhi);
 	}
 	if (out.n > 0) {
 		fn(out.buf, out.n, aux);
@@ -12824,8 +12852,10 @@ sm_frozen_deserialize(const uint8_t *in, size_t n)
 	l = (uint32_t)(ver >> 32);
 	/* The low-bit width is a function of n and max; any other value is
 	 * not something sm_freeze writes. */
+	/* max == SM_IDX_MAX would be a member that is not one. */
 	if ((ver & UINT64_C(0xFFFFFFFF)) != SM_EF_VERSION ||
-	    l != __sm_ef_low_bits(count, max) || (count == 0 && max != 0)) {
+	    max == SM_IDX_MAX || l != __sm_ef_low_bits(count, max) ||
+	    (count == 0 && max != 0)) {
 		return (NULL);
 	}
 	if (!__sm_ef_shape(count, max, l, &high_bits, &lw, &hw, &s1, &s0) ||

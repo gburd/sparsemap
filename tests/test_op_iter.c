@@ -477,8 +477,9 @@ long_runs(void)
 	return (0);
 }
 
-/* UINT64_MAX is a valid member: sm_scan_op delivers it, and the sentinel
- * makes sm_next_member_op report "none" for it, like sm_next_member. */
+/* The last member, 2^64 - 2, in both maps or in one: sm_scan_op and
+ * sm_next_member_op report it like any other.  UINT64_MAX is SM_IDX_MAX
+ * and cannot be added. */
 static int
 top_of_universe(void)
 {
@@ -487,9 +488,12 @@ top_of_universe(void)
 
 	if (a == NULL || b == NULL)
 		return (1);
-	sm_add_grow(&a, UINT64_MAX);
+	errno = 0;
+	if (sm_add_grow(&a, UINT64_MAX) != SM_IDX_MAX || errno != EINVAL)
+		return (1);
 	sm_add_grow(&a, UINT64_MAX - 1);
-	sm_add_grow(&b, UINT64_MAX - 1);
+	sm_add_grow(&a, UINT64_MAX - 2);
+	sm_add_grow(&b, UINT64_MAX - 2);
 	sm_scan_op(a, b, SM_OP_XOR, count_fn, 0, &n);
 	if (n != 1)
 		return (1);
@@ -498,6 +502,9 @@ top_of_universe(void)
 	if (n != 2)
 		return (1);
 	if (sm_next_member_op(a, b, SM_OP_AND, SM_IDX_MAX, NULL, NULL) !=
+	    UINT64_MAX - 2)
+		return (1);
+	if (sm_next_member_op(a, b, SM_OP_XOR, UINT64_MAX - 2, NULL, NULL) !=
 	    UINT64_MAX - 1)
 		return (1);
 	errno = 0;

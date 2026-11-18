@@ -111,8 +111,8 @@ make(int shape)
 		break;
 	case 5: /* top of the 64-bit universe */
 		sm_add_grow(&m, 3);
+		sm_add_grow(&m, UINT64_MAX - 2);
 		sm_add_grow(&m, UINT64_MAX - 1);
-		sm_add_grow(&m, UINT64_MAX);
 		break;
 	default:
 		sm_free(m);
