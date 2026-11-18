@@ -12057,34 +12057,6 @@ sm_span(sm_t *map, uint64_t idx, size_t len, bool value)
  * ------------------------------------------------------------------- */
 
 /*
- * The first index >= x that is NOT a member of a small-set map.  Bits
- * past the last stored word are absent.  Returns SM_IDX_MAX only when
- * every index from x up is a member, which a small map cannot have, so
- * the result is always below SM_SMALL_MAX_BITS + 1.
- */
-static uint64_t
-__sm_small_next_absent(const sm_t *map, uint64_t x)
-{
-	const __sm_bitvec_unaligned_t *w = __sm_small_words(map);
-	const size_t n = __sm_small_nwords(map);
-	size_t i = (size_t)(x / 64);
-	uint64_t zeros;
-	if (x >= (uint64_t)n * 64) {
-		return (x);
-	}
-	zeros = ~(uint64_t)w[i] & (~(uint64_t)0 << (x % 64));
-	for (;;) {
-		if (zeros != 0) {
-			return ((uint64_t)i * 64 + (uint64_t)SM_CTZ64(zeros));
-		}
-		if (++i >= n) {
-			return ((uint64_t)n * 64);
-		}
-		zeros = ~(uint64_t)w[i];
-	}
-}
-
-/*
  * The first index >= x that is NOT a member of the chunk at `chunk`
  * (starting at `start`), or start + capacity (saturated, see __sm_end)
  * when every bit from x to the chunk's end is set.  x must lie in [start, start + capacity).
@@ -12143,7 +12115,7 @@ __sm_next_absent(const sm_t *map, uint64_t x, sm_cursor_t *cur)
 		return (x);
 	}
 	if (__sm_is_small(map)) {
-		return (__sm_small_next_absent(map, x));
+		return (__sm_small_next(map, x, false));
 	}
 	off = __sm_get_chunk_offset(map, x, cur);
 	if (off < 0) {
@@ -12511,16 +12483,6 @@ __sm_ef_set_bits(uint64_t *a, uint64_t pos, uint32_t width, uint64_t v)
 	}
 }
 
-/* Position of the r-th (0-based) set bit of w; w has more than r. */
-static unsigned
-__sm_ef_select_in_word(uint64_t w, unsigned r)
-{
-	while (r-- > 0) {
-		w &= w - 1;
-	}
-	return ((unsigned)SM_CTZ64(w));
-}
-
 /*
  * Position in high[] of the k-th one (ones == true) or zero, or
  * f->high_bits when there is none.  Starts at the sample for k and scans
@@ -12548,7 +12510,7 @@ __sm_ef_select(const sm_frozen_t *f, uint64_t k, bool ones)
 		const uint64_t c = (uint64_t)SM_POPCOUNT64(word);
 		if (rem < c) {
 			pos = (uint64_t)w * 64 +
-			    __sm_ef_select_in_word(word, (unsigned)rem);
+			    (uint64_t)__sm_word_select(word, (size_t)rem);
 			return (pos < f->high_bits ? pos : f->high_bits);
 		}
 		rem -= c;
@@ -13636,12 +13598,7 @@ __sm_loc_select1(const sm_locator_t *loc, uint64_t k)
 static uint64_t
 __sm_loc_word_select0(uint64_t from, __sm_bitvec_t w, uint64_t rem)
 {
-	__sm_bitvec_t z = ~w;
-	while (rem > 0) {
-		z &= z - 1;
-		rem--;
-	}
-	return (from + (uint64_t)SM_CTZ64(z));
+	return (from + (uint64_t)__sm_word_select(~w, (size_t)rem));
 }
 
 /* The rem-th unset position at or after s + n, where every position
